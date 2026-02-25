@@ -344,11 +344,51 @@ class Tap(Batcher, Component, InstructionRegistry):
 class Chain(Component):
     """JTAG Chain. Holds TAPs and manages chain geometry."""
 
+    irlen_db = Db("IDCODE irlen")
+
     def __init__(self, interface, name="chain"):
         super().__init__(name)
         self._interface = interface
         self.total_irlen = 0
         self.total_drlen = 0
+
+    async def discover(self, max_devices=8):
+        """Discover JTAG chain by reading IDCODEs after TAP reset.
+
+        Reads IDCODEs from the DR chain and looks up IR lengths
+        via Chain.irlen_db. Creates and adds TAP objects.
+
+        Raises NoMatch if an IDCODE has no registered IR length.
+        """
+        # Reset all TAPs
+        self._interface.post(Reset())
+        # Enter Run-Test/Idle
+        self._interface.post(Run(1))
+        # Capture DR (all devices have IDCODE loaded after reset)
+        self._interface.post(CaptureDr())
+        # Shift zeros through, reading IDCODEs
+        shift = Shift(BitString(0, 32 * max_devices), read_tdo=True)
+        result = await self._interface.post(shift)
+
+        tdo = result.tdo
+        pos = 0
+        idcodes = []
+        while pos + 32 <= len(tdo):
+            if not tdo[pos]:
+                break  # No more IDCODEs (bit 0 = 0 means no IDCODE)
+            idcode = int(tdo[pos:pos + 32])
+            if idcode == 0xFFFFFFFF:
+                break
+            idcodes.append(idcode)
+            pos += 32
+
+        # Create TAPs with looked-up IR lengths
+        for idcode in idcodes:
+            irlen = self.irlen_db.call(idcode, idcode)
+            self.tap_add(idcode, irlen)
+
+        # Return to Run-Test/Idle
+        await self._interface.post(Run(1))
 
     def tap_add(self, idcode, irlen, ir_pre=None, dr_pre=None):
         """Add a TAP to the chain at the current end position."""
