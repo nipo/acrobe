@@ -1,4 +1,7 @@
 import logging
+from contextlib import contextmanager
+
+from ..log import get_progress
 
 
 class Component:
@@ -72,6 +75,24 @@ class Component:
                 return node
             node = node._parent
         raise LookupError(f"No ancestor of class {klass.__name__} found from {self.fqdn}")
+
+    @contextmanager
+    def progress(self, label, total, unit=""):
+        """Context manager for progress tracking.
+
+        Delegates to the global ProgressDelegate (set via log.set_progress).
+
+        Usage:
+            with self.progress("Erasing", total=16, unit="sectors") as p:
+                for sector in sectors:
+                    await self._erase_sector(sector)
+                    p.advance()
+        """
+        handle = get_progress().create(self.fqdn, label, total, unit)
+        try:
+            yield handle
+        finally:
+            handle.close()
 
     async def start(self):
         pass
