@@ -7,6 +7,29 @@ from ..log import get_progress
 
 
 class Component:
+    """Base class for the hardware component tree.
+
+    Children lifecycle:
+    - child_add(child) attaches a child. If the parent is already
+      started, the child's start_tree() is scheduled automatically
+      via ensure_future. Safe to call from __init__ (parent won't
+      be started yet).
+    - child_remove(child) is async: it stops the child's entire
+      subtree (stop_tree), then detaches it.
+    - start_tree() walks top-down: calls start() on self, marks
+      started, then recurses into existing children.
+    - stop_tree() walks top-down: calls stop() on self, clears
+      started, then recurses into children.
+
+    Path resolution:
+    - child_lookup(name) finds an existing child by name (substring
+      match), index, "*" (single child), or ".." (parent).
+    - child_spawn(name) creates a new child on demand. Override in
+      subclasses. Raises NoMatch by default.
+    - child_summon(*parts) walks a path, looking up or spawning at
+      each step. Spawned Components are added to the tree (which
+      triggers auto-start if parent is started).
+    """
 
     def __init__(self, name: str):
         self._name = name
