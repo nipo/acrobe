@@ -1,5 +1,6 @@
 import asyncio
 import inspect
+import math
 
 from ..engine import Batcher
 from ..component import Component
@@ -341,10 +342,13 @@ class Tap(Batcher, Component, InstructionRegistry):
 
 # Chain
 
+class OpenChain(Exception):
+    """TDO line is stuck or disconnected."""
+    pass
+
+
 class Chain(Component):
     """JTAG Chain. Holds TAPs and manages chain geometry."""
-
-    irlen_db = Db("IDCODE irlen")
 
     def __init__(self, interface, name="chain"):
         super().__init__(name)
@@ -352,43 +356,145 @@ class Chain(Component):
         self.total_irlen = 0
         self.total_drlen = 0
 
-    async def discover(self, max_devices=8):
-        """Discover JTAG chain by reading IDCODEs after TAP reset.
+    async def _shift_discover(self, max_length=512, shift_in=None):
+        """Probe a register's length by shifting a marker through.
 
-        Reads IDCODEs from the DR chain and looks up IR lengths
-        via Chain.irlen_db. Creates and adds TAP objects.
+        Shifts a 32-bit marker followed by zeros. The marker's
+        position in TDO reveals the register length.
 
-        Raises NoMatch if an IDCODE has no registered IR length.
+        Args:
+            max_length: maximum register length to probe.
+            shift_in: value to shift back into the register after
+                measuring (e.g. -1 for all-ones). None to leave as-is.
+
+        Returns the captured register contents (BitString).
         """
-        # Reset all TAPs
-        self._interface.post(Reset())
-        # Enter Run-Test/Idle
-        self._interface.post(Run(1))
-        # Capture DR (all devices have IDCODE loaded after reset)
-        self._interface.post(CaptureDr())
-        # Shift zeros through, reading IDCODEs
-        shift = Shift(BitString(0, 32 * max_devices), read_tdo=True)
+        marker = 0xc05a5a03
+        tdi = BitString(marker, 32) + BitString(0, max_length + 4)
+        shift = Shift(tdi, read_tdo=True)
         result = await self._interface.post(shift)
+        tdo = result.tdo[:max_length + 32]
 
-        tdo = result.tdo
-        pos = 0
+        if not int(tdo):
+            raise OpenChain("TDO stuck low")
+
+        if tdo == BitString(-1, len(tdo)):
+            raise OpenChain("TDO stuck high")
+
+        length = int(math.log2(int(tdo))) + 1
+        register = tdo[:length - 32]
+        rx_marker = int(tdo[length - 32:length])
+
+        if rx_marker != marker:
+            raise OpenChain("TDO changed but marker not received back")
+
+        if shift_in is not None:
+            back = BitString(shift_in, len(register))
+            shift_back = Shift(back, read_tdo=False)
+            await self._interface.post(shift_back)
+            await self._interface.post(Run(1))
+
+        return register
+
+    async def discover(self):
+        """Blind discovery of the JTAG chain.
+
+        Reliably identifies IDCODEs and TAP count. Determines IR
+        lengths from the captured IR pattern (JTAG spec: after
+        Capture-IR, each TAP's IR starts with 01 in bits [1:0]).
+        Cross-references with Tap.db for known IR lengths to
+        disambiguate when needed.
+
+        Unknown devices get a generic Tap with the discovered IR
+        length.
+        """
+        # Reset and read DR — contains IDCODEs
+        self._interface.post(Reset())
+        self._interface.post(Run(1))
+        self._interface.post(CaptureDr())
+        reset_dr = await self._shift_discover()
+
+        # Capture IR (loads default IR), shift all-ones to load BYPASS
+        self._interface.post(CaptureIr())
+        captured_ir = await self._shift_discover(shift_in=-1)
+        captured_ir_length = len(captured_ir)
+
+        # Now all TAPs are in BYPASS (1-bit DR each).
+        # Probe DR to count devices.
+        self._interface.post(CaptureDr())
+        bypass_dr = await self._shift_discover(max_length=captured_ir_length // 2)
+        device_count = len(bypass_dr)
+
+        # Extract IDCODEs from reset DR
         idcodes = []
-        while pos + 32 <= len(tdo):
-            if not tdo[pos]:
-                break  # No more IDCODEs (bit 0 = 0 means no IDCODE)
-            idcode = int(tdo[pos:pos + 32])
-            if idcode == 0xFFFFFFFF:
-                break
-            idcodes.append(idcode)
-            pos += 32
+        pos = 0
+        for _ in range(device_count):
+            if pos >= len(reset_dr):
+                idcodes.append(None)
+            elif reset_dr[pos]:
+                idcodes.append(int(reset_dr[pos:pos + 32]))
+                pos += 32
+            else:
+                idcodes.append(None)
+                pos += 1
 
-        # Create TAPs with looked-up IR lengths
-        for idcode in idcodes:
-            irlen = self.irlen_db.call(idcode, idcode)
+        # Determine IR lengths from captured IR pattern.
+        # JTAG spec: after Capture-IR, each TAP loads a value with
+        # bits [1:0] = 01. So we look for positions where bit pair
+        # is 01 — these are potential IR boundaries.
+        cutoffs = [i for i in range(captured_ir_length)
+                   if int(captured_ir[i:i + 2]) == 1]
+        cutoffs.append(captured_ir_length)
+
+        # Build all possible IR length assignments
+        segments = [b - a for a, b in zip(cutoffs, cutoffs[1:])]
+
+        def ir_merge(prefix, parts, count_left):
+            if len(parts) < count_left or count_left < 0:
+                return []
+            if len(parts) == count_left:
+                return [prefix + parts]
+            result = []
+            for i in range(1, len(parts) + 1):
+                result += ir_merge(
+                    prefix + [sum(parts[:i])], parts[i:], count_left - 1)
+            return result
+
+        possibilities = ir_merge([], segments, device_count)
+
+        # Filter by known IR lengths from Tap.db
+        known_irlens = [self._irlen_for(idc) for idc in idcodes]
+        possibilities = [
+            p for p in possibilities
+            if all(k is None or k == l for k, l in zip(known_irlens, p))]
+
+        if len(possibilities) != 1:
+            raise ValueError(
+                f"Ambiguous IR lengths: {len(possibilities)} possibilities "
+                f"for {device_count} devices (idcodes={idcodes!r})")
+
+        ir_lengths = possibilities[0]
+
+        # Create TAPs
+        for idcode, irlen in zip(idcodes, ir_lengths):
             self.tap_add(idcode, irlen)
 
         # Return to Run-Test/Idle
         await self._interface.post(Run(1))
+
+    @staticmethod
+    def _irlen_for(idcode):
+        """Look up known IR length for an IDCODE via Tap.db. Returns None if unknown."""
+        if idcode is None:
+            return None
+        try:
+            taps = Tap.db.get(idcode, allow_default=False)
+        except NoMatch:
+            return None
+        irlens = {t.irlen for t in taps if t.irlen is not None}
+        if len(irlens) == 1:
+            return irlens.pop()
+        return None
 
     def tap_add(self, idcode, irlen, ir_pre=None, dr_pre=None):
         """Add a TAP to the chain at the current end position."""

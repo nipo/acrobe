@@ -14,7 +14,7 @@ import asyncio
 from crobe_async.adapter.ftdi.transport import FtdiTransport
 from crobe_async.adapter.ftdi.mpsse import MpsseEngine
 from crobe_async.adapter.ftdi.jtag import JtagMpsse
-from crobe_async.protocol.jtag import Chain, Tap
+from crobe_async.protocol.jtag import Chain
 
 # Proby USB identifiers
 PROBY_VID = 0x10eb
@@ -29,12 +29,6 @@ PROBY_RESETN_PIN = 9
 # Spartan-6 IDCODE
 SPARTAN6_IDCODE = 0x24001093
 SPARTAN6_IRLEN = 6
-
-
-# Register Spartan-6 IR length for chain discovery
-@Chain.irlen_db.register(SPARTAN6_IDCODE)
-def spartan6_irlen(idcode):
-    return SPARTAN6_IRLEN
 
 
 async def main():

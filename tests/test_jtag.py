@@ -3,7 +3,7 @@ import pytest
 from crobe_async.protocol.jtag import (
     Shift, CaptureDr, CaptureIr, Reset, Run, SwdToJtag,
     Dr, Instruction, TapDr, TapInstruction, InstructionRegistry,
-    Tap, Chain, _DynamicInstruction, _TapShift, _TapRun,
+    Tap, Chain, OpenChain, _DynamicInstruction, _TapShift, _TapRun,
 )
 from crobe_async.bitstring import BitString
 from crobe_async.engine import Batcher
@@ -502,3 +502,179 @@ class TestErrorCases:
         tap = MyTap(FailInterface(), irlen=4)
         with pytest.raises(IOError, match="USB error"):
             await tap.DATA(0)
+
+
+# -- Chain Discover --
+
+class ChainSimulator(Batcher):
+    """Simulates a JTAG chain for testing Chain.discover().
+
+    Models a chain of devices with known IDCODEs and IR lengths.
+    Handles Reset, Capture-DR/IR, and Shift operations with proper
+    shift register behavior.
+    """
+
+    def __init__(self, devices):
+        """Args:
+            devices: list of (idcode, irlen) tuples.
+        """
+        super().__init__()
+        self.devices = devices
+        self._reg_val = 0
+        self._reg_len = 0
+        self._bypass = False
+        self._in_ir = False
+
+    async def flush_ops(self, batch):
+        for op, future in batch:
+            if isinstance(op, Reset):
+                self._bypass = False
+                self._in_ir = False
+            elif isinstance(op, CaptureDr):
+                self._in_ir = False
+                if self._bypass:
+                    self._reg_val = 0
+                    self._reg_len = len(self.devices)
+                else:
+                    val, pos = 0, 0
+                    for idcode, _ in self.devices:
+                        val |= idcode << pos
+                        pos += 32
+                    self._reg_val = val
+                    self._reg_len = pos
+            elif isinstance(op, CaptureIr):
+                self._in_ir = True
+                val, pos = 0, 0
+                for _, irlen in self.devices:
+                    val |= 1 << pos
+                    pos += irlen
+                self._reg_val = val
+                self._reg_len = pos
+            elif isinstance(op, Shift):
+                self._do_shift(op)
+            future.set_result(op)
+
+    def _do_shift(self, op):
+        L = self._reg_len
+        N = len(op.tdi)
+        tdi_val = int(op.tdi)
+
+        if op.read_tdo:
+            if N <= L:
+                op.tdo = BitString(self._reg_val & ((1 << N) - 1), N)
+            else:
+                tdo_val = (self._reg_val | (tdi_val << L)) & ((1 << N) - 1)
+                op.tdo = BitString(tdo_val, N)
+
+        if L > 0 and N >= L:
+            new_val = (tdi_val >> (N - L)) & ((1 << L) - 1)
+            self._reg_val = new_val
+            if self._in_ir and new_val == (1 << L) - 1:
+                self._bypass = True
+
+
+class TestChainDiscover:
+    @pytest.mark.asyncio
+    async def test_single_device(self):
+        sim = ChainSimulator([(0x24001093, 6)])
+        chain = Chain(sim)
+        await chain.discover()
+
+        assert len(chain.children) == 1
+        tap = chain.children[0]
+        assert tap.idcode == 0x24001093
+        assert tap.irlen == 6
+
+    @pytest.mark.asyncio
+    async def test_two_devices(self):
+        sim = ChainSimulator([(0x24001093, 6), (0x0ba00477, 4)])
+        chain = Chain(sim)
+        await chain.discover()
+
+        assert len(chain.children) == 2
+        assert chain.children[0].idcode == 0x24001093
+        assert chain.children[0].irlen == 6
+        assert chain.children[1].idcode == 0x0ba00477
+        assert chain.children[1].irlen == 4
+
+    @pytest.mark.asyncio
+    async def test_three_devices(self):
+        sim = ChainSimulator([
+            (0x11111111, 4),
+            (0x22222223, 5),
+            (0x33333333, 6),
+        ])
+        chain = Chain(sim)
+        await chain.discover()
+
+        assert len(chain.children) == 3
+        assert chain.children[0].irlen == 4
+        assert chain.children[1].irlen == 5
+        assert chain.children[2].irlen == 6
+
+    @pytest.mark.asyncio
+    async def test_chain_geometry(self):
+        sim = ChainSimulator([(0x11111111, 4), (0x22222223, 5)])
+        chain = Chain(sim)
+        await chain.discover()
+
+        tap0, tap1 = chain.children
+        assert tap0.ir_pre == 0
+        assert tap0.ir_post == 5
+        assert tap0.dr_pre == 0
+        assert tap0.dr_post == 1
+        assert tap1.ir_pre == 4
+        assert tap1.ir_post == 0
+        assert tap1.dr_pre == 1
+        assert tap1.dr_post == 0
+
+    @pytest.mark.asyncio
+    async def test_unknown_device_generic_tap(self):
+        sim = ChainSimulator([(0xdeadbeef, 5)])
+        chain = Chain(sim)
+        await chain.discover()
+
+        tap = chain.children[0]
+        assert type(tap) is Tap
+        assert tap.idcode == 0xdeadbeef
+        assert tap.irlen == 5
+
+    @pytest.mark.asyncio
+    async def test_registered_tap_used(self):
+        class KnownTap(Tap):
+            irlen = 4
+
+        Tap.db.register(0xaabbccdd)(KnownTap)
+        try:
+            sim = ChainSimulator([(0xaabbccdd, 4)])
+            chain = Chain(sim)
+            await chain.discover()
+            assert isinstance(chain.children[0], KnownTap)
+        finally:
+            Tap.db._registry.clear()
+
+    @pytest.mark.asyncio
+    async def test_open_chain_stuck_low(self):
+        class StuckLow(Batcher):
+            async def flush_ops(self, batch):
+                for op, future in batch:
+                    if isinstance(op, Shift) and op.read_tdo:
+                        op.tdo = BitString(0, len(op.tdi))
+                    future.set_result(op)
+
+        chain = Chain(StuckLow())
+        with pytest.raises(OpenChain, match="stuck low"):
+            await chain.discover()
+
+    @pytest.mark.asyncio
+    async def test_open_chain_stuck_high(self):
+        class StuckHigh(Batcher):
+            async def flush_ops(self, batch):
+                for op, future in batch:
+                    if isinstance(op, Shift) and op.read_tdo:
+                        op.tdo = BitString(-1, len(op.tdi))
+                    future.set_result(op)
+
+        chain = Chain(StuckHigh())
+        with pytest.raises(OpenChain, match="stuck high"):
+            await chain.discover()
