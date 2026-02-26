@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import contextmanager
 
@@ -54,9 +55,12 @@ class Component:
         child._parent = self
         self._children.append(child)
         self.children_changed()
+        if self._started:
+            asyncio.ensure_future(child.start_tree())
 
-    def child_remove(self, child: "Component"):
+    async def child_remove(self, child: "Component"):
         assert child._parent is self, f"{child.fqdn} is not a child of {self.fqdn}"
+        await child.stop_tree()
         self._children.remove(child)
         child._parent = None
         self.children_changed()
