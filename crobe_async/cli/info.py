@@ -26,15 +26,17 @@ def _import_adapters():
 async def adapters():
     _import_adapters()
     enum = UsbEnumerator()
-    found = enum.scan()
+    found = await enum.scan()
     if not found:
         click.echo("No recognized adapters found.")
         return
-    for info, desc in found:
+    for info, adapter_cls, desc, serial in found:
+        name = f"{info.name}-{serial}" if serial else info.name
+        interfaces = ", ".join(adapter_cls.supported_interfaces)
         click.echo(
-            f"  {info.name}  "
+            f"  {name}  "
             f"{info.vid:04x}:{info.pid:04x}  "
-            f"interfaces: {', '.join(info.interfaces)}"
+            f"interfaces: {interfaces}"
         )
 
 

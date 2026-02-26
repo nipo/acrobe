@@ -12,7 +12,7 @@ _JTAG_CHANNEL = 1
 _RESETN_PIN = 9
 
 
-@adapter_db.register(AdapterInfo(0x10eb, 0x0026, "Proby", ["jtag"]))
+@adapter_db.register(AdapterInfo("Proby", vid=0x10eb, pid=0x0026))
 class ProbyAdapter(Adapter):
     supported_interfaces = ["jtag"]
 
@@ -23,14 +23,25 @@ class ProbyAdapter(Adapter):
         self._jtag = jtag
 
     @classmethod
+    def serial_mangle(cls, serial):
+        if serial is None:
+            return None
+        return str(int(serial.split(";")[-1]))
+
+    @classmethod
     async def open(cls, descriptor):
         device = descriptor.open()
+        try:
+            serial = cls.serial_mangle(device.serial)
+        except Exception:
+            serial = None
+        name = f"Proby-{serial}" if serial else "Proby"
         transport = await FtdiTransport.from_device(device, interface_index=_JTAG_CHANNEL)
         engine = MpsseEngine(transport)
         jtag = JtagMpsse(engine)
         resetn_bit = 1 << _RESETN_PIN
         await jtag.setup(gpio_oe=resetn_bit, gpio_val=resetn_bit)
-        return cls("Proby", transport, engine, jtag)
+        return cls(name, transport, engine, jtag)
 
     async def child_spawn(self, name):
         if name.lower() == "jtag":
