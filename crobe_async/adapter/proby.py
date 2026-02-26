@@ -35,7 +35,7 @@ class ProbyAdapter(Adapter):
             serial = cls.serial_mangle(device.serial)
         except Exception:
             serial = None
-        name = f"Proby-{serial}" if serial else "Proby"
+        name = f"proby-{serial}" if serial else "proby"
         transport = await FtdiTransport.from_device(device, interface_index=_JTAG_CHANNEL)
         engine = MpsseEngine(transport)
         jtag = JtagMpsse(engine)

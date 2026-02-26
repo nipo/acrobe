@@ -40,6 +40,13 @@ class AdapterInfo:
 adapter_db = Db("adapter", eq_func=AdapterInfo.matches)
 
 
+def make_adapter_name(info, serial):
+    """Build a lowercase component name from adapter info and serial."""
+    if serial:
+        return f"{info.name}-{serial}".lower()
+    return info.name.lower()
+
+
 class Adapter(Component):
     """Base adapter. Subclasses override open() and child_spawn()."""
 
@@ -65,11 +72,11 @@ class Adapter(Component):
         pass
 
 
-class UsbEnumerator(Component):
-    """Scans USB bus, spawns adapters by VID/PID match via adapter_db."""
+class UsbEnumerator:
+    """Scans USB bus for known adapters. Not a Component — used as a
+    spawning strategy by HwRoot."""
 
     def __init__(self):
-        super().__init__("USB")
         self._ctx = None
 
     def _ensure_ctx(self):
@@ -107,24 +114,28 @@ class UsbEnumerator(Component):
         finally:
             device.handle.close()
 
-    async def child_spawn(self, name):
-        """Spawn adapter by name: scans USB, probes serials, matches by component name."""
+    async def spawn(self, name):
+        """Find and open an adapter matching name.
+
+        Scans USB, probes serials, matches by component name (substring).
+        Raises NoMatch if no match or ambiguous.
+        """
         matches = []
         for info, adapter_cls, desc in self._iter_matches():
             serial = await self._probe(desc, adapter_cls)
             if serial is _SKIP:
                 continue
-            component_name = f"{info.name}-{serial}" if serial else info.name
-            if name.lower() in component_name.lower():
-                matches.append((info, adapter_cls, desc, component_name))
+            component_name = make_adapter_name(info, serial)
+            if name.lower() in component_name:
+                matches.append((adapter_cls, desc, component_name))
 
         if not matches:
             raise NoMatch("adapter", name)
         if len(matches) > 1:
-            names = ", ".join(m[3] for m in matches)
+            names = ", ".join(m[2] for m in matches)
             raise NoMatch("adapter", f"{name} (ambiguous: {names})")
 
-        _info, adapter_cls, desc, _name = matches[0]
+        adapter_cls, desc, _name = matches[0]
         return await adapter_cls.open(desc)
 
     async def scan(self):
@@ -140,6 +151,30 @@ class UsbEnumerator(Component):
                 continue
             results.append((info, adapter_cls, desc, serial))
         return results
+
+
+class HwRoot(Component):
+    """Root of the hardware component tree.
+
+    Delegates child_spawn to registered enumerators (strategies).
+    Adapters appear as direct children: proby-9/jtag, not USB/proby-9/jtag.
+    """
+
+    def __init__(self):
+        super().__init__("HwRoot")
+        self._enumerators = []
+
+    def add_enumerator(self, enumerator):
+        self._enumerators.append(enumerator)
+
+    async def child_spawn(self, name):
+        errors = []
+        for enum in self._enumerators:
+            try:
+                return await enum.spawn(name)
+            except NoMatch as e:
+                errors.append(e)
+        raise NoMatch("adapter", name)
 
 
 _SKIP = object()

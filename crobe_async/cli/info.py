@@ -1,7 +1,7 @@
 import asyncclick as click
 
 from . import base
-from ..adapter.model import UsbEnumerator
+from ..adapter.model import HwRoot, UsbEnumerator, make_adapter_name
 from ..component import Component
 
 
@@ -22,6 +22,14 @@ def _import_adapters():
     from ..adapter import proby as _  # noqa: F401
 
 
+def _make_hw_root():
+    """Create HwRoot with USB enumerator."""
+    _import_adapters()
+    root = HwRoot()
+    root.add_enumerator(UsbEnumerator())
+    return root
+
+
 @info.command(help="List recognized USB adapters")
 async def adapters():
     _import_adapters()
@@ -31,7 +39,7 @@ async def adapters():
         click.echo("No recognized adapters found.")
         return
     for info, adapter_cls, desc, serial in found:
-        name = f"{info.name}-{serial}" if serial else info.name
+        name = make_adapter_name(info, serial)
         interfaces = ", ".join(adapter_cls.supported_interfaces)
         click.echo(
             f"  {name}  "
@@ -42,16 +50,12 @@ async def adapters():
 
 @info.command(help="Resolve root path, discover, dump component tree")
 @click.option('-r', '--root', 'root_path', required=True,
-              help="Component path (e.g. USB/Proby/jtag)")
+              help="Component path (e.g. proby-9/jtag)")
 async def enumerate(root_path):
-    _import_adapters()
     from ..protocol.jtag import Chain
 
     parts = root_path.strip("/").split("/")
-
-    hw_root = Component("HwRoot")
-    enum = UsbEnumerator()
-    hw_root.child_add(enum)
+    hw_root = _make_hw_root()
 
     leaf = await hw_root.child_summon(*parts)
 
