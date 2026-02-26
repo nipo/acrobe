@@ -87,6 +87,47 @@ class FtdiTransport:
 
         return cls(ctx, device, interface_index, pair, mps)
 
+    @classmethod
+    async def from_device(cls, device, interface_index=0):
+        """Initialize MPSSE on an already-opened ausb Device.
+
+        Like open(), but skips Context creation and device lookup.
+        The caller owns the Context lifetime.
+        """
+        try:
+            device.handle.detachKernelDriver(interface_index)
+        except (usb1.USBErrorNotFound, usb1.USBErrorNotSupported):
+            pass
+
+        device.handle.claimInterface(interface_index)
+
+        idx = interface_index + 1
+
+        await device.vendor_control(SIO_RESET, SIO_RESET_SIO, idx, b'')
+        await device.vendor_control(SIO_SET_LATENCY_TIMER, 1, idx, b'')
+        await device.vendor_control(SIO_SET_BITMODE, BITMODE_RESET << 8, idx, b'')
+        await device.vendor_control(SIO_RESET, SIO_RESET_PURGE_RX, idx, b'')
+        await device.vendor_control(SIO_RESET, SIO_RESET_PURGE_TX, idx, b'')
+        await device.vendor_control(SIO_SET_BITMODE, BITMODE_MPSSE << 8, idx, b'')
+
+        ep_out_addr = 0x02 + interface_index * 2
+        ep_in_addr = 0x81 + interface_index * 2
+        mps = 512
+
+        ep_out = BulkOutEndpoint(device, ep_out_addr, mps)
+        ep_in = BulkInEndpoint(device, ep_in_addr, mps)
+        pair = BulkPair(ep_out, ep_in)
+
+        try:
+            while True:
+                d = ep_in.read_sync(mps, timeout=50)
+                if len(d) <= 2:
+                    break
+        except TransferTimeout:
+            pass
+
+        return cls(None, device, interface_index, pair, mps)
+
     def _sync_write_read(self, data: bytes, response_len: int) -> bytes:
         """Synchronous bulk write+read with FTDI modem status stripping."""
         self._pair.out.write_sync(data)
@@ -120,4 +161,5 @@ class FtdiTransport:
             SIO_SET_BITMODE, BITMODE_RESET << 8, idx, b'')
         self._device.handle.releaseInterface(self._interface_index)
         self._device.handle.close()
-        self._ctx.close()
+        if self._ctx is not None:
+            self._ctx.close()

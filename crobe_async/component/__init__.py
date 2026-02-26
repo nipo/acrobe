@@ -1,6 +1,7 @@
 import logging
 from contextlib import contextmanager
 
+from ..db import NoMatch
 from ..log import get_progress
 
 
@@ -11,6 +12,12 @@ class Component:
         self._parent = None
         self._children = []
         self._started = False
+
+    def __str__(self):
+        return self._name
+
+    def __repr__(self):
+        return f"<{self.__class__.__name__} '{self._name}'>"
 
     @property
     def name(self) -> str:
@@ -93,6 +100,51 @@ class Component:
             yield handle
         finally:
             handle.close()
+
+    def child_lookup(self, name):
+        """Find existing child by name.
+
+        Supports ".." for parent, "*" for single child, int index,
+        and case-insensitive substring match (unique match only).
+        Returns None if not found.
+        """
+        if name == "..":
+            return self._parent
+        if name == "*":
+            if len(self._children) == 1:
+                return self._children[0]
+            return None
+        try:
+            return self._children[int(name)]
+        except (ValueError, IndexError):
+            pass
+        matches = [c for c in self._children if name.lower() in c._name.lower()]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    async def child_spawn(self, name):
+        """Create a child by name. Override in subclasses."""
+        raise NoMatch("child", name)
+
+    async def child_summon(self, *parts):
+        """Resolve a path through the component tree, spawning as needed.
+
+        Spawned children that are Components are added to the tree.
+        Non-Component children (e.g. Batcher-only objects) are returned
+        without tree insertion.
+        """
+        if not parts:
+            return self
+        name, *rest = parts
+        child = self.child_lookup(name)
+        if child is None:
+            child = await self.child_spawn(name)
+            if isinstance(child, Component) and child._parent is None:
+                self.child_add(child)
+        if not rest:
+            return child
+        return await child.child_summon(*rest)
 
     async def start(self):
         pass
