@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from ..engine import Batcher
 from ..component import Component
 from ..bitstring import BitStringBase
@@ -44,13 +46,36 @@ class Shift:
         return f"<Shift {self.byte_count}B read={self.read_miso}>"
 
 
+# --- SPI Interface ---
+
+class Interface(Batcher, Component):
+    """SPI bus. Forwards Cs/Shift ops to adapter."""
+
+    def __init__(self, adapter, name="spi"):
+        Batcher.__init__(self)
+        Component.__init__(self, name)
+        self._adapter = adapter
+
+    async def flush_ops(self, batch):
+        futures = []
+        for op, future in batch:
+            futures.append((self._adapter.post(op), future))
+        if futures:
+            await asyncio.gather(*[f for f, _ in futures])
+        for af, mf in futures:
+            mf.set_result(af.result())
+
+    def __repr__(self):
+        return f"<spi.Interface {self._name}>"
+
+
 # --- SPI Target ---
 
 class Target(Batcher, Component):
     """SPI target device with CS management.
 
     Usage:
-        result = await target.transaction(b"\\x9f", read_miso=True)
+        result = await target.transaction(Shift(b"\\x9f", read_miso=True))
     """
 
     def __init__(self, interface, cs, mode: int = 0, name: str = "spi"):
@@ -60,32 +85,31 @@ class Target(Batcher, Component):
         self.cs = cs
         self.mode = mode
 
-    def shift(self, mosi, read_miso: bool = True):
-        """Post a shift operation. Returns Future -> Shift op."""
-        return self.post(Shift(mosi, read_miso))
-
-    def transaction(self, mosi, read_miso: bool = True):
-        """Post an atomic CS-assert, shift, CS-deassert. Returns Future -> miso bytes."""
-        return self.post(("transaction", mosi, read_miso))
+    def transaction(self, *shifts):
+        """Atomic CS-held transaction. Posts Cs(assert) + shifts + Cs(deassert).
+        Returns Future -> tuple of completed Shift ops (with .miso populated)."""
+        return self.post(("transaction", shifts))
 
     async def flush_ops(self, batch):
-        for op, future in batch:
+        iface_futures = []
+        result_map = []
+
+        for idx, (op, future) in enumerate(batch):
             if isinstance(op, tuple) and op[0] == "transaction":
-                _, mosi, read_miso = op
-                shift = Shift(mosi, read_miso)
-                cs_on = Cs(self.cs, self.mode)
-                cs_off = Cs(None)
+                _, shifts = op
+                self._interface.post(Cs(self.cs, self.mode))
+                shift_futures = []
+                for s in shifts:
+                    shift_futures.append(self._interface.post(s))
+                self._interface.post(Cs(None))
+                iface_futures.extend(shift_futures)
+                result_map.append((idx, shifts, shift_futures))
 
-                await self._interface.post(cs_on)
-                shift_future = self._interface.post(shift)
-                await shift_future
-                await self._interface.post(cs_off)
+        if iface_futures:
+            await asyncio.gather(*iface_futures)
 
-                future.set_result(shift.miso)
-            elif isinstance(op, Shift):
-                shift_future = self._interface.post(op)
-                result = await shift_future
-                future.set_result(result)
+        for idx, shifts, shift_futures in result_map:
+            batch[idx][1].set_result(tuple(shifts))
 
     def __repr__(self):
         return f"<Target cs={self.cs} mode={self.mode}>"

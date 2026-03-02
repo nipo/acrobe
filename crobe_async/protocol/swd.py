@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from enum import IntEnum
 
 from ..bitstring import BitString
@@ -103,6 +104,29 @@ class LineReset:
 
     def __repr__(self):
         return "LineReset()"
+
+
+# --- SWD Interface ---
+
+class Interface(Batcher, Component):
+    """SWD wire interface. Forwards Read/Write/Run/Wakeup to adapter."""
+
+    def __init__(self, adapter, name="swd"):
+        Batcher.__init__(self)
+        Component.__init__(self, name)
+        self._adapter = adapter
+
+    async def flush_ops(self, batch):
+        futures = []
+        for op, future in batch:
+            futures.append((self._adapter.post(op), future))
+        if futures:
+            await asyncio.gather(*[f for f, _ in futures])
+        for af, mf in futures:
+            mf.set_result(af.result())
+
+    def __repr__(self):
+        return f"<swd.Interface {self._name}>"
 
 
 # --- DP register addresses ---

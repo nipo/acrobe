@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from ..engine import Batcher
 from ..component import Component
 
@@ -42,6 +44,42 @@ class Write:
         return f"<Write 0x{self.addr:02x} {len(self.data)}B>"
 
 
+class WriteRead:
+    """I2C write-then-read with repeated start."""
+
+    def __init__(self, addr: int, data: bytes, size: int):
+        self.addr = addr
+        self.data = bytes(data)
+        self.size = size
+        self.result = None  # populated by adapter
+
+    def __repr__(self):
+        return f"<WriteRead 0x{self.addr:02x} w={len(self.data)}B r={self.size}B>"
+
+
+# --- I2C Interface ---
+
+class Interface(Batcher, Component):
+    """I2C bus. Forwards Read/Write/WriteRead to adapter."""
+
+    def __init__(self, adapter, name="i2c"):
+        Batcher.__init__(self)
+        Component.__init__(self, name)
+        self._adapter = adapter
+
+    async def flush_ops(self, batch):
+        futures = []
+        for op, future in batch:
+            futures.append((self._adapter.post(op), future))
+        if futures:
+            await asyncio.gather(*[f for f, _ in futures])
+        for af, mf in futures:
+            mf.set_result(af.result())
+
+    def __repr__(self):
+        return f"<i2c.Interface {self._name}>"
+
+
 # --- I2C Slave ---
 
 class Slave(Batcher, Component):
@@ -72,24 +110,35 @@ class Slave(Batcher, Component):
         return self.post(("write_read", data, size))
 
     async def flush_ops(self, batch):
-        for op, future in batch:
+        iface_futures = []
+        read_info = []
+
+        for idx, (op, future) in enumerate(batch):
             if isinstance(op, tuple) and op[0] == "write_read":
                 _, data, size = op
-                write_op = Write(self.addr, data)
-                read_op = Read(self.addr, size)
-
-                write_future = self._interface.post(write_op)
-                read_future = self._interface.post(read_op)
-                await write_future
-                result = await read_future
-                future.set_result(read_op.data)
+                wr_op = WriteRead(self.addr, data, size)
+                f = self._interface.post(wr_op)
+                iface_futures.append(f)
+                read_info.append((idx, wr_op))
             elif isinstance(op, Read):
-                iface_future = self._interface.post(op)
-                await iface_future
-                future.set_result(op.data)
+                f = self._interface.post(op)
+                iface_futures.append(f)
+                read_info.append((idx, op))
             elif isinstance(op, Write):
-                iface_future = self._interface.post(op)
-                await iface_future
+                f = self._interface.post(op)
+                iface_futures.append(f)
+                read_info.append((idx, None))
+
+        if iface_futures:
+            await asyncio.gather(*iface_futures)
+
+        for idx, read_op in read_info:
+            op, future = batch[idx]
+            if isinstance(op, tuple):
+                future.set_result(read_op.result)
+            elif isinstance(op, Read):
+                future.set_result(op.data)
+            else:
                 future.set_result(None)
 
     def __repr__(self):

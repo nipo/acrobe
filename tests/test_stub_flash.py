@@ -2,7 +2,7 @@
 
 import pytest
 import struct
-from crobe_async.component.arm.memory import StubFlash
+from crobe_async.target.arm.memory import StubFlash
 from crobe_async.puppet import Zone
 from crobe_async.allocator import Range
 

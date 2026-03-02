@@ -1,12 +1,12 @@
 import asyncio
 import pytest
 from crobe_async.component.spi_flash import SpiFlash
-from crobe_async.protocol.spi import Cs, Shift
+from crobe_async.protocol.spi import Cs, Shift, Interface
 from crobe_async.engine import Batcher
 
 
-class MockSpiInterface(Batcher):
-    """Mock SPI interface that records ops and returns configurable data."""
+class MockSpiAdapter(Batcher):
+    """Mock SPI adapter that records ops and returns configurable data."""
 
     def __init__(self):
         super().__init__()
@@ -24,7 +24,6 @@ class MockSpiInterface(Batcher):
             if isinstance(op, Shift) and op.read_miso:
                 if self._read_responses:
                     rsp = self._read_responses.pop(0)
-                    op.miso = rsp[:op.byte_count].ljust(op.byte_count, b"\xff"[0:1])
                     if len(rsp) < op.byte_count:
                         op.miso = rsp + bytes(op.byte_count - len(rsp))
                     else:
@@ -34,65 +33,74 @@ class MockSpiInterface(Batcher):
             future.set_result(op)
 
 
+def _make_flash(adapter=None):
+    """Create a SpiFlash with an Interface + Target stack backed by adapter."""
+    if adapter is None:
+        adapter = MockSpiAdapter()
+    from crobe_async.protocol.spi import Target
+    iface = Interface(adapter)
+    target = Target(iface, cs=0, mode=0)
+    flash = SpiFlash(target)
+    return flash, adapter
+
+
 class TestSpiFlashConstruction:
     def test_init(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
+        flash, _ = _make_flash()
         assert flash.jedec_id == 0
         assert flash.page_size == 256
         assert flash.ADDRESS_SIZE == 3
 
     def test_repr(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
+        flash, _ = _make_flash()
         assert "SpiFlash" in repr(flash)
 
 
 class TestSpiFlashCommands:
     @pytest.mark.asyncio
     async def test_read_status(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
-        iface.queue_response(bytes([0x00]))
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
+        adapter.queue_response(bytes([0x00]))
 
         status = await flash.read_status()
         assert status == 0x00
 
         # Should have CS assert, Shift (command), Shift (read), CS deassert
-        cs_ops = [op for op in iface.ops if isinstance(op, Cs)]
-        shift_ops = [op for op in iface.ops if isinstance(op, Shift)]
+        cs_ops = [op for op in adapter.ops if isinstance(op, Cs)]
+        shift_ops = [op for op in adapter.ops if isinstance(op, Shift)]
         assert len(cs_ops) == 2
         assert cs_ops[0].value == 0  # CS assert
         assert cs_ops[1].value is None  # CS deassert
 
     @pytest.mark.asyncio
     async def test_read_jedec_id(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
-        iface.queue_response(bytes([0xef, 0x40, 0x16]))
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
+        adapter.queue_response(bytes([0xef, 0x40, 0x16]))
 
         jedec_id = await flash.read_jedec_id()
         assert jedec_id == 0xef4016
 
     @pytest.mark.asyncio
     async def test_write_enable(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
 
         await flash.write_enable()
 
         # Should have sent CMD_WRITE_ENABLE (0x06)
-        shift_ops = [op for op in iface.ops if isinstance(op, Shift)]
+        shift_ops = [op for op in adapter.ops if isinstance(op, Shift)]
         assert any(op.mosi == b"\x06" for op in shift_ops)
 
 
 class TestSpiFlashRead:
     @pytest.mark.asyncio
     async def test_read_small(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
         expected = bytes(range(16))
-        iface.queue_response(expected)
+        adapter.queue_response(expected)
 
         data = await flash.read(0x000000, 16)
         assert data == expected
@@ -100,11 +108,11 @@ class TestSpiFlashRead:
     @pytest.mark.asyncio
     async def test_read_chunked(self):
         """Reads larger than 1024 bytes are split into chunks."""
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
         # Queue 2 chunks for a 1500-byte read
-        iface.queue_response(bytes(1024))
-        iface.queue_response(bytes(476))
+        adapter.queue_response(bytes(1024))
+        adapter.queue_response(bytes(476))
 
         data = await flash.read(0x000000, 1500)
         assert len(data) == 1500
@@ -112,14 +120,14 @@ class TestSpiFlashRead:
     @pytest.mark.asyncio
     async def test_read_uses_fast_read(self):
         """Read uses fast read command (0x0b) with 1 dummy byte."""
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
-        iface.queue_response(bytes(4))
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
+        adapter.queue_response(bytes(4))
 
         await flash.read(0x000100, 4)
 
-        # Find the command shift (first Shift with read_miso=False)
-        cmd_shifts = [op for op in iface.ops
+        # Find the command shift (Shift with read_miso=False)
+        cmd_shifts = [op for op in adapter.ops
                       if isinstance(op, Shift) and not op.read_miso]
         # Command should be: 0x0b (fast read) + 3 addr bytes + 1 dummy
         assert len(cmd_shifts) >= 1
@@ -130,15 +138,15 @@ class TestSpiFlashRead:
 class TestSpiFlashErase:
     @pytest.mark.asyncio
     async def test_erase_sector(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
         # Queue status response for _wait_ready (WIP=0)
-        iface.queue_response(bytes([0x00]))
+        adapter.queue_response(bytes([0x00]))
 
         await flash.erase_sector(0x001000)
 
         # Should have: write_enable cmd, erase cmd, status read
-        shift_ops = [op for op in iface.ops if isinstance(op, Shift)]
+        shift_ops = [op for op in adapter.ops if isinstance(op, Shift)]
         mosi_bytes = [op.mosi for op in shift_ops if not op.read_miso]
         # Write enable (0x06) + sector erase (0x20 + 3 addr bytes)
         assert any(m == b"\x06" for m in mosi_bytes)
@@ -148,14 +156,14 @@ class TestSpiFlashErase:
 class TestSpiFlashProgram:
     @pytest.mark.asyncio
     async def test_page_program(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
         # Queue status response (WIP=0)
-        iface.queue_response(bytes([0x00]))
+        adapter.queue_response(bytes([0x00]))
 
         await flash.page_program(0x000000, b"\xaa\xbb\xcc\xdd")
 
-        shift_ops = [op for op in iface.ops if isinstance(op, Shift)]
+        shift_ops = [op for op in adapter.ops if isinstance(op, Shift)]
         mosi_bytes = [op.mosi for op in shift_ops if not op.read_miso]
         # Write enable (0x06)
         assert any(m == b"\x06" for m in mosi_bytes)
@@ -167,16 +175,16 @@ class TestSpiFlashProgram:
     @pytest.mark.asyncio
     async def test_program_multi_page(self):
         """Programming across page boundary splits into two page programs."""
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
         flash.page_size = 4
         # Two page programs, each needs WIP=0 after
-        iface.queue_response(bytes([0x00]))
-        iface.queue_response(bytes([0x00]))
+        adapter.queue_response(bytes([0x00]))
+        adapter.queue_response(bytes([0x00]))
 
         await flash.program(0x000002, b"\x01\x02\x03\x04\x05\x06")
 
-        shift_ops = [op for op in iface.ops if isinstance(op, Shift)]
+        shift_ops = [op for op in adapter.ops if isinstance(op, Shift)]
         pp_cmds = [op.mosi for op in shift_ops
                    if not op.read_miso and op.mosi[0:1] == b"\x02"]
         # 6 bytes at addr 2 with page_size=4: first 2 bytes (to boundary), then 4 bytes
@@ -184,18 +192,18 @@ class TestSpiFlashProgram:
 
     @pytest.mark.asyncio
     async def test_verify(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
         expected = b"\xaa\xbb\xcc\xdd"
-        iface.queue_response(expected)
+        adapter.queue_response(expected)
 
         assert await flash.verify(0x000000, expected) is True
 
     @pytest.mark.asyncio
     async def test_verify_mismatch(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
-        iface.queue_response(b"\x00\x00\x00\x00")
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
+        adapter.queue_response(b"\x00\x00\x00\x00")
 
         assert await flash.verify(0x000000, b"\xaa\xbb\xcc\xdd") is False
 
@@ -203,11 +211,10 @@ class TestSpiFlashProgram:
 class TestSpiFlashDetect:
     @pytest.mark.asyncio
     async def test_detect_valid(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
-        # Queue reset responses (no reads)
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
         # Queue JEDEC ID: Winbond W25Q32 (0xef4016, capacity=0x16=22, size=4MB)
-        iface.queue_response(bytes([0xef, 0x40, 0x16]))
+        adapter.queue_response(bytes([0xef, 0x40, 0x16]))
 
         await flash.detect()
         assert flash.jedec_id == 0xef4016
@@ -215,9 +222,9 @@ class TestSpiFlashDetect:
 
     @pytest.mark.asyncio
     async def test_detect_bad_id(self):
-        iface = MockSpiInterface()
-        flash = SpiFlash(iface, cs=0)
-        iface.queue_response(bytes([0xff, 0xff, 0xff]))
+        adapter = MockSpiAdapter()
+        flash, _ = _make_flash(adapter)
+        adapter.queue_response(bytes([0xff, 0xff, 0xff]))
 
         with pytest.raises(RuntimeError, match="Bad JEDEC"):
             await flash.detect()

@@ -1,11 +1,11 @@
 import asyncio
 import pytest
-from crobe_async.protocol.spi import Cs, Shift, Target
+from crobe_async.protocol.spi import Cs, Shift, Target, Interface
 from crobe_async.engine import Batcher
 from crobe_async.bitstring import BitString
 
 
-class MockSpiInterface(Batcher):
+class MockSpiAdapter(Batcher):
     """Records ops and populates Shift.miso with dummy data."""
 
     def __init__(self):
@@ -65,44 +65,109 @@ class TestShiftOp:
         assert "True" in repr(op)
 
 
+class TestInterface:
+    @pytest.mark.asyncio
+    async def test_passthrough(self):
+        adapter = MockSpiAdapter()
+        iface = Interface(adapter)
+        shift = Shift(b"\x9f", read_miso=True)
+        result = await iface.post(shift)
+        assert result is shift
+        assert shift.miso == bytes(1)
+        assert len(adapter.ops) == 1
+
+    @pytest.mark.asyncio
+    async def test_batching(self):
+        adapter = MockSpiAdapter()
+        iface = Interface(adapter)
+        s1 = Shift(b"\x01", read_miso=False)
+        s2 = Shift(b"\x02", read_miso=True)
+        f1 = iface.post(s1)
+        f2 = iface.post(s2)
+        await asyncio.gather(f1, f2)
+        assert len(adapter.ops) == 2
+
+    @pytest.mark.asyncio
+    async def test_cs_forwarded(self):
+        adapter = MockSpiAdapter()
+        iface = Interface(adapter)
+        cs = Cs(0, mode=1)
+        result = await iface.post(cs)
+        assert result is cs
+        assert len(adapter.ops) == 1
+        assert adapter.ops[0] is cs
+
+    def test_repr(self):
+        adapter = MockSpiAdapter()
+        iface = Interface(adapter, name="bus0")
+        assert "Interface" in repr(iface)
+
+
 class TestTarget:
     @pytest.mark.asyncio
-    async def test_shift(self):
-        iface = MockSpiInterface()
+    async def test_transaction_single_shift(self):
+        adapter = MockSpiAdapter()
+        iface = Interface(adapter)
         target = Target(iface, cs=0, mode=0)
-        result = await target.shift(b"\x9f")
-        # result is the Shift op
-        assert isinstance(result, Shift)
-
-    @pytest.mark.asyncio
-    async def test_transaction(self):
-        iface = MockSpiInterface()
-        target = Target(iface, cs=0, mode=0)
-        result = await target.transaction(b"\x9f\x00\x00")
+        shift = Shift(b"\x9f\x00\x00", read_miso=True)
+        result = await target.transaction(shift)
 
         # Should have CS assert, Shift, CS deassert
-        cs_ops = [op for op in iface.ops if isinstance(op, Cs)]
-        shift_ops = [op for op in iface.ops if isinstance(op, Shift)]
+        cs_ops = [op for op in adapter.ops if isinstance(op, Cs)]
+        shift_ops = [op for op in adapter.ops if isinstance(op, Shift)]
 
         assert len(cs_ops) == 2
         assert cs_ops[0].value == 0  # CS assert
         assert cs_ops[1].value is None  # CS deassert
         assert len(shift_ops) == 1
-        assert result == bytes(3)  # miso from mock
+        assert result == (shift,)
+
+    @pytest.mark.asyncio
+    async def test_transaction_multiple_shifts(self):
+        adapter = MockSpiAdapter()
+        iface = Interface(adapter)
+        target = Target(iface, cs=0, mode=0)
+        s1 = Shift(b"\x9f", read_miso=False)
+        s2 = Shift(3, read_miso=True)
+        result = await target.transaction(s1, s2)
+
+        cs_ops = [op for op in adapter.ops if isinstance(op, Cs)]
+        shift_ops = [op for op in adapter.ops if isinstance(op, Shift)]
+
+        assert len(cs_ops) == 2
+        assert len(shift_ops) == 2
+        assert result == (s1, s2)
+        assert s2.miso == bytes(3)
 
     @pytest.mark.asyncio
     async def test_transaction_mode(self):
-        iface = MockSpiInterface()
+        adapter = MockSpiAdapter()
+        iface = Interface(adapter)
         target = Target(iface, cs=1, mode=3)
-        await target.transaction(b"\x00")
+        await target.transaction(Shift(b"\x00", read_miso=False))
 
-        cs_on = [op for op in iface.ops if isinstance(op, Cs) and op.value is not None][0]
+        cs_on = [op for op in adapter.ops if isinstance(op, Cs) and op.value is not None][0]
         assert cs_on.value == 1
         assert cs_on.mode == 3
 
     @pytest.mark.asyncio
+    async def test_transaction_batching(self):
+        """Multiple transactions posted before await should batch."""
+        adapter = MockSpiAdapter()
+        iface = Interface(adapter)
+        target = Target(iface, cs=0, mode=0)
+        f1 = target.transaction(Shift(b"\x01", read_miso=False))
+        f2 = target.transaction(Shift(b"\x02", read_miso=False))
+        await asyncio.gather(f1, f2)
+
+        cs_ops = [op for op in adapter.ops if isinstance(op, Cs)]
+        # Two transactions = 4 CS ops (2 per transaction)
+        assert len(cs_ops) == 4
+
+    @pytest.mark.asyncio
     async def test_repr(self):
-        iface = MockSpiInterface()
+        adapter = MockSpiAdapter()
+        iface = Interface(adapter)
         target = Target(iface, cs=0, mode=2)
         assert "cs=0" in repr(target)
         assert "mode=2" in repr(target)

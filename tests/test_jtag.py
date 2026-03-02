@@ -298,16 +298,17 @@ class TestTapShift:
         assert run_ops[0].cycles == 10
 
     @pytest.mark.asyncio
-    async def test_postprocess(self):
-        """DR type postprocessing is applied to TDO."""
+    async def test_dr_type_accessible(self):
+        """Dr.type is an accessible attribute but TDO is always BitString."""
         class MyTap(Tap):
             ID_REG = Dr(length=32, type=int)
             IDCODE = Instruction(0x0e, "ID_REG")
 
         iface = MockInterface()
         tap = MyTap(iface, irlen=4)
+        assert tap.ID_REG.type is int
         result = await tap.IDCODE()
-        assert isinstance(result, int)
+        assert isinstance(result, BitString)
 
 
 class TestDynamicInstruction:

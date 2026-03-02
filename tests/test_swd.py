@@ -1,9 +1,11 @@
+import asyncio
 import pytest
 from crobe_async.protocol.swd import (
-    Ack, Read, Write, Run, Wakeup,
+    Ack, Read, Write, Run, Wakeup, Interface,
     JtagToSwd, SwdToDormant, DormantToSwd, LineReset,
     DP_IDCODE, DP_ABORT, DP_CTRL_STAT, DP_SELECT, DP_RDBUFF,
 )
+from crobe_async.engine import Batcher
 
 
 class TestAck:
@@ -122,6 +124,70 @@ class TestProtocolSequences:
         # Last 2 bits should be 0
         assert r.tms[50] == False
         assert r.tms[51] == False
+
+
+class MockSwdAdapter(Batcher):
+    """Records ops and populates Read.data."""
+
+    def __init__(self):
+        super().__init__()
+        self.ops = []
+
+    async def flush_ops(self, batch):
+        for op, future in batch:
+            self.ops.append(op)
+            if isinstance(op, Read):
+                op.data = 0x0ba00477
+                op.ack = Ack.OK
+            elif isinstance(op, Write):
+                op.ack = Ack.OK
+            future.set_result(op)
+
+
+class TestInterface:
+    @pytest.mark.asyncio
+    async def test_passthrough_read(self):
+        adapter = MockSwdAdapter()
+        iface = Interface(adapter)
+        op = Read(ap=False, addr=0x00)
+        result = await iface.post(op)
+        assert result is op
+        assert op.data == 0x0ba00477
+        assert len(adapter.ops) == 1
+
+    @pytest.mark.asyncio
+    async def test_passthrough_write(self):
+        adapter = MockSwdAdapter()
+        iface = Interface(adapter)
+        op = Write(ap=False, addr=0x00, data=0x12345678)
+        result = await iface.post(op)
+        assert result is op
+        assert op.ack == Ack.OK
+
+    @pytest.mark.asyncio
+    async def test_batching(self):
+        adapter = MockSwdAdapter()
+        iface = Interface(adapter)
+        r = Read(ap=False, addr=0x00)
+        w = Write(ap=False, addr=0x04, data=0)
+        f1 = iface.post(r)
+        f2 = iface.post(w)
+        await asyncio.gather(f1, f2)
+        assert len(adapter.ops) == 2
+
+    @pytest.mark.asyncio
+    async def test_run_forwarded(self):
+        adapter = MockSwdAdapter()
+        iface = Interface(adapter)
+        op = Run(10)
+        result = await iface.post(op)
+        assert result is op
+        assert adapter.ops[0].cycles == 10
+
+    def test_repr(self):
+        adapter = MockSwdAdapter()
+        iface = Interface(adapter, name="swd0")
+        assert "Interface" in repr(iface)
 
 
 class TestDpAddresses:

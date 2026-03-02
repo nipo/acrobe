@@ -7,16 +7,15 @@ Uses the SPI protocol layer for communication.
 from __future__ import annotations
 
 import asyncio
-import struct
 
 from ..component import Component
-from ..protocol.spi import Cs, Shift
+from ..protocol.spi import Shift
 
 
 class SpiFlash(Component):
     """SPI NOR flash device.
 
-    Communicates through an SPI interface (Batcher that accepts Cs/Shift ops).
+    Communicates through an SPI Target (handles CS management).
     """
 
     # Standard SPI flash commands
@@ -40,11 +39,9 @@ class SpiFlash(Component):
 
     ADDRESS_SIZE = 3  # 3-byte addressing by default
 
-    def __init__(self, interface, cs=0, mode: int = 0, name: str = "flash"):
+    def __init__(self, target, name: str = "flash"):
         super().__init__(name)
-        self._interface = interface
-        self._cs = cs
-        self._mode = mode
+        self._target = target
         self.jedec_id = 0
         self.total_size = 0
         self.page_size = 256
@@ -53,7 +50,7 @@ class SpiFlash(Component):
     async def _command(self, cmd: bytes, addr: bytes = b"",
                        wdata: bytes = b"", rsize: int = 0,
                        dummy: int = 0) -> bytes:
-        """Execute a flash command: CS assert, send command+addr+data, read response, CS deassert."""
+        """Execute a flash command as an atomic CS-held transaction."""
         parts = [cmd]
         if addr:
             parts.append(addr)
@@ -61,22 +58,15 @@ class SpiFlash(Component):
             parts.append(bytes(dummy))
         if wdata:
             parts.append(wdata)
-
         mosi = b"".join(parts)
 
-        await self._interface.post(Cs(self._cs, self._mode))
-
+        shifts = [Shift(mosi, read_miso=False)]
+        read_shift = None
         if rsize:
-            # Send command, then read response
-            await self._interface.post(Shift(mosi, read_miso=False))
-            shift = Shift(rsize, read_miso=True)
-            await self._interface.post(shift)
-            await self._interface.post(Cs(None))
-            return shift.miso
-        else:
-            await self._interface.post(Shift(mosi, read_miso=False))
-            await self._interface.post(Cs(None))
-            return b""
+            read_shift = Shift(rsize, read_miso=True)
+            shifts.append(read_shift)
+        await self._target.transaction(*shifts)
+        return read_shift.miso if read_shift else b""
 
     def _addr_bytes(self, addr: int) -> bytes:
         return addr.to_bytes(self.ADDRESS_SIZE, "big")

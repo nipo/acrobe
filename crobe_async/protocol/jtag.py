@@ -68,11 +68,10 @@ class SwdToJtag:
 # Internal Tap Operations
 
 class _TapShift:
-    def __init__(self, ir_value, tdi, read_tdo, postprocess=None):
+    def __init__(self, ir_value, tdi, read_tdo):
         self.ir_value = ir_value
         self.tdi = tdi
         self.read_tdo = read_tdo
-        self.postprocess = postprocess
 
     def __repr__(self):
         return f"_TapShift(ir={self.ir_value:#x}, tdi={self.tdi!r}, read_tdo={self.read_tdo})"
@@ -249,7 +248,6 @@ class Tap(Batcher, Component, InstructionRegistry):
     def _post_instruction(self, instr, tdi, read_tdo):
         """Post a DR shift for a given instruction. Called by TapInstruction.__call__."""
         ir_value = int(instr.ir) & ((1 << self.irlen) - 1)
-        postprocess = None
 
         if tdi is None:
             if read_tdo is None or read_tdo:
@@ -273,17 +271,14 @@ class Tap(Batcher, Component, InstructionRegistry):
             elif not isinstance(tdi, BitStringBase):
                 raise TypeError(f"tdi must be int, BitString, or None")
 
-        if instr.dr and instr.dr.type:
-            postprocess = instr.dr.type
-
-        op = _TapShift(ir_value, tdi, read_tdo, postprocess)
+        op = _TapShift(ir_value, tdi, read_tdo)
         return self.post(op)
 
     async def flush_ops(self, batch):
         """Translate tap-level ops into JTAG interface ops."""
         jtag_futures = []
         # Track which batch entries need TDO extraction
-        tdo_info = []  # list of (batch_index, jtag_shift_future, postprocess_fn)
+        tdo_info = []  # list of (batch_index, jtag_shift_future)
 
         for idx, (op, future) in enumerate(batch):
             if isinstance(op, _TapShift):
@@ -314,7 +309,7 @@ class Tap(Batcher, Component, InstructionRegistry):
                             Shift(BitString(0, self.dr_post), read_tdo=False)))
 
                     if op.read_tdo:
-                        tdo_info.append((idx, data_future, op.postprocess))
+                        tdo_info.append((idx, data_future))
 
             elif isinstance(op, _TapRun):
                 jtag_futures.append(self._interface.post(Run(op.cycles)))
@@ -324,12 +319,9 @@ class Tap(Batcher, Component, InstructionRegistry):
             await asyncio.gather(*jtag_futures)
 
         # Resolve futures with TDO values
-        for idx, data_future, postprocess in tdo_info:
+        for idx, data_future in tdo_info:
             shift_op = data_future.result()  # The Shift op, with .tdo populated
-            tdo = shift_op.tdo
-            if postprocess is not None and tdo is not None:
-                tdo = postprocess(tdo)
-            batch[idx][1].set_result(tdo)
+            batch[idx][1].set_result(shift_op.tdo)
 
         # Resolve remaining futures with None
         for op, future in batch:

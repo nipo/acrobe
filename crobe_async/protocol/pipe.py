@@ -16,7 +16,3 @@ class Pipe(Protocol):
     async def read(self, size: int) -> bytes:
         """Read exactly `size` bytes from the transport."""
         ...
-
-    async def write_read(self, data: bytes, size: int) -> bytes:
-        """Write data, then read `size` bytes. Convenience for command-response."""
-        ...
