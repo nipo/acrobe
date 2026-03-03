@@ -311,6 +311,86 @@ class TestTapShift:
         assert isinstance(result, BitString)
 
 
+class TestIrStatus:
+    @pytest.mark.asyncio
+    async def test_ir_status_returns_bitstring(self):
+        """ir_status() returns a BitString of irlen bits."""
+        iface = MockInterface()
+        tap = Tap(iface, irlen=6)
+        result = await tap.ir_status()
+        assert isinstance(result, BitString)
+        assert len(result) == 6
+
+    @pytest.mark.asyncio
+    async def test_ir_status_emits_capture_ir(self):
+        """ir_status() emits CaptureIr."""
+        iface = MockInterface()
+        tap = Tap(iface, irlen=6)
+        await tap.ir_status()
+        assert any(isinstance(op, CaptureIr) for op in iface.ops)
+
+    @pytest.mark.asyncio
+    async def test_ir_status_shifts_bypass(self):
+        """ir_status() shifts BYPASS (all 1s) into IR."""
+        iface = MockInterface()
+        tap = Tap(iface, irlen=6)
+        await tap.ir_status()
+        shifts = [op for op in iface.ops if isinstance(op, Shift)]
+        # Single shift with read_tdo=True, all-ones BYPASS
+        assert len(shifts) == 1
+        assert shifts[0].read_tdo is True
+        assert int(shifts[0].tdi) == 0x3f  # 6 bits all ones
+
+    @pytest.mark.asyncio
+    async def test_ir_status_updates_current_ir(self):
+        """After ir_status(), _current_ir is BYPASS (all 1s)."""
+        class MyTap(Tap):
+            DATA_REG = Dr(length=8)
+            DATA = Instruction(0x05, "DATA_REG")
+
+        iface = MockInterface()
+        tap = MyTap(iface, irlen=6)
+        # Set IR to something first
+        await tap.DATA(0)
+        assert tap._current_ir == 0x05
+
+        iface.ops.clear()
+        await tap.ir_status()
+        assert tap._current_ir == 0x3f  # all ones, BYPASS
+
+    @pytest.mark.asyncio
+    async def test_ir_status_with_chain_padding(self):
+        """ir_status() emits pre/post padding shifts with read_tdo=False."""
+        iface = MockInterface()
+        tap = Tap(iface, irlen=6)
+        tap.position_set(ir_pre=4, dr_pre=1, ir_post=5, dr_post=1)
+
+        await tap.ir_status()
+        shifts = [op for op in iface.ops if isinstance(op, Shift)]
+        # 3 shifts: pre (4 bits, no read), data (6 bits, read), post (5 bits, no read)
+        assert len(shifts) == 3
+        assert len(shifts[0].tdi) == 4
+        assert shifts[0].read_tdo is False
+        assert int(shifts[0].tdi) == 0xf  # all 1s
+        assert len(shifts[1].tdi) == 6
+        assert shifts[1].read_tdo is True
+        assert int(shifts[1].tdi) == 0x3f  # BYPASS
+        assert len(shifts[2].tdi) == 5
+        assert shifts[2].read_tdo is False
+        assert int(shifts[2].tdi) == 0x1f  # all 1s
+
+    @pytest.mark.asyncio
+    async def test_ir_status_no_padding_when_zero(self):
+        """ir_status() with no pre/post emits only one data shift."""
+        iface = MockInterface()
+        tap = Tap(iface, irlen=4)
+        # default: ir_pre=0, ir_post=0
+        await tap.ir_status()
+        shifts = [op for op in iface.ops if isinstance(op, Shift)]
+        assert len(shifts) == 1
+        assert shifts[0].read_tdo is True
+
+
 class TestDynamicInstruction:
     @pytest.mark.asyncio
     async def test_dynamic_read(self):

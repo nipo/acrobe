@@ -85,6 +85,11 @@ class _TapRun:
         return f"_TapRun(cycles={self.cycles})"
 
 
+class _TapIrStatus:
+    def __repr__(self):
+        return "_TapIrStatus()"
+
+
 # Instruction Registry
 
 class Dr:
@@ -245,6 +250,14 @@ class Tap(Batcher, Component, InstructionRegistry):
         """Post a run operation. Returns Future."""
         return self.post(_TapRun(cycles))
 
+    def ir_status(self):
+        """Post an IR status capture. Shifts BYPASS into IR, returns Future -> BitString.
+
+        The captured IR value contains status bits (device-specific).
+        This always forces an IR shift regardless of _current_ir tracking.
+        """
+        return self.post(_TapIrStatus())
+
     def _post_instruction(self, instr, tdi, read_tdo):
         """Post a DR shift for a given instruction. Called by TapInstruction.__call__."""
         ir_value = int(instr.ir) & ((1 << self.irlen) - 1)
@@ -280,8 +293,30 @@ class Tap(Batcher, Component, InstructionRegistry):
         # Track which batch entries need TDO extraction
         tdo_info = []  # list of (batch_index, jtag_shift_future)
 
+        bypass_val = (1 << self.irlen) - 1
+
         for idx, (op, future) in enumerate(batch):
-            if isinstance(op, _TapShift):
+            if isinstance(op, _TapIrStatus):
+                # Capture IR status: split IR shift into pre/data/post
+                # so we can read just our device's captured IR value.
+                jtag_futures.append(self._interface.post(CaptureIr()))
+
+                if self.ir_pre:
+                    jtag_futures.append(self._interface.post(
+                        Shift(BitString(-1, self.ir_pre), read_tdo=False)))
+
+                data_shift = Shift(BitString(bypass_val, self.irlen), read_tdo=True)
+                data_future = self._interface.post(data_shift)
+                jtag_futures.append(data_future)
+
+                if self.ir_post:
+                    jtag_futures.append(self._interface.post(
+                        Shift(BitString(-1, self.ir_post), read_tdo=False)))
+
+                self._current_ir = bypass_val
+                tdo_info.append((idx, data_future))
+
+            elif isinstance(op, _TapShift):
                 # IR shift if IR changed
                 if op.ir_value != self._current_ir:
                     ir_data = (BitString(-1, self.ir_pre) +
