@@ -17,14 +17,8 @@ async def info():
     pass
 
 
-def _import_adapters():
-    """Import known adapter modules to populate adapter_db."""
-    from ..adapter import proby as _  # noqa: F401
-
-
 def _make_hw_root():
     """Create HwRoot with USB enumerator."""
-    _import_adapters()
     root = HwRoot()
     root.add_enumerator(UsbEnumerator())
     return root
@@ -32,7 +26,6 @@ def _make_hw_root():
 
 @info.command(help="List recognized USB adapters")
 async def adapters():
-    _import_adapters()
     enum = UsbEnumerator()
     found = await enum.scan()
     if not found:
@@ -69,7 +62,12 @@ async def enumerate(root_path):
         await chain.discover()
         click.echo(f"Found {len(chain.children)} device(s):")
         for tap in chain.children:
-            click.echo(f"  IDCODE=0x{tap.idcode:08x} irlen={tap.irlen}")
+            click.echo(
+                f"  {tap.name}  "
+                f"IDCODE=0x{tap.idcode:08x}  "
+                f"irlen={tap.irlen}  "
+                f"({type(tap).__name__})"
+            )
 
 
 @info.command(help="List loaded plugins")

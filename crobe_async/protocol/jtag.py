@@ -212,9 +212,14 @@ class _DynamicInstruction:
 
 # Tap
 
+def _idcode_eq(key, lookup):
+    """Compare IDCODEs ignoring the 4-bit revision field (bits 31:28)."""
+    return (key & 0x0FFFFFFF) == (lookup & 0x0FFFFFFF)
+
+
 class Tap(Batcher, Component, InstructionRegistry):
     irlen = None
-    db = Db("TAP idcode")
+    db = Db("TAP idcode", eq_func=_idcode_eq)
 
     def __init__(self, interface, idcode=None, irlen=None, name=None):
         if irlen is not None:

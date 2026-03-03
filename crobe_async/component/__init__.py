@@ -190,3 +190,6 @@ class Component:
         self._started = False
         for child in self._children:
             await child.stop_tree()
+
+
+from . import xilinx  # noqa: F401, E402
