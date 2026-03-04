@@ -453,6 +453,187 @@ class TestSeries6LoadSequence:
         assert len(ir_status_responses) > 0
 
 
+# -- UserID skip tests --
+
+class UseridMockInterface(Batcher):
+    """Mock that returns a configurable USERCODE and tracks reload attempts."""
+
+    def __init__(self, usercode, done=True):
+        super().__init__()
+        self.usercode = usercode
+        self.done = done
+        self.shifts = []
+
+    async def flush_ops(self, batch):
+        for op, future in batch:
+            if isinstance(op, Shift) and op.read_tdo:
+                self.shifts.append(op)
+                # First read is USERCODE (32 bits), subsequent are ir_status (6 bits)
+                if len(op.tdi) == 32:
+                    op.tdo = BitString(self.usercode, 32)
+                else:
+                    val = 0x20 if self.done else 0x00  # done bit
+                    op.tdo = BitString(val, len(op.tdi))
+            future.set_result(op)
+
+
+class TestSeries6UseridSkip:
+    @pytest.mark.asyncio
+    async def test_userid_match_skips_reload(self):
+        """When userid matches and FPGA is configured, load() skips reprogramming."""
+        iface = UseridMockInterface(usercode=0xCAFEBABE, done=True)
+        tap = Series6(iface, idcode=0x04001093)
+
+        prog = Program()
+        prog.append(Segment(0, struct.pack(">2H", 0xaa99, 0x5566)))
+        prog.info["userid"] = 0xCAFEBABE
+
+        await tap.load(prog)
+        # Only USERCODE read + ir_status polls, no JPROGRAM reset
+        # The JPROGRAM shift would add many more ops
+        assert len(iface.shifts) <= 3
+
+    @pytest.mark.asyncio
+    async def test_userid_mismatch_reloads(self):
+        """When userid doesn't match, full reload happens."""
+        call_count = [0]
+
+        class ReloadMockInterface(Batcher):
+            def __init__(self):
+                super().__init__()
+                self.shifts = []
+
+            async def flush_ops(self, batch):
+                for op, future in batch:
+                    if isinstance(op, Shift) and op.read_tdo:
+                        self.shifts.append(op)
+                        if len(op.tdi) == 32:
+                            op.tdo = BitString(0xDEADBEEF, 32)
+                        else:
+                            val = 0x10 if call_count[0] < 3 else 0x20
+                            call_count[0] += 1
+                            op.tdo = BitString(val, len(op.tdi))
+                    future.set_result(op)
+
+        iface = ReloadMockInterface()
+        tap = Series6(iface, idcode=0x04001093)
+
+        prog = Program()
+        prog.append(Segment(0, struct.pack(">2H", 0xaa99, 0x5566)))
+        prog.info["userid"] = 0xCAFEBABE
+
+        await tap.load(prog)
+        # Full reload: USERCODE read + reset + cfg_shift + start
+        assert len(iface.shifts) > 3
+
+    @pytest.mark.asyncio
+    async def test_no_userid_skips_check(self):
+        """When program has no userid, no USERCODE read happens."""
+        call_count = [0]
+
+        class NoUseridMockInterface(Batcher):
+            def __init__(self):
+                super().__init__()
+                self.shifts = []
+
+            async def flush_ops(self, batch):
+                for op, future in batch:
+                    if isinstance(op, Shift) and op.read_tdo:
+                        self.shifts.append(op)
+                        val = 0x10 if call_count[0] < 3 else 0x20
+                        call_count[0] += 1
+                        op.tdo = BitString(val, len(op.tdi))
+                    future.set_result(op)
+
+        iface = NoUseridMockInterface()
+        tap = Series6(iface, idcode=0x04001093)
+
+        prog = Program()
+        prog.append(Segment(0, struct.pack(">2H", 0xaa99, 0x5566)))
+        # No userid in info
+
+        await tap.load(prog)
+        # No 32-bit USERCODE read
+        assert all(len(s.tdi) != 32 for s in iface.shifts)
+
+    @pytest.mark.asyncio
+    async def test_userid_ffffffff_skips_check(self):
+        """UserID 0xffffffff is treated as absent."""
+        call_count = [0]
+
+        class NoCheckMockInterface(Batcher):
+            def __init__(self):
+                super().__init__()
+                self.shifts = []
+
+            async def flush_ops(self, batch):
+                for op, future in batch:
+                    if isinstance(op, Shift) and op.read_tdo:
+                        self.shifts.append(op)
+                        val = 0x10 if call_count[0] < 3 else 0x20
+                        call_count[0] += 1
+                        op.tdo = BitString(val, len(op.tdi))
+                    future.set_result(op)
+
+        iface = NoCheckMockInterface()
+        tap = Series6(iface, idcode=0x04001093)
+
+        prog = Program()
+        prog.append(Segment(0, struct.pack(">2H", 0xaa99, 0x5566)))
+        prog.info["userid"] = 0xffffffff
+
+        await tap.load(prog)
+        # No 32-bit USERCODE read
+        assert all(len(s.tdi) != 32 for s in iface.shifts)
+
+
+class TestSeries7UseridSkip:
+    @pytest.mark.asyncio
+    async def test_userid_match_skips_reload(self):
+        """When userid matches and FPGA is configured, load() skips reprogramming."""
+        iface = UseridMockInterface(usercode=0xCAFEBABE, done=True)
+        tap = Series7(iface, idcode=0x03631093)
+
+        prog = Program()
+        prog.append(Segment(0, struct.pack(">2L", 0xaa995566, 0x20000000)))
+        prog.info["userid"] = 0xCAFEBABE
+
+        await tap.load(prog)
+        assert len(iface.shifts) <= 3
+
+    @pytest.mark.asyncio
+    async def test_userid_mismatch_reloads(self):
+        """When userid doesn't match, full reload happens."""
+        call_count = [0]
+
+        class ReloadMockInterface(Batcher):
+            def __init__(self):
+                super().__init__()
+                self.shifts = []
+
+            async def flush_ops(self, batch):
+                for op, future in batch:
+                    if isinstance(op, Shift) and op.read_tdo:
+                        self.shifts.append(op)
+                        if len(op.tdi) == 32:
+                            op.tdo = BitString(0xDEADBEEF, 32)
+                        else:
+                            val = 0x20 if call_count[0] >= 2 else 0x00
+                            call_count[0] += 1
+                            op.tdo = BitString(val, len(op.tdi))
+                    future.set_result(op)
+
+        iface = ReloadMockInterface()
+        tap = Series7(iface, idcode=0x03631093)
+
+        prog = Program()
+        prog.append(Segment(0, struct.pack(">2L", 0xaa995566, 0x20000000)))
+        prog.info["userid"] = 0xCAFEBABE
+
+        await tap.load(prog)
+        assert len(iface.shifts) > 3
+
+
 # -- Series7 load sequence test --
 
 class TestSeries7LoadSequence:

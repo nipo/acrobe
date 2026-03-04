@@ -155,11 +155,15 @@ class FtdiTransport:
             None, self._sync_write_read, data, response_len)
 
     async def close(self):
-        """Reset FTDI bitmode and release device."""
+        """Reset FTDI bitmode and release device.
+
+        When created via from_device() (ctx=None), only releases the
+        interface — the caller owns the device lifetime.
+        """
         idx = self._interface_index + 1
         await self._device.vendor_control(
             SIO_SET_BITMODE, BITMODE_RESET << 8, idx, b'')
         self._device.handle.releaseInterface(self._interface_index)
-        self._device.handle.close()
         if self._ctx is not None:
+            self._device.handle.close()
             self._ctx.close()

@@ -15,9 +15,11 @@ class Series6(Tap, JtagSramFpga, ConfigAccessPort):
     ISC_DEFAULT = Dr(1)
     CONFIG = Dr(None)
     DEVICE_ID = Dr(32)
+    USER_CODE = Dr(32)
 
     BYPASS = Instruction(-1, "BYPASS_REG")
     IDCODE = Instruction(0x09, "DEVICE_ID")
+    IR_USERCODE = Instruction(0x08, "USER_CODE")
     IR_ISC_NOP = Instruction(0x14, "ISC_DEFAULT")
     IR_JPROGRAM = Instruction(0x0b, "ISC_DEFAULT")
     IR_JSTART = Instruction(0x0c, "ISC_DEFAULT")
@@ -53,6 +55,14 @@ class Series6(Tap, JtagSramFpga, ConfigAccessPort):
         blob = program[0].data
         if len(blob) % 2:
             raise ValueError("Odd data length in bitstream")
+
+        userid = program.info.get("userid")
+        if userid is not None and userid != 0xffffffff:
+            hw_userid = int(await self.IR_USERCODE())
+            if hw_userid == userid:
+                self.logger.trace("UserID match (0x%08x), skipping reload", userid)
+                if await self.send_op_wait(-1, done=True):
+                    return
 
         prog_data = struct.unpack(">" + "H" * (len(blob) // 2), blob)
 
