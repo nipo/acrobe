@@ -166,6 +166,13 @@ class GowinFpga(Tap, JtagSramFpga):
         return self.is_done(st)
 
 
+
+@GowinFpga.application_db.register("spi")
+def _gowin_spi(tap):
+    from ..jtag_spi_bridge import jtag_spi_bridge
+    return jtag_spi_bridge(tap, base_freq=30e6)
+
+
 @Tap.db.register(*_part_ids("GW1"))
 class Gw1n(GowinFpga):
     pass

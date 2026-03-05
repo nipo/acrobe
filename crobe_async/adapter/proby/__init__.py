@@ -6,7 +6,7 @@ from ..model import Adapter, AdapterInfo, adapter_db
 from ..ftdi.transport import FtdiTransport
 from ..ftdi.mpsse import MpsseEngine
 from ..ftdi.jtag import JtagMpsse
-from ...protocol.jtag import Chain
+from ...protocol.jtag import Chain, JtagInterface
 from ...loadable.xilinx import load_xilinx_bitstream
 
 
@@ -91,8 +91,9 @@ class ProbyAdapter(Adapter):
             async with self._channel_a_lock:
                 await self._close_channel_a()
                 await self._reprogram("jtag_swd_raw")
-                return await self._open_channel_a(
+                jtag = await self._open_channel_a(
                     gpio_oe=0x0710, gpio_val=0x0310)
+                return JtagInterface(jtag, name="jtag-pt")
 
         raise NoMatch("interface", name)
 

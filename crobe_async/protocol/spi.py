@@ -5,6 +5,7 @@ import asyncio
 from ..engine import Batcher
 from ..component import Component
 from ..bitstring import BitStringBase
+from ..db import Db, NoMatch
 
 
 # --- SPI Operations ---
@@ -78,6 +79,8 @@ class Target(Batcher, Component):
         result = await target.transaction(Shift(b"\\x9f", read_miso=True))
     """
 
+    child_db = Db("SPI chip type")
+
     def __init__(self, interface, cs, mode: int = 0, name: str = "spi"):
         Batcher.__init__(self)
         Component.__init__(self, name)
@@ -110,6 +113,9 @@ class Target(Batcher, Component):
 
         for idx, shifts, shift_futures in result_map:
             batch[idx][1].set_result(tuple(shifts))
+
+    async def child_spawn(self, name):
+        return await self.child_db.acall(name, self)
 
     def __repr__(self):
         return f"<Target cs={self.cs} mode={self.mode}>"

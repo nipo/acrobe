@@ -372,6 +372,20 @@ class Tap(Batcher, Component, InstructionRegistry):
         return f"<Tap {self._name} irlen={self.irlen}>"
 
 
+# JTAG Interface
+
+class JtagInterface(Component):
+    """JTAG master interface. Holds a single Chain as child.
+
+    Supports multiple chains (e.g. behind a mux) in the future.
+    """
+
+    def __init__(self, interface, name="jtag"):
+        super().__init__(name)
+        self._interface = interface
+        self.child_add(Chain(interface))
+
+
 # Chain
 
 class OpenChain(Exception):
@@ -387,6 +401,9 @@ class Chain(Component):
         self._interface = interface
         self.total_irlen = 0
         self.total_drlen = 0
+
+    async def start(self):
+        await self.discover()
 
     async def _shift_discover(self, max_length=512, shift_in=None):
         """Probe a register's length by shifting a marker through.
@@ -559,6 +576,12 @@ class Chain(Component):
 
         self.child_add(tap)
         return tap
+
+    async def child_spawn(self, name):
+        """Delegate to single TAP when chain has exactly one device."""
+        if len(self._children) == 1:
+            return await self._children[0].child_summon(name)
+        raise NoMatch("child", name)
 
     def __repr__(self):
         return f"<Chain {self._name} taps={len(self._children)}>"

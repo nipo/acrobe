@@ -73,11 +73,15 @@ class Component:
     def started(self) -> bool:
         return self._started
 
-    def child_add(self, child: "Component"):
+    def _child_attach(self, child: "Component"):
+        """Attach child without auto-start. Used by child_summon."""
         assert child._parent is None, f"{child.fqdn} already has a parent"
         child._parent = self
         self._children.append(child)
         self.children_changed()
+
+    def child_add(self, child: "Component"):
+        self._child_attach(child)
         if self._started:
             asyncio.ensure_future(child.start_tree())
 
@@ -154,21 +158,42 @@ class Component:
         """Create a child by name. Override in subclasses."""
         raise NoMatch("child", name)
 
+    async def _child_spawn_mro(self, name):
+        """Walk the MRO trying each class's child_spawn from __dict__.
+
+        Each class in the hierarchy can define its own child_spawn
+        with its own Db. NoMatch causes fallback to the next class.
+        """
+        for cls in type(self).__mro__:
+            try:
+                method = cls.__dict__["child_spawn"]
+            except KeyError:
+                continue
+            try:
+                return await method(self, name)
+            except NoMatch:
+                continue
+        raise NoMatch("child", name)
+
     async def child_summon(self, *parts):
         """Resolve a path through the component tree, spawning as needed.
 
         Spawned children that are Components are added to the tree.
-        Non-Component children (e.g. Batcher-only objects) are returned
-        without tree insertion.
+        Each component along the path is started (if not already) before
+        navigating deeper, so that start() can populate children
+        (e.g. Chain.start() discovers TAPs).
         """
         if not parts:
             return self
         name, *rest = parts
         child = self.child_lookup(name)
         if child is None:
-            child = await self.child_spawn(name)
+            child = await self._child_spawn_mro(name)
             if isinstance(child, Component) and child._parent is None:
-                self.child_add(child)
+                self._child_attach(child)
+        if isinstance(child, Component) and not child._started:
+            await child.start()
+            child._started = True
         if not rest:
             return child
         return await child.child_summon(*rest)
@@ -180,8 +205,9 @@ class Component:
         pass
 
     async def start_tree(self):
-        await self.start()
-        self._started = True
+        if not self._started:
+            await self.start()
+            self._started = True
         for child in self._children:
             await child.start_tree()
 
@@ -194,3 +220,4 @@ class Component:
 
 from . import xilinx  # noqa: F401, E402
 from . import gowin  # noqa: F401, E402
+from . import spi_flash  # noqa: F401, E402

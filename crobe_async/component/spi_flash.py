@@ -214,3 +214,13 @@ class SpiFlash(Component):
 
     def __repr__(self):
         return f"<SpiFlash jedec={self.jedec_id:#08x} size={self.total_size}>"
+
+
+from ..protocol import spi  # noqa: E402
+
+
+@spi.Target.child_db.register("flash")
+async def _spi_flash_probe(target):
+    flash = SpiFlash(target)
+    await flash.detect()
+    return flash

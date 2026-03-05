@@ -52,11 +52,16 @@ async def enumerate(root_path):
 
     leaf = await hw_root.child_summon(*parts)
 
+    # Start the leaf's subtree so children are populated
+    # (e.g. Chain.start() discovers TAPs)
+    if isinstance(leaf, Component):
+        await leaf.start_tree()
+
     click.echo("Root resolution:")
     component_dump(hw_root, "  ")
 
-    # If leaf looks like a JTAG interface, discover chain
-    if hasattr(leaf, 'post'):
+    # If leaf is a raw JTAG interface (Batcher but not Component), discover chain
+    if hasattr(leaf, 'post') and not isinstance(leaf, Component):
         chain = Chain(leaf)
         click.echo("\nDiscovering JTAG chain...")
         await chain.discover()

@@ -1,3 +1,4 @@
+import inspect
 import operator
 
 
@@ -47,6 +48,22 @@ class Db:
         for handler in handlers:
             try:
                 return handler(*args, **kwargs)
+            except NoMatch as e:
+                errors.append(e)
+        if len(errors) == 1:
+            raise NoMatch(self.name, id) from errors[0]
+        raise NoMatch(self.name, id)
+
+    async def acall(self, id, *args, allow_default=True, **kwargs):
+        """Async version of call. Awaits awaitables returned by handlers."""
+        handlers = self.get(id, allow_default=allow_default)
+        errors = []
+        for handler in handlers:
+            try:
+                result = handler(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
+                return result
             except NoMatch as e:
                 errors.append(e)
         if len(errors) == 1:
