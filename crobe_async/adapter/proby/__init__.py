@@ -87,7 +87,7 @@ class ProbyAdapter(Adapter):
         name_lower = name.lower()
 
         if name_lower == "jtag":
-            return self._jtag
+            return JtagInterface(self._jtag, name="jtag")
 
         if name_lower == "jtag-pt":
             async with self._channel_a_lock:

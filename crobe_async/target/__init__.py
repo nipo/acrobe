@@ -159,3 +159,48 @@ class _Explorer:
         self.func = func
         self.component_types = component_types
         self.precedence = precedence
+
+
+class Field(Component):
+    """Target discovery: walks component tree, matches explorers to components.
+
+    Creates Target children for each discovered component.
+    After discover(), self.unhandled contains components not claimed by any explorer.
+    """
+
+    def __init__(self):
+        super().__init__("Targets")
+        self.unhandled = set()
+
+    async def discover(self, *roots):
+        types = set()
+        for e in Target._explorers:
+            types |= set(e.component_types)
+
+        interests = {}
+        for t in types:
+            interests[t] = set()
+            for root in roots:
+                interests[t] |= set(
+                    root.children_of_class(t, include_self=True))
+
+        for explorer in Target._explorers:
+            for comp_type in explorer.component_types:
+                for component in list(interests.get(comp_type, [])):
+                    try:
+                        target = explorer.func(component)
+                    except NotImplementedError:
+                        continue
+                    self.child_add(target)
+                    to_remove = set(
+                        component.children_find(lambda x: True))
+                    for k in interests:
+                        interests[k] -= to_remove
+
+        self.unhandled = set()
+        for v in interests.values():
+            self.unhandled |= v
+
+
+from . import fpga  # noqa: F401, E402
+from . import spi_flash  # noqa: F401, E402
