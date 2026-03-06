@@ -221,24 +221,29 @@ class Program:
 
     @classmethod
     def from_file(cls, filename, offset=0):
-        # Parse suffixes: filename:format:+offset
+        # Parse suffixes from the right: data:format:+offset
+        # e.g. "file.bin:+100", "file.bin:format", "deadbeef:literal:+0x100"
         parts = filename
         fmt = None
 
-        # Check for :+offset suffix
-        if ":+" in parts:
+        # Strip :+offset suffixes (may be multiple)
+        while ":+" in parts:
             idx = parts.rindex(":+")
-            offset = int(parts[idx + 2:], 0)
+            offset += int(parts[idx + 2:], 16)
             parts = parts[:idx]
 
-        # Check for :format suffix
-        if ":" in parts and not os.path.exists(parts):
-            idx = parts.rindex(":")
-            candidate_path = parts[:idx]
+        # Strip :format suffix — try rightmost colon as format
+        while ":" in parts and not os.path.exists(parts):
+            idx = parts.rindex(":", 2)
             candidate_fmt = parts[idx + 1:]
-            if os.path.exists(candidate_path):
+            candidate_data = parts[:idx]
+            try:
+                cls.format_db.get(candidate_fmt)
                 fmt = candidate_fmt
-                parts = candidate_path
+                parts = candidate_data
+                break
+            except NoMatch:
+                break
 
         filename = parts
 
