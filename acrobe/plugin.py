@@ -21,20 +21,20 @@ def _load_pep420_plugins():
     import importlib
     import os
 
-    debug = os.getenv("CROBE_PLUGIN_DEBUG")
+    debug = os.getenv("ACROBE_PLUGIN_DEBUG")
 
     try:
-        import crobe_plugin
+        import acrobe_plugin
     except ImportError:
         if debug:
-            print("crobe_plugin namespace package not found")
+            print("acrobe_plugin namespace package not found")
         return []
 
     import pkgutil
 
     result = []
     for finder, name, ispkg in pkgutil.iter_modules(
-            crobe_plugin.__path__, crobe_plugin.__name__ + "."):
+            acrobe_plugin.__path__, acrobe_plugin.__name__ + "."):
         if debug:
             print(f"Loading plugin {name}...")
         try:

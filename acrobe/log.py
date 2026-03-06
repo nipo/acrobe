@@ -1,4 +1,4 @@
-"""Logging infrastructure for crobe_async.
+"""Logging infrastructure for acrobe.
 
 Custom log levels, domain filtering, colored formatting,
 and progress reporting.

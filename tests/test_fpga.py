@@ -2,25 +2,25 @@ import asyncio
 import struct
 import pytest
 
-from crobe_async.component.fpga import SramFpga, JtagSramFpga
-from crobe_async.target.fpga import FpgaTarget
-from crobe_async.target import Target
-from crobe_async.component.xilinx.config_access_port import ConfigAccessPort
-from crobe_async.component.xilinx.series6 import Series6
-from crobe_async.component.xilinx.series7 import Series7
-from crobe_async.component.xilinx.spartan6 import Spartan6
-from crobe_async.component.xilinx.artix7 import Artix7
-from crobe_async.component.xilinx.spartan7 import Spartan7
-from crobe_async.component.xilinx.kintex7 import Kintex7
-from crobe_async.component.xilinx.zynq import Zynq
-from crobe_async.protocol.jtag import (
+from acrobe.component.fpga import SramFpga, JtagSramFpga
+from acrobe.target.fpga import FpgaTarget
+from acrobe.target import Target
+from acrobe.component.xilinx.config_access_port import ConfigAccessPort
+from acrobe.component.xilinx.series6 import Series6
+from acrobe.component.xilinx.series7 import Series7
+from acrobe.component.xilinx.spartan6 import Spartan6
+from acrobe.component.xilinx.artix7 import Artix7
+from acrobe.component.xilinx.spartan7 import Spartan7
+from acrobe.component.xilinx.kintex7 import Kintex7
+from acrobe.component.xilinx.zynq import Zynq
+from acrobe.protocol.jtag import (
     Tap, Chain, Shift, CaptureDr, CaptureIr, Reset, Run,
     Dr, Instruction, TapInstruction,
 )
-from crobe_async.bitstring import BitString
-from crobe_async.engine import Batcher
-from crobe_async.loadable import Program, Segment
-from crobe_async.endian import swib_u16, swib_u32
+from acrobe.bitstring import BitString
+from acrobe.engine import Batcher
+from acrobe.loadable import Program, Segment
+from acrobe.endian import swib_u16, swib_u32
 
 
 # -- Mock Interface with IR status support --

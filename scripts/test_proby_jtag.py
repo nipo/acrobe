@@ -12,10 +12,10 @@ Usage:
 import asyncio
 import logging
 
-from crobe_async.adapter.ftdi.transport import FtdiTransport
-from crobe_async.adapter.ftdi.mpsse import MpsseEngine
-from crobe_async.adapter.ftdi.jtag import JtagMpsse
-from crobe_async.protocol.jtag import Chain
+from acrobe.adapter.ftdi.transport import FtdiTransport
+from acrobe.adapter.ftdi.mpsse import MpsseEngine
+from acrobe.adapter.ftdi.jtag import JtagMpsse
+from acrobe.protocol.jtag import Chain
 
 # Proby USB identifiers
 PROBY_VID = 0x10eb

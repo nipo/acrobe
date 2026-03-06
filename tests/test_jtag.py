@@ -1,12 +1,12 @@
 import asyncio
 import pytest
-from crobe_async.protocol.jtag import (
+from acrobe.protocol.jtag import (
     Shift, CaptureDr, CaptureIr, Reset, Run, SwdToJtag,
     Dr, Instruction, TapDr, TapInstruction, InstructionRegistry,
     Tap, Chain, OpenChain, _DynamicInstruction, _TapShift, _TapRun,
 )
-from crobe_async.bitstring import BitString
-from crobe_async.engine import Batcher
+from acrobe.bitstring import BitString
+from acrobe.engine import Batcher
 
 
 # -- Mock Interface --

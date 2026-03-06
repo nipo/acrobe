@@ -1,6 +1,6 @@
 import asyncio
 import pytest
-from crobe_async.component import Component
+from acrobe.component import Component
 
 
 class TestBasicTree:

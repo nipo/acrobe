@@ -1,11 +1,11 @@
 import asyncio
 import pytest
-from crobe_async.protocol.swd import (
+from acrobe.protocol.swd import (
     Ack, Read, Write, Run, Wakeup, Interface,
     JtagToSwd, SwdToDormant, DormantToSwd, LineReset,
     DP_IDCODE, DP_ABORT, DP_CTRL_STAT, DP_SELECT, DP_RDBUFF,
 )
-from crobe_async.engine import Batcher
+from acrobe.engine import Batcher
 
 
 class TestAck:

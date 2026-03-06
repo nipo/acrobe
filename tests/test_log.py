@@ -1,4 +1,4 @@
-"""Tests for crobe_async.log — logging infrastructure."""
+"""Tests for acrobe.log — logging infrastructure."""
 
 import io
 import logging
@@ -6,14 +6,14 @@ import re
 
 import pytest
 
-from crobe_async.log import (
+from acrobe.log import (
     NOTE, TRACE, PROTOCOL, LEVELS,
     CrobeLogger, DomainFilter, Formatter,
     NullProgress, TextProgress,
     set_progress, get_progress,
     setup,
 )
-from crobe_async.component import Component
+from acrobe.component import Component
 
 
 # --- Fixtures ---

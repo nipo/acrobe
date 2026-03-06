@@ -1,8 +1,8 @@
 import gzip
 import pytest
 
-from crobe_async.loadable.gowin import load_gowin_bitstream
-from crobe_async.loadable import Program
+from acrobe.loadable.gowin import load_gowin_bitstream
+from acrobe.loadable import Program
 
 
 def _make_fs(*, header_lines=None, bits="1010", usercode="0xDEADBEEF"):

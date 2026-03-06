@@ -1,15 +1,15 @@
 import asyncio
 import pytest
 
-from crobe_async.component.gowin.gw1n import GowinFpga, Gw1n, Gw2a, Gw5a, DONE_BIT, Gw1nStatus
-from crobe_async.component.fpga import JtagSramFpga, SramFpga
-from crobe_async.protocol.jtag import (
+from acrobe.component.gowin.gw1n import GowinFpga, Gw1n, Gw2a, Gw5a, DONE_BIT, Gw1nStatus
+from acrobe.component.fpga import JtagSramFpga, SramFpga
+from acrobe.protocol.jtag import (
     Tap, Chain, Shift, CaptureDr, CaptureIr, Reset, Run,
     TapInstruction,
 )
-from crobe_async.bitstring import BitString
-from crobe_async.engine import Batcher
-from crobe_async.loadable import Program, Segment
+from acrobe.bitstring import BitString
+from acrobe.engine import Batcher
+from acrobe.loadable import Program, Segment
 
 
 # -- Mock Interface --
@@ -333,7 +333,7 @@ class TestDeviceRegistration:
     @pytest.mark.asyncio
     async def test_mixed_chain(self):
         """Gowin + Xilinx in same chain."""
-        from crobe_async.component.xilinx.spartan6 import Spartan6
+        from acrobe.component.xilinx.spartan6 import Spartan6
         sim = ChainSimulator([
             (0x0001481b, 8),   # GW5A-60
             (0x04001093, 6),   # Spartan6 LX9

@@ -2,9 +2,9 @@
 
 import pytest
 import struct
-from crobe_async.target.arm.memory import StubFlash
-from crobe_async.puppet import Zone
-from crobe_async.allocator import Range
+from acrobe.target.arm.memory import StubFlash
+from acrobe.puppet import Zone
+from acrobe.allocator import Range
 
 
 class MockMemAp:

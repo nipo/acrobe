@@ -3,10 +3,10 @@
 import asyncio
 import struct
 import pytest
-from crobe_async.component.arm.dp import SwDp
-from crobe_async.component.arm.ap import MemAp, MemRead, MemWrite
-from crobe_async.protocol.swd import Read as SwdRead, Write as SwdWrite
-from crobe_async.engine import Batcher
+from acrobe.component.arm.dp import SwDp
+from acrobe.component.arm.ap import MemAp, MemRead, MemWrite
+from acrobe.protocol.swd import Read as SwdRead, Write as SwdWrite
+from acrobe.engine import Batcher
 
 
 class MemoryMockSwdInterface(Batcher):

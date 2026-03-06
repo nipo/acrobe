@@ -2,12 +2,12 @@ import os
 import struct
 import tempfile
 import pytest
-from crobe_async.loadable import Segment, Program
+from acrobe.loadable import Segment, Program
 
 # Ensure format parsers are registered
-import crobe_async.loadable.bin
-import crobe_async.loadable.ihex
-import crobe_async.loadable.elf
+import acrobe.loadable.bin
+import acrobe.loadable.ihex
+import acrobe.loadable.elf
 
 
 class TestSegment:

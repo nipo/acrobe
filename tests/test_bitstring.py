@@ -1,5 +1,5 @@
 import pytest
-from crobe_async.bitstring import BitString, BitStringSlice
+from acrobe.bitstring import BitString, BitStringSlice
 
 
 class TestConstruction:

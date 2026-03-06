@@ -1,14 +1,14 @@
 import asyncio
 import logging
 import pytest
-from crobe_async.adapter.ftdi import mpsse_cmd
-from crobe_async.adapter.ftdi.mpsse import (
+from acrobe.adapter.ftdi import mpsse_cmd
+from acrobe.adapter.ftdi.mpsse import (
     Operation, SetBitsLow, SetBitsHigh, GetBitsLow, GetBitsHigh,
     Loopback, ClockDivisor, ClockDiv5, ThreePhase,
     ClockBits, ClockBytes, ShiftBits, ShiftBytes, ShiftTms,
     MpsseEngine,
 )
-from crobe_async.bitstring import BitString
+from acrobe.bitstring import BitString
 
 _test_logger = logging.getLogger("test.mpsse")
 

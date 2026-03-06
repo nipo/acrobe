@@ -1,8 +1,8 @@
 import pytest
-from crobe_async.component import Component
-from crobe_async.component.fpga import SramFpga, JtagSramFpga
-from crobe_async.db import Db, NoMatch
-from crobe_async.protocol.jtag import JtagInterface, Chain
+from acrobe.component import Component
+from acrobe.component.fpga import SramFpga, JtagSramFpga
+from acrobe.db import Db, NoMatch
+from acrobe.protocol.jtag import JtagInterface, Chain
 
 
 # --- Db.acall tests ---
@@ -258,14 +258,14 @@ class TestSramFpgaApplicationDb:
 
 class TestGowinDbRegistration:
     def test_gowin_has_spi_registered(self):
-        from crobe_async.component.gowin.gw1n import GowinFpga
+        from acrobe.component.gowin.gw1n import GowinFpga
         handlers = GowinFpga.application_db.get("spi")
         assert len(handlers) == 1
 
     def test_gw5a_inherits_gowin_spi(self):
         """Gw5a (subclass of GowinFpga) doesn't have its own spi,
         but GowinFpga.application_db does, found via MRO walk."""
-        from crobe_async.component.gowin.gw1n import Gw5a, GowinFpga
+        from acrobe.component.gowin.gw1n import Gw5a, GowinFpga
         # Gw5a has its own empty db
         with pytest.raises(NoMatch):
             Gw5a.application_db.get("spi")
@@ -366,7 +366,7 @@ class TestChildSummonStart:
 
 class TestJtagInterface:
     def test_creates_chain_child(self):
-        from crobe_async.engine import Batcher
+        from acrobe.engine import Batcher
 
         class MockJtag(Batcher):
             async def flush_ops(self, batch):
@@ -378,7 +378,7 @@ class TestJtagInterface:
         assert isinstance(iface.children[0], Chain)
 
     def test_chain_name(self):
-        from crobe_async.engine import Batcher
+        from acrobe.engine import Batcher
 
         class MockJtag(Batcher):
             async def flush_ops(self, batch):
@@ -389,7 +389,7 @@ class TestJtagInterface:
         assert iface.children[0].name == "chain"
 
     def test_navigable_by_index(self):
-        from crobe_async.engine import Batcher
+        from acrobe.engine import Batcher
 
         class MockJtag(Batcher):
             async def flush_ops(self, batch):
@@ -426,11 +426,11 @@ class TestStartTreeIdempotent:
 
 class TestSpiTargetChildDb:
     def test_flash_registered(self):
-        from crobe_async.protocol.spi import Target
+        from acrobe.protocol.spi import Target
         handlers = Target.child_db.get("flash")
         assert len(handlers) == 1
 
     def test_nomatch_for_unknown(self):
-        from crobe_async.protocol.spi import Target
+        from acrobe.protocol.spi import Target
         with pytest.raises(NoMatch):
             Target.child_db.get("unknown")

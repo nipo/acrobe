@@ -1,9 +1,9 @@
 """Tests for Target framework."""
 
 import pytest
-from crobe_async.target import Target
-from crobe_async.target.memory import Region, Ram, Flash
-from crobe_async.loadable import Program, Segment
+from acrobe.target import Target
+from acrobe.target.memory import Region, Ram, Flash
+from acrobe.loadable import Program, Segment
 
 
 class MockRam(Ram):

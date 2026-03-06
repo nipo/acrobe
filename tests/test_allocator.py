@@ -1,5 +1,5 @@
 import pytest
-from crobe_async.allocator import Range, Allocator
+from acrobe.allocator import Range, Allocator
 
 
 class TestRange:

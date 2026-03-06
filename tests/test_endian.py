@@ -1,4 +1,4 @@
-from crobe_async.endian import bitswap8, swib_u16, swib_u32, _BITSWAP8_LUT
+from acrobe.endian import bitswap8, swib_u16, swib_u32, _BITSWAP8_LUT
 
 
 class TestBitswap8:

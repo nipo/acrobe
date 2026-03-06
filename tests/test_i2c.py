@@ -1,9 +1,9 @@
 import asyncio
 import pytest
-from crobe_async.protocol.i2c import (
+from acrobe.protocol.i2c import (
     Read, Write, WriteRead, Slave, Interface, AddressNack, DataNack,
 )
-from crobe_async.engine import Batcher
+from acrobe.engine import Batcher
 
 
 class MockI2cAdapter(Batcher):

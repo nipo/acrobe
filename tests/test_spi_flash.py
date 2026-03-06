@@ -1,8 +1,8 @@
 import asyncio
 import pytest
-from crobe_async.component.spi_flash import SpiFlash
-from crobe_async.protocol.spi import Cs, Shift, Interface
-from crobe_async.engine import Batcher
+from acrobe.component.spi_flash import SpiFlash
+from acrobe.protocol.spi import Cs, Shift, Interface
+from acrobe.engine import Batcher
 
 
 class MockSpiAdapter(Batcher):
@@ -37,7 +37,7 @@ def _make_flash(adapter=None):
     """Create a SpiFlash with an Interface + Target stack backed by adapter."""
     if adapter is None:
         adapter = MockSpiAdapter()
-    from crobe_async.protocol.spi import Target
+    from acrobe.protocol.spi import Target
     iface = Interface(adapter)
     target = Target(iface, cs=0, mode=0)
     flash = SpiFlash(target)

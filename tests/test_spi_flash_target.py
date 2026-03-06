@@ -1,12 +1,12 @@
 """Tests for SPI flash target and Field discovery."""
 
 import pytest
-from crobe_async.component import Component
-from crobe_async.component.spi_flash import SpiFlash
-from crobe_async.target import Target, Field
-from crobe_async.target.memory import Flash
-from crobe_async.target.spi_flash import SpiFlashBank, SpiFlashTarget
-from crobe_async.loadable import Program, Segment
+from acrobe.component import Component
+from acrobe.component.spi_flash import SpiFlash
+from acrobe.target import Target, Field
+from acrobe.target.memory import Flash
+from acrobe.target.spi_flash import SpiFlashBank, SpiFlashTarget
+from acrobe.loadable import Program, Segment
 
 
 class FakeSpiTarget:
@@ -154,7 +154,7 @@ class TestSpiFlashTarget:
 class TestSpiFlashRegistration:
     def test_registered_for_spi_flash(self):
         """SpiFlashTarget is registered as explorer for SpiFlash component."""
-        from crobe_async.component.spi_flash import SpiFlash
+        from acrobe.component.spi_flash import SpiFlash
         found = False
         for e in Target._explorers:
             if SpiFlash in e.component_types:

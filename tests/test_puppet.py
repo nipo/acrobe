@@ -3,9 +3,9 @@
 import asyncio
 import struct
 import pytest
-from crobe_async.puppet import Puppet, PuppetStub, Zone, ARM_M_TRAMPOLINE, ArmMPuppet
-from crobe_async.component.arm.cortex import CpuState, CortexReg
-from crobe_async.allocator import Range
+from acrobe.puppet import Puppet, PuppetStub, Zone, ARM_M_TRAMPOLINE, ArmMPuppet
+from acrobe.component.arm.cortex import CpuState, CortexReg
+from acrobe.allocator import Range
 
 
 class MockMemAp:

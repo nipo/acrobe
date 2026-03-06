@@ -4,8 +4,8 @@ import tempfile
 import os
 import pytest
 
-from crobe_async.loadable.xilinx import load_xilinx_bitstream
-from crobe_async.loadable import Program
+from acrobe.loadable.xilinx import load_xilinx_bitstream
+from acrobe.loadable import Program
 
 
 HEADER = bytes([

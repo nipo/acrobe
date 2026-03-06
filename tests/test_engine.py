@@ -1,6 +1,6 @@
 import asyncio
 import pytest
-from crobe_async.engine import Batcher
+from acrobe.engine import Batcher
 
 
 class Accumulator(Batcher):

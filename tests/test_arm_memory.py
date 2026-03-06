@@ -1,8 +1,8 @@
 """Tests for BusRam and BusFlash with a mock MemAp."""
 
 import pytest
-from crobe_async.component.arm.memory import BusRam, BusFlash
-from crobe_async.target.memory import Ram, Flash
+from acrobe.component.arm.memory import BusRam, BusFlash
+from acrobe.target.memory import Ram, Flash
 
 
 class MockMemAp:

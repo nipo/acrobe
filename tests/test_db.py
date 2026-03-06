@@ -1,5 +1,5 @@
 import pytest
-from crobe_async.db import Db, NoMatch
+from acrobe.db import Db, NoMatch
 
 
 class TestRegister:

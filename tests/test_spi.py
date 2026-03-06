@@ -1,8 +1,8 @@
 import asyncio
 import pytest
-from crobe_async.protocol.spi import Cs, Shift, Target, Interface
-from crobe_async.engine import Batcher
-from crobe_async.bitstring import BitString
+from acrobe.protocol.spi import Cs, Shift, Target, Interface
+from acrobe.engine import Batcher
+from acrobe.bitstring import BitString
 
 
 class MockSpiAdapter(Batcher):

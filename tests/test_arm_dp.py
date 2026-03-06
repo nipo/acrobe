@@ -1,11 +1,11 @@
 import asyncio
 import pytest
-from crobe_async.component.arm.dp import (
+from acrobe.component.arm.dp import (
     ApRead, ApWrite, DpRead, DpWrite, Run,
     SwDp, DpAccessFailure,
 )
-from crobe_async.protocol.swd import Read as SwdRead, Write as SwdWrite, Run as SwdRun
-from crobe_async.engine import Batcher
+from acrobe.protocol.swd import Read as SwdRead, Write as SwdWrite, Run as SwdRun
+from acrobe.engine import Batcher
 
 
 class MockSwdInterface(Batcher):
