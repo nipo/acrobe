@@ -1,0 +1,11 @@
+from .model import AdapterInfo, adapter_db
+from .digilent import FtdiJtagAdapter
+
+
+@adapter_db.register(AdapterInfo(
+    "tei", vid=0x0403, pid=0x6010, manufacturer="Arrow"))
+class Tei0003Adapter(FtdiJtagAdapter):
+    _adapter_info = AdapterInfo(
+        "tei", vid=0x0403, pid=0x6010, manufacturer="Arrow")
+    _gpio_oe = 0
+    _gpio_val = 0
