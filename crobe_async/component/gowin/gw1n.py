@@ -3,6 +3,7 @@ import asyncio
 from ...protocol.jtag import Tap, Dr, Instruction
 from ..fpga import JtagSramFpga
 from ...endian import bitswap8
+from ...bitfield import Bitfield, BooleanField
 
 parts = {
     0x0000: "GW2A-18/18C",
@@ -24,6 +25,41 @@ parts = {
 }
 
 DONE_BIT = 13
+
+
+class Gw1nStatus(Bitfield):
+    CRCError   = BooleanField(0)
+    BadCommand = BooleanField(1)
+    IdError    = BooleanField(2)
+    Timeout    = BooleanField(3)
+    Vld        = BooleanField(12)
+    Done       = BooleanField(13)
+    Security   = BooleanField(14)
+    Ready      = BooleanField(15)
+
+
+class Gw2aStatus(Gw1nStatus):
+    Encrypted  = BooleanField(15)
+    KeyOk      = BooleanField(16)
+
+
+class Gw5aStatus(Gw1nStatus):
+    GoeErr       = BooleanField(4)
+    MemoryErase  = BooleanField(5)
+    DoneRn       = BooleanField(10)
+    DoneRc       = BooleanField(11)
+    Encrypted    = BooleanField(15)
+    KeyOk        = BooleanField(16)
+    PwdProtected = BooleanField(20)
+    ProgFailed   = BooleanField(23)
+    ReConfig     = BooleanField(24)
+    Active       = BooleanField(25)
+    Spi0Fail     = BooleanField(26)
+    DecompFail   = BooleanField(27)
+    MfgDone      = BooleanField(28)
+    InitR        = BooleanField(29)
+    Wakeup       = BooleanField(30)
+    AutoErase    = BooleanField(31)
 
 
 def _idcode_to_part_no(idcode):
@@ -78,6 +114,8 @@ class GowinFpga(Tap, JtagSramFpga):
     USER1 = Instruction(0x42, None)
     USER2 = Instruction(0x43, None)
 
+    _status_type = Gw1nStatus
+
     def __init__(self, interface, idcode, **kw):
         part_no = _idcode_to_part_no(idcode)
         name = parts.get(part_no, f"Gowin-0x{idcode:08x}")
@@ -85,12 +123,16 @@ class GowinFpga(Tap, JtagSramFpga):
 
     async def status_read(self):
         raw = await self.READ_STATUS()
-        status = int(raw)
-        self.logger.trace("Status: 0x%08x", status)
+        status = self._status_type(int(raw))
+        self.logger.trace("Status: %s", status)
         return status
 
     def is_done(self, status):
-        return bool(status & (1 << DONE_BIT))
+        return status.Done
+
+    async def start(self):
+        status = await self.status_read()
+        self.logger.note("IDCODE: 0x%08x, %s", self.idcode, status)
 
     async def _sram_erase(self):
         self.logger.trace("Erasing SRAM")
@@ -117,7 +159,7 @@ class GowinFpga(Tap, JtagSramFpga):
             st = await self.status_read()
             if not self.is_done(st):
                 return
-        raise RuntimeError(f"SRAM erase failed, status=0x{st:08x}")
+        raise RuntimeError(f"SRAM erase failed, {st}")
 
     async def _assert_done(self):
         for _ in range(3):
@@ -125,24 +167,26 @@ class GowinFpga(Tap, JtagSramFpga):
             st = await self.status_read()
             if self.is_done(st):
                 return
-        raise RuntimeError(f"FPGA not done after configure, status=0x{st:08x}")
+        raise RuntimeError(f"FPGA not done after configure, {st}")
 
     async def sram_configure(self, data):
         self.logger.trace("Loading %d bytes to SRAM", len(data))
         data = bitswap8(data)
         data = b'\xff' * 60 + data + b'\xff' * 60
-        await self.ISC_ENABLE(read_tdo=False)
-        await self.run(100)
-        await self.ISC_ADDRESS_INIT(read_tdo=False)
-        await self.run(100)
-        await self.ISC_TRANSFER_CONFIG(read_tdo=False)
-        await self.run(100)
         from ...bitstring import BitString
-        await self.ISC_TRANSFER_CONFIG(BitString(data), read_tdo=False)
-        await self.run(100)
-        await self.ISC_DISABLE(read_tdo=False)
-        await self.run(100)
-        await self.ISC_NOOP(read_tdo=False)
+        # Post all ops without awaiting so they batch into a single
+        # USB transaction, matching the old sync code's execute([...]).
+        self.ISC_ENABLE(read_tdo=False)
+        self.run(100)
+        self.ISC_ADDRESS_INIT(read_tdo=False)
+        self.run(100)
+        self.ISC_TRANSFER_CONFIG(read_tdo=False)
+        self.run(100)
+        self.ISC_TRANSFER_CONFIG(BitString(data), read_tdo=False)
+        self.run(100)
+        self.ISC_DISABLE(read_tdo=False)
+        self.run(100)
+        self.ISC_NOOP(read_tdo=False)
         await self.run(100)
         await self._assert_done()
 
@@ -168,8 +212,17 @@ class GowinFpga(Tap, JtagSramFpga):
 
 
 @GowinFpga.application_db.register("spi")
-def _gowin_spi(tap):
+async def _gowin_spi(tap):
+    from pathlib import Path
+    from ...loadable import Program
+    from ...db import NoMatch as _NoMatch
     from ..jtag_spi_bridge import jtag_spi_bridge
+
+    idcode_masked = tap.idcode & 0x0FFFFFFF
+    fw_path = Path(__file__).parent / "fw" / f"0x{idcode_masked:08x}_jtag_spi.fs.gz"
+    if not fw_path.exists():
+        raise _NoMatch("spi firmware", f"0x{idcode_masked:08x}")
+    await tap.load(Program.from_file(str(fw_path)))
     return jtag_spi_bridge(tap, base_freq=30e6)
 
 
@@ -180,9 +233,9 @@ class Gw1n(GowinFpga):
 
 @Tap.db.register(*_part_ids("GW2A"))
 class Gw2a(GowinFpga):
-    pass
+    _status_type = Gw2aStatus
 
 
 @Tap.db.register(*_part_ids("GW5A"))
 class Gw5a(GowinFpga):
-    pass
+    _status_type = Gw5aStatus

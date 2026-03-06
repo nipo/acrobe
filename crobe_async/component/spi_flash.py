@@ -7,9 +7,36 @@ Uses the SPI protocol layer for communication.
 from __future__ import annotations
 
 import asyncio
+import struct
 
 from ..component import Component
 from ..protocol.spi import Shift
+
+# Common JEDEC manufacturer IDs (bank 0)
+_JEDEC_MANUFACTURERS = {
+    0x01: "AMD/Spansion",
+    0x1f: "Atmel",
+    0x20: "Micron/Numonyx",
+    0x9d: "ISSI",
+    0xbf: "Microchip/SST",
+    0xc2: "Macronix",
+    0xc8: "GigaDevice",
+    0xef: "Winbond",
+    0x68: "Boya",
+    0x0b: "XTX",
+    0x5e: "Zbit",
+    0x85: "Puya",
+    0x25: "Zetta",
+}
+
+
+def _size_str(size):
+    """Human-readable binary size."""
+    if size >= 1 << 20:
+        return f"{size >> 20}MiB"
+    if size >= 1 << 10:
+        return f"{size >> 10}KiB"
+    return f"{size}B"
 
 
 class SpiFlash(Component):
@@ -60,13 +87,19 @@ class SpiFlash(Component):
             parts.append(wdata)
         mosi = b"".join(parts)
 
+        self.logger.protocol("<< %s %s %s %d", cmd.hex(), addr.hex(), wdata[:16].hex() if wdata else "", rsize)
+
         shifts = [Shift(mosi, read_miso=False)]
         read_shift = None
         if rsize:
             read_shift = Shift(rsize, read_miso=True)
             shifts.append(read_shift)
         await self._target.transaction(*shifts)
-        return read_shift.miso if read_shift else b""
+
+        rsp = read_shift.miso if read_shift else b""
+        if rsp:
+            self.logger.protocol(">> %s", rsp[:32].hex())
+        return rsp
 
     def _addr_bytes(self, addr: int) -> bytes:
         return addr.to_bytes(self.ADDRESS_SIZE, "big")
@@ -93,8 +126,10 @@ class SpiFlash(Component):
         data = await self._command(self.CMD_READ_JEDEC_ID, rsize=3)
         return int.from_bytes(data, "big")
 
+    CMD_SFDP_READ = b"\x5a"
+
     async def detect(self):
-        """Reset flash, read JEDEC ID, and configure geometry."""
+        """Reset flash, read JEDEC ID, configure geometry from SFDP or defaults."""
         # Software reset
         await self._command(self.CMD_RESET_ENABLE)
         await self._command(self.CMD_RESET)
@@ -104,19 +139,90 @@ class SpiFlash(Component):
         if self.jedec_id in (0, 0xffffff):
             raise RuntimeError(f"Bad JEDEC ID: 0x{self.jedec_id:06x}")
 
-        self.logger.info("JEDEC ID: 0x%06x", self.jedec_id)
+        mfr = (self.jedec_id >> 16) & 0xff
+        mfr_name = _JEDEC_MANUFACTURERS.get(mfr, f"0x{mfr:02x}")
+        self.logger.note("JEDEC ID: 0x%06x (%s)", self.jedec_id, mfr_name)
 
         # Derive size from capacity byte (common convention: 2^capacity)
         capacity_byte = self.jedec_id & 0xff
         if capacity_byte >= 0x10:
             self.total_size = 1 << capacity_byte
 
-        # Default sector info if not set
-        if not self.sector_info:
-            self.sector_info = [
-                (4096, self.SECTOR_ERASE_4K),
-                (65536, self.BLOCK_ERASE_64K),
-            ]
+        # Try SFDP for detailed parameters
+        try:
+            await self._sfdp_detect()
+        except Exception:
+            # SFDP not supported or parse failed, use defaults
+            if not self.sector_info:
+                self.sector_info = [
+                    (4096, self.SECTOR_ERASE_4K),
+                    (65536, self.BLOCK_ERASE_64K),
+                ]
+
+        self.logger.note("Size: %s, page: %dB, addr: %dB",
+                         _size_str(self.total_size), self.page_size,
+                         self.ADDRESS_SIZE)
+        for size, cmd in self.sector_info:
+            self.logger.info("Erase: %s (cmd 0x%02x)", _size_str(size), cmd[0])
+
+    async def _sfdp_read(self, addr, size):
+        """Read SFDP data at the given address."""
+        addr_bytes = addr.to_bytes(3, "big")
+        return await self._command(self.CMD_SFDP_READ, addr=addr_bytes,
+                                   rsize=size, dummy=1)
+
+    async def _sfdp_detect(self):
+        """Parse SFDP header and basic flash parameter table."""
+        header = await self._sfdp_read(0, 8)
+        if header[:4] != b'SFDP':
+            return
+
+        sfdp_minor, sfdp_major = header[4], header[5]
+        nph = header[6] + 1
+        self.logger.note("SFDP v%d.%d, %d parameter header(s)", sfdp_major, sfdp_minor, nph)
+
+        # Read all parameter headers
+        ph_data = await self._sfdp_read(8, nph * 8)
+
+        # Find JEDEC Basic Flash Parameter (ID 0xff00)
+        for i in range(nph):
+            ph = ph_data[i * 8:(i + 1) * 8]
+            jid_lo, minor, major, length = ph[0], ph[1], ph[2], ph[3]
+            ptp = int.from_bytes(ph[4:8], "little")
+            jid = jid_lo | ((ptp >> 16) & 0xff00)
+            ptp = ptp & 0xffffff
+
+            if jid == 0xff00:
+                # Parse JEDEC basic flash parameters
+                bfp = await self._sfdp_read(ptp, length * 4)
+                self._sfdp_parse_basic(bfp)
+                break
+
+    def _sfdp_parse_basic(self, data):
+        """Parse JEDEC Basic Flash Parameter Table (JESD216)."""
+        # Density (bytes 4-7)
+        density = struct.unpack_from("<L", data, 4)[0]
+        if density & 0x80000000:
+            self.total_size = 1 << ((density & 0x7fffffff) - 3)
+        else:
+            self.total_size = (density + 1) // 8
+
+        # Erase sector types (bytes 28-35, 4 types x 2 bytes)
+        self.sector_info = []
+        for i in range(4):
+            off = 28 + 2 * i
+            if off + 1 >= len(data):
+                break
+            log2_size = data[off]
+            opcode = data[off + 1]
+            if log2_size and opcode:
+                self.sector_info.append((1 << log2_size, bytes([opcode])))
+
+        # Page size (byte 0x28, if SFDP 1.6+)
+        if len(data) > 0x29:
+            page_bits = (data[0x28] >> 4) & 0x0f
+            if page_bits:
+                self.page_size = 1 << page_bits
 
     # --- Read ---
 

@@ -130,7 +130,9 @@ class FtdiTransport:
 
     def _sync_write_read(self, data: bytes, response_len: int) -> bytes:
         """Synchronous bulk write+read with FTDI modem status stripping."""
-        self._pair.out.write_sync(data)
+        mps = self._max_packet_size
+        for offset in range(0, len(data), mps):
+            self._pair.out.write_sync(data[offset:offset + mps])
 
         if response_len == 0:
             return b""

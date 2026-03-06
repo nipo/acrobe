@@ -45,9 +45,11 @@ class ProbyAdapter(Adapter):
         except Exception:
             serial = None
         name = f"proby-{serial}" if serial else "proby"
+        import logging
+        logger = logging.getLogger(name)
         transport = await FtdiTransport.from_device(device, interface_index=_JTAG_CHANNEL)
-        engine = MpsseEngine(transport)
-        jtag = JtagMpsse(engine)
+        engine = MpsseEngine(transport, logger)
+        jtag = JtagMpsse(engine, logger)
         resetn_bit = 1 << _RESETN_PIN
         await jtag.setup(gpio_oe=resetn_bit, gpio_val=resetn_bit)
         return cls(name, device, transport, engine, jtag)
@@ -75,8 +77,8 @@ class ProbyAdapter(Adapter):
 
     async def _open_channel_a(self, gpio_oe, gpio_val):
         transport = await FtdiTransport.from_device(self._device, interface_index=0)
-        engine = MpsseEngine(transport)
-        jtag = JtagMpsse(engine)
+        engine = MpsseEngine(transport, self.logger)
+        jtag = JtagMpsse(engine, self.logger)
         await jtag.setup(gpio_oe=gpio_oe, gpio_val=gpio_val)
         self._transport_a = transport
         return jtag

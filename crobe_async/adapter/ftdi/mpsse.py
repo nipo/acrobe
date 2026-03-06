@@ -128,6 +128,18 @@ class ThreePhase(Operation):
         return f"<ThreePhase {'on' if self.enable else 'off'}>"
 
 
+class Adaptive(Operation):
+    def __init__(self, enable: bool):
+        self.enable = enable
+
+    def cmd_data(self):
+        cmd = mpsse_cmd.ADAPTIVE_ENABLE if self.enable else mpsse_cmd.ADAPTIVE_DISABLE
+        return bytes([cmd]), 0, 0
+
+    def __repr__(self):
+        return f"<Adaptive {'on' if self.enable else 'off'}>"
+
+
 class SendImmediate(Operation):
     def cmd_data(self):
         return bytes([mpsse_cmd.SEND_IMMEDIATE]), 0, 0
@@ -332,9 +344,10 @@ class ShiftTms(Operation):
 # --- Engine ---
 
 class MpsseEngine(Batcher):
-    def __init__(self, transport: Transport):
+    def __init__(self, transport: Transport, logger):
         super().__init__()
         self._transport = transport
+        self.logger = logger
 
     async def flush_ops(self, batch):
         cmd_parts = []
@@ -354,7 +367,9 @@ class MpsseEngine(Batcher):
         cmd_parts.append(bytes([mpsse_cmd.SEND_IMMEDIATE]))
 
         cmd = b"".join(cmd_parts)
+        self.logger.log(5, "USB >> %d bytes, expect %d back", len(cmd), total_rsp)
         rsp = await self._transport.write_read(cmd, total_rsp)
+        self.logger.log(5, "USB << %d bytes", len(rsp))
 
         for (op, future), (start, end) in zip(batch, rsp_ranges):
             if start < end:

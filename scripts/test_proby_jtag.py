@@ -10,6 +10,7 @@ Usage:
 """
 
 import asyncio
+import logging
 
 from crobe_async.adapter.ftdi.transport import FtdiTransport
 from crobe_async.adapter.ftdi.mpsse import MpsseEngine
@@ -38,8 +39,9 @@ async def main():
         interface_index=PROBY_JTAG_CHANNEL)
     print(f"  Transport ready (MPS={transport._max_packet_size})")
 
-    engine = MpsseEngine(transport)
-    jtag = JtagMpsse(engine)
+    logger = logging.getLogger("proby.test")
+    engine = MpsseEngine(transport, logger)
+    jtag = JtagMpsse(engine, logger)
 
     # Configure GPIO:
     #   - JTAG pins (TCK, TDI, TMS) handled by JtagMpsse.setup()

@@ -245,6 +245,15 @@ class Program:
         if fmt is not None:
             return cls.format_db.call(fmt, filename, offset=offset)
 
+        # Try compound extension first (e.g. "fs.gz"), then single
+        basename = os.path.basename(filename)
+        dot = basename.find(".")
+        if dot >= 0:
+            compound_ext = basename[dot + 1:]
+            try:
+                return cls.ext_db.call(compound_ext, filename, offset=offset)
+            except NoMatch:
+                pass
         _, ext = os.path.splitext(filename)
         ext = ext.lstrip(".")
         return cls.ext_db.call(ext, filename, offset=offset)

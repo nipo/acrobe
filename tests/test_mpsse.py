@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import pytest
 from crobe_async.adapter.ftdi import mpsse_cmd
 from crobe_async.adapter.ftdi.mpsse import (
@@ -8,6 +9,8 @@ from crobe_async.adapter.ftdi.mpsse import (
     MpsseEngine,
 )
 from crobe_async.bitstring import BitString
+
+_test_logger = logging.getLogger("test.mpsse")
 
 
 class TestMpsseCmdConstants:
@@ -201,7 +204,7 @@ class TestMpsseEngine:
     async def test_single_op(self):
         transport = MockTransport()
         transport.queue_response(bytes([0x42]))
-        engine = MpsseEngine(transport)
+        engine = MpsseEngine(transport, _test_logger)
         op = GetBitsLow()
         result = await engine.post(op)
         assert result is op
@@ -213,7 +216,7 @@ class TestMpsseEngine:
         transport = MockTransport()
         # Two GetBitsLow ops: 2 response bytes
         transport.queue_response(bytes([0x11, 0x22]))
-        engine = MpsseEngine(transport)
+        engine = MpsseEngine(transport, _test_logger)
 
         op1 = GetBitsLow()
         op2 = GetBitsHigh()
@@ -232,7 +235,7 @@ class TestMpsseEngine:
         transport = MockTransport()
         # SetBitsLow has 0 response, engine adds GET_BITS_LOW for sync
         transport.queue_response(bytes([0x00]))
-        engine = MpsseEngine(transport)
+        engine = MpsseEngine(transport, _test_logger)
 
         op = SetBitsLow(0xaa, 0xff)
         await engine.post(op)
@@ -248,7 +251,7 @@ class TestMpsseEngine:
         transport = MockTransport()
         # SetBitsLow (0 rsp) + GetBitsLow (1 rsp) = 1 rsp byte
         transport.queue_response(bytes([0x55]))
-        engine = MpsseEngine(transport)
+        engine = MpsseEngine(transport, _test_logger)
 
         op_set = SetBitsLow(0xaa, 0xff)
         op_get = GetBitsLow()
@@ -264,7 +267,7 @@ class TestMpsseEngine:
             async def write_read(self, data, response_len):
                 raise IOError("USB error")
 
-        engine = MpsseEngine(FailTransport())
+        engine = MpsseEngine(FailTransport(), _test_logger)
         f = engine.post(GetBitsLow())
         with pytest.raises(IOError, match="USB error"):
             await f

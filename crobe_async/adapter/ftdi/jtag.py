@@ -5,6 +5,7 @@ import asyncio
 from .mpsse import (
     MpsseEngine, SetBitsLow, SetBitsHigh,
     ShiftBits, ShiftBytes, ShiftTms, ClockBits, ClockBytes,
+    ThreePhase, Adaptive, Loopback, ClockDiv5, ClockDivisor,
 )
 from ...engine import Batcher
 from ...bitstring import BitString, BitStringBase
@@ -31,26 +32,50 @@ class JtagMpsse(Batcher):
     STATE_RTI = "rti"
     STATE_PAUSE = "pause"
 
-    def __init__(self, engine: MpsseEngine):
+    def __init__(self, engine: MpsseEngine, logger):
         super().__init__()
         self._engine = engine
         self._state = self.STATE_UNKNOWN
         self._gpio_oe = 0
         self._gpio_val = 0
+        self.logger = logger
 
-    async def setup(self, gpio_oe=0, gpio_val=0):
-        """Initialize GPIO pins for JTAG.
+    async def setup(self, gpio_oe=0, gpio_val=0, freq=1e6):
+        """Initialize MPSSE for JTAG and configure GPIO pins.
 
         Sets TCK, TDI, TMS as outputs (low); TDO as input.
         Additional GPIO bits can be configured via gpio_oe/gpio_val
         (bits 4-15).
+
+        Sends FTDI H-series MPSSE init commands (3-phase disable,
+        adaptive disable, loopback disable) and sets the clock to freq Hz.
+        Default 1 MHz matches the old sync code's initial clock.
         """
         # TCK=bit0, TDI=bit1, TMS=bit3 as outputs; TDO=bit2 as input
         jtag_oe = 0x0B
         self._gpio_oe = jtag_oe | gpio_oe
         self._gpio_val = gpio_val
 
-        ops = [SetBitsLow(self._gpio_val & 0xFF, self._gpio_oe & 0xFF)]
+        # Clock calculation for FT2232H (60 MHz base):
+        # With DIV5 enabled: base = 12 MHz, freq = 12e6 / (divisor * 2)
+        # With DIV5 disabled: base = 60 MHz, freq = 60e6 / (divisor * 2)
+        # Use DIV5 for frequencies below 6 MHz, disable for higher.
+        if freq <= 6e6:
+            div5 = True
+            base = 12e6
+        else:
+            div5 = False
+            base = 60e6
+        divisor = max(1, round(base / (2 * freq)))
+
+        ops = [
+            ThreePhase(False),
+            Adaptive(False),
+            Loopback(False),
+            ClockDiv5(div5),
+            ClockDivisor(divisor),
+            SetBitsLow(self._gpio_val & 0xFF, self._gpio_oe & 0xFF),
+        ]
         if self._gpio_oe & 0xFF00:
             ops.append(SetBitsHigh(
                 (self._gpio_val >> 8) & 0xFF,
@@ -62,6 +87,7 @@ class JtagMpsse(Batcher):
 
     async def flush_ops(self, batch):
         """Translate JTAG operations to MPSSE and execute."""
+        self.logger.log(5, "JTAG batch: %s", [op for op, _ in batch])
         mpsse_ops = []
         # Track Shift ops that need TDO extraction:
         # (batch_index, mpsse_start_index, mpsse_end_index)

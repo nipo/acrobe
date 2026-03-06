@@ -1,7 +1,7 @@
 import asyncio
 import pytest
 
-from crobe_async.component.gowin.gw1n import GowinFpga, Gw1n, Gw2a, Gw5a, DONE_BIT
+from crobe_async.component.gowin.gw1n import GowinFpga, Gw1n, Gw2a, Gw5a, DONE_BIT, Gw1nStatus
 from crobe_async.component.fpga import JtagSramFpga, SramFpga
 from crobe_async.protocol.jtag import (
     Tap, Chain, Shift, CaptureDr, CaptureIr, Reset, Run,
@@ -99,9 +99,9 @@ class TestGowinFpga:
     def test_is_done(self):
         iface = StatusOnlyMock()
         tap = GowinFpga(iface, idcode=0x0001481b)
-        assert tap.is_done(1 << 13) is True
-        assert tap.is_done(0) is False
-        assert tap.is_done(0xffffffff) is True
+        assert tap.is_done(Gw1nStatus(1 << 13)) is True
+        assert tap.is_done(Gw1nStatus(0)) is False
+        assert tap.is_done(Gw1nStatus(0xffffffff)) is True
 
 
 # -- Status Read --
@@ -113,7 +113,11 @@ class TestStatusRead:
         iface = StatusOnlyMock(status=status_val)
         tap = GowinFpga(iface, idcode=0x0001481b)
         st = await tap.status_read()
-        assert st == status_val
+        assert int(st) == status_val
+        assert st.Done is True
+        assert st.CRCError is True
+        assert st.BadCommand is True
+        assert st.IdError is True
 
 
 # -- is_configured --

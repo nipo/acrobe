@@ -103,6 +103,9 @@ class Target(Batcher, Component):
                 self._interface.post(Cs(self.cs, self.mode))
                 shift_futures = []
                 for s in shifts:
+                    if self.logger.isEnabledFor(5):
+                        mosi = s.mosi if isinstance(s.mosi, bytes) else bytes(s.byte_count)
+                        self.logger.log(5, ">> %s", mosi.hex())
                     shift_futures.append(self._interface.post(s))
                 self._interface.post(Cs(None))
                 iface_futures.extend(shift_futures)
@@ -112,6 +115,10 @@ class Target(Batcher, Component):
             await asyncio.gather(*iface_futures)
 
         for idx, shifts, shift_futures in result_map:
+            if self.logger.isEnabledFor(5):
+                for s in shifts:
+                    if s.read_miso and s.miso is not None:
+                        self.logger.log(5, "<< %s", s.miso.hex())
             batch[idx][1].set_result(tuple(shifts))
 
     async def child_spawn(self, name):

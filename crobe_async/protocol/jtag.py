@@ -294,6 +294,7 @@ class Tap(Batcher, Component, InstructionRegistry):
 
     async def flush_ops(self, batch):
         """Translate tap-level ops into JTAG interface ops."""
+        self.logger.protocol("Tap batch: %s", [op for op, _ in batch])
         jtag_futures = []
         # Track which batch entries need TDO extraction
         tdo_info = []  # list of (batch_index, jtag_shift_future)
@@ -385,6 +386,13 @@ class JtagInterface(Component):
         self._interface = interface
         self.child_add(Chain(interface))
 
+    async def start(self):
+        # Propagate tree-derived logger to non-Component batchers
+        # so their protocol-level logs appear under the component tree
+        self._interface.logger = self.logger
+        if hasattr(self._interface, '_engine'):
+            self._interface._engine.logger = self.logger
+
 
 # Chain
 
@@ -458,21 +466,25 @@ class Chain(Component):
         length.
         """
         # Reset and read DR — contains IDCODEs
+        self.logger.trace("Discovering chain...")
         self._interface.post(Reset())
         self._interface.post(Run(1))
         self._interface.post(CaptureDr())
         reset_dr = await self._shift_discover()
+        self.logger.trace("DR after reset: %d bits", len(reset_dr))
 
         # Capture IR (loads default IR), shift all-ones to load BYPASS
         self._interface.post(CaptureIr())
         captured_ir = await self._shift_discover(shift_in=-1)
         captured_ir_length = len(captured_ir)
+        self.logger.trace("IR captured: %d bits", captured_ir_length)
 
         # Now all TAPs are in BYPASS (1-bit DR each).
         # Probe DR to count devices.
         self._interface.post(CaptureDr())
         bypass_dr = await self._shift_discover(max_length=captured_ir_length // 2)
         device_count = len(bypass_dr)
+        self.logger.trace("BYPASS DR: %d devices", device_count)
 
         # Extract IDCODEs from reset DR
         idcodes = []
@@ -486,6 +498,9 @@ class Chain(Component):
             else:
                 idcodes.append(None)
                 pos += 1
+
+        self.logger.note("IDCODEs: %s", ", ".join(
+            f"0x{idc:08x}" if idc else "none" for idc in idcodes))
 
         # Determine IR lengths from captured IR pattern.
         # JTAG spec: after Capture-IR, each TAP loads a value with
@@ -523,10 +538,12 @@ class Chain(Component):
                 f"for {device_count} devices (idcodes={idcodes!r})")
 
         ir_lengths = possibilities[0]
+        self.logger.trace("IR lengths: %s", ir_lengths)
 
         # Create TAPs
         for idcode, irlen in zip(idcodes, ir_lengths):
-            self.tap_add(idcode, irlen)
+            tap = self.tap_add(idcode, irlen)
+            self.logger.note("TAP: %s (irlen=%d)", tap._name, irlen)
 
         # Return to Run-Test/Idle
         await self._interface.post(Run(1))

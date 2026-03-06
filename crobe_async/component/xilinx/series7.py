@@ -48,6 +48,15 @@ class Series7(Tap, JtagSramFpga, ConfigAccessPort):
     def _cfg_conv_tdo(data):
         return [swib_u32(x) for x in struct.unpack("<%dL" % (len(data) // 4), data)]
 
+    async def start(self):
+        configured = await self.is_configured()
+        status = await self.ir_status()
+        self.logger.note("IDCODE: 0x%08x, ir_status: 0x%04x, configured: %s",
+                         self.idcode, int(status), configured)
+        if configured:
+            userid = int(await self.IR_USERCODE())
+            self.logger.note("UserID: 0x%08x", userid)
+
     async def load(self, program):
         if len(program) != 1:
             raise ValueError("Bitstream programming only supports one config payload")
