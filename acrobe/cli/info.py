@@ -36,7 +36,7 @@ async def adapters():
         interfaces = ", ".join(adapter_cls.supported_interfaces)
         click.echo(
             f"  {name}  "
-            f"{info.vid:04x}:{info.pid:04x}  "
+            f"{desc.vendor_id:04x}:{desc.product_id:04x}  "
             f"interfaces: {interfaces}"
         )
 

@@ -20,6 +20,7 @@ SIO_RESET_PURGE_TX = 2
 # Bitmode values
 BITMODE_RESET = 0x00
 BITMODE_MPSSE = 0x02
+BITMODE_SYNCBB = 0x04
 
 
 class FtdiTransport:
@@ -128,33 +129,69 @@ class FtdiTransport:
 
         return cls(None, device, interface_index, pair, mps)
 
-    def _sync_write_read(self, data: bytes, response_len: int) -> bytes:
-        """Synchronous bulk write+read with FTDI modem status stripping."""
+    @classmethod
+    async def from_device_bitbang(cls, device, interface_index=0, oe_mask=0):
+        """Initialize sync bitbang mode on an already-opened ausb Device.
+
+        Like from_device(), but sets SYNCBB bitmode instead of MPSSE.
+        Uses mps=64 (Full-Speed USB devices like FT231XQ).
+        oe_mask sets which pins are outputs (1=output, 0=input).
+        """
+        try:
+            device.handle.detachKernelDriver(interface_index)
+        except (usb1.USBErrorNotFound, usb1.USBErrorNotSupported, usb1.USBErrorAccess):
+            pass
+
+        device.handle.claimInterface(interface_index)
+
+        idx = interface_index + 1
+
+        await device.vendor_control(SIO_RESET, SIO_RESET_SIO, idx, b'')
+        await device.vendor_control(SIO_SET_LATENCY_TIMER, 1, idx, b'')
+        await device.vendor_control(SIO_SET_BITMODE, BITMODE_RESET << 8, idx, b'')
+        await device.vendor_control(SIO_RESET, SIO_RESET_PURGE_RX, idx, b'')
+        await device.vendor_control(SIO_RESET, SIO_RESET_PURGE_TX, idx, b'')
+        await device.vendor_control(
+            SIO_SET_BITMODE, (BITMODE_SYNCBB << 8) | oe_mask, idx, b'')
+
+        ep_out_addr = 0x02 + interface_index * 2
+        ep_in_addr = 0x81 + interface_index * 2
+        mps = 64
+
+        ep_out = BulkOutEndpoint(device, ep_out_addr, mps)
+        ep_in = BulkInEndpoint(device, ep_in_addr, mps)
+        pair = BulkPair(ep_out, ep_in)
+
+        try:
+            while True:
+                d = ep_in.read_sync(mps, timeout=50)
+                if len(d) <= 2:
+                    break
+        except TransferTimeout:
+            pass
+
+        return cls(None, device, interface_index, pair, mps)
+
+    async def write(self, data: bytes):
+        """Write data to the FTDI bulk OUT endpoint."""
         mps = self._max_packet_size
         for offset in range(0, len(data), mps):
-            self._pair.out.write_sync(data[offset:offset + mps])
+            await self._pair.out.write(data[offset:offset + mps])
 
-        if response_len == 0:
-            return b""
+    async def read(self, byte_count: int) -> bytes:
+        """Read byte_count bytes from the FTDI bulk IN endpoint.
 
+        Strips the 2 modem status bytes that FTDI prepends to every
+        USB IN packet, accumulating payload bytes until byte_count
+        bytes are collected.
+        """
+        mps = self._max_packet_size
         result = bytearray()
-        while len(result) < response_len:
-            packet = self._pair.in_.read_sync(self._max_packet_size)
+        while len(result) < byte_count:
+            packet = await self._pair.in_.read(mps)
             if len(packet) > 2:
                 result.extend(packet[2:])
-
-        return bytes(result[:response_len])
-
-    async def write_read(self, data: bytes, response_len: int) -> bytes:
-        """Send MPSSE commands and read response.
-
-        FTDI prepends 2 modem status bytes to every USB read packet.
-        This method strips them and accumulates data bytes until
-        response_len bytes are collected.
-        """
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, self._sync_write_read, data, response_len)
+        return bytes(result[:byte_count])
 
     async def close(self):
         """Reset FTDI bitmode and release device.

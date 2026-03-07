@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol
 
 from . import mpsse_cmd
@@ -8,7 +9,8 @@ from ...engine import Batcher
 
 
 class Transport(Protocol):
-    async def write_read(self, data: bytes, response_len: int) -> bytes: ...
+    async def write(self, data: bytes) -> None: ...
+    async def read(self, byte_count: int) -> bytes: ...
 
 
 class Operation:
@@ -368,7 +370,9 @@ class MpsseEngine(Batcher):
 
         cmd = b"".join(cmd_parts)
         self.logger.log(5, "USB >> %d bytes, expect %d back", len(cmd), total_rsp)
-        rsp = await self._transport.write_read(cmd, total_rsp)
+        _, rsp = await asyncio.gather(
+            self._transport.write(cmd),
+            self._transport.read(total_rsp))
         self.logger.log(5, "USB << %d bytes", len(rsp))
 
         for (op, future), (start, end) in zip(batch, rsp_ranges):

@@ -183,20 +183,22 @@ class TestShiftTms:
 
 class MockTransport:
     def __init__(self):
-        self.calls = []
+        self.writes = []
         self.responses = []
 
     def queue_response(self, data: bytes):
         self.responses.append(data)
 
-    async def write_read(self, data: bytes, response_len: int) -> bytes:
-        self.calls.append((data, response_len))
+    async def write(self, data: bytes):
+        self.writes.append(data)
+
+    async def read(self, byte_count: int) -> bytes:
         if self.responses:
             rsp = self.responses.pop(0)
-            assert len(rsp) == response_len, \
-                f"Mock response length {len(rsp)} != expected {response_len}"
+            assert len(rsp) == byte_count, \
+                f"Mock response length {len(rsp)} != expected {byte_count}"
             return rsp
-        return bytes(response_len)
+        return bytes(byte_count)
 
 
 class TestMpsseEngine:
@@ -209,7 +211,7 @@ class TestMpsseEngine:
         result = await engine.post(op)
         assert result is op
         assert op.value == 0x42
-        assert len(transport.calls) == 1
+        assert len(transport.writes) == 1
 
     @pytest.mark.asyncio
     async def test_batching(self):
@@ -226,8 +228,8 @@ class TestMpsseEngine:
 
         assert op1.value == 0x11
         assert op2.value == 0x22
-        # Should be a single USB transfer
-        assert len(transport.calls) == 1
+        # Should be a single batch (one write call)
+        assert len(transport.writes) == 1
 
     @pytest.mark.asyncio
     async def test_write_only_ops_sync(self):
@@ -240,8 +242,7 @@ class TestMpsseEngine:
         op = SetBitsLow(0xaa, 0xff)
         await engine.post(op)
 
-        cmd_data, rsp_len = transport.calls[0]
-        assert rsp_len == 1  # sync byte
+        cmd_data = transport.writes[0]
         # Command should contain SET_BITS_LOW + GET_BITS_LOW + SEND_IMMEDIATE
         assert bytes([mpsse_cmd.SET_BITS_LOW]) in cmd_data
         assert bytes([mpsse_cmd.GET_BITS_LOW]) in cmd_data
@@ -264,7 +265,9 @@ class TestMpsseEngine:
     @pytest.mark.asyncio
     async def test_transport_error(self):
         class FailTransport:
-            async def write_read(self, data, response_len):
+            async def write(self, data):
+                raise IOError("USB error")
+            async def read(self, byte_count):
                 raise IOError("USB error")
 
         engine = MpsseEngine(FailTransport(), _test_logger)
