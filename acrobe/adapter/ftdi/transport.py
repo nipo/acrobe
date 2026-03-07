@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 import usb1
 import ausb
@@ -10,6 +11,7 @@ from ausb.exception import TransferTimeout, TransferOverflow, TransferStalled
 
 # FTDI USB vendor requests
 SIO_RESET = 0x00
+SIO_SET_BAUDRATE = 0x03
 SIO_SET_LATENCY_TIMER = 0x09
 SIO_SET_BITMODE = 0x0B
 
@@ -22,6 +24,30 @@ SIO_RESET_PURGE_TX = 2
 BITMODE_RESET = 0x00
 BITMODE_MPSSE = 0x02
 BITMODE_SYNCBB = 0x04
+
+# Fractional divisor encoding for FTDI baudrate generator.
+# Maps sub-integer 0/8..7/8 to the 3-bit code in bits [16:14].
+_FRAC_CODE = [0, 3, 2, 4, 1, 5, 6, 7]
+
+
+def ftdi_baudrate_divisor(baudrate):
+    """Compute FTDI baudrate divisor for non-H chips (48 MHz base).
+
+    Returns (actual_baudrate, encoded_divisor).
+    The actual baudrate never exceeds the requested baudrate.
+    """
+    if baudrate >= 3_000_000:
+        return 3_000_000, 0
+    if baudrate >= 2_000_000:
+        return 2_000_000, 1
+    # Divisor in 1/8ths, ceil to not exceed requested rate
+    div8 = math.ceil(48_000_000 / baudrate)
+    div8 = max(24, div8)  # integer part ≥ 3
+    actual = 48_000_000 / div8
+    integer = div8 >> 3
+    frac = div8 & 7
+    encoded = integer | (_FRAC_CODE[frac] << 14)
+    return actual, encoded
 
 
 class FtdiTransport:
@@ -184,6 +210,19 @@ class FtdiTransport:
         cls._drain(ep_in, mps)
 
         return cls(None, device, interface_index, pair, mps)
+
+    async def set_baudrate(self, baudrate):
+        """Set FTDI baud rate. Returns actual baudrate (never exceeds requested).
+
+        Uses non-H encoding (48 MHz base). Suitable for FT232R, FT-X series.
+        """
+        actual, encoded = ftdi_baudrate_divisor(baudrate)
+        value = encoded & 0xFFFF
+        index = (encoded >> 16) & 0xFFFF
+        if self._interface_index > 0:
+            index = (index & 0xFF00) | (self._interface_index + 1)
+        await self._device.vendor_control(SIO_SET_BAUDRATE, value, index, b'')
+        return actual
 
     # Write chunk size.  libusb splits into USB packets, so this only
     # needs to stay within the host-controller's transfer limits.

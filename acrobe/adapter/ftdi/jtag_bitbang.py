@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+from .transport import ftdi_baudrate_divisor
 from ...engine import Batcher
 from ...bitstring import BitString, BitStringBase
 from ...protocol import jtag
@@ -34,7 +35,24 @@ class JtagBitbang(Batcher):
         self._tdo = tdo
         self._tdo_mask = 1 << tdo
         self._state = self.STATE_UNKNOWN
+        self._baudrate = None
+        self._baudrate_dirty = False
         self.logger = logger
+
+    def freq_update(self, freq):
+        """Set JTAG clock frequency via FTDI bitbang baud rate.
+
+        Each JTAG cycle is 2 GPIO bytes, so baudrate = 2 × freq.
+        Returns actual achieved frequency (never exceeds requested).
+        """
+        if freq is None:
+            return None
+        target_baudrate = freq * 2
+        actual_baudrate, _ = ftdi_baudrate_divisor(target_baudrate)
+        if actual_baudrate != self._baudrate:
+            self._baudrate = actual_baudrate
+            self._baudrate_dirty = True
+        return actual_baudrate / 2
 
     def _cycle(self, buf, tms_bit, tdi_bit):
         """Append two GPIO bytes for one JTAG clock cycle.
@@ -152,6 +170,9 @@ class JtagBitbang(Batcher):
 
     async def flush_ops(self, batch):
         """Translate JTAG operations to bitbang GPIO bytes and execute."""
+        if self._baudrate_dirty:
+            self._baudrate_dirty = False
+            await self._transport.set_baudrate(self._baudrate)
         self.logger.log(5, "JTAG-BB batch: %s", [op for op, _ in batch])
         buf = bytearray()
         # Track Shift ops that need TDO extraction
