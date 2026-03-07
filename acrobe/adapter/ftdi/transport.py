@@ -247,7 +247,7 @@ class FtdiTransport:
         return rsp
 
     # Maximum time to spend in read() before raising a timeout.
-    _READ_DEADLINE = 5.0
+    _READ_DEADLINE = 1.0
 
     async def read(self, byte_count: int) -> bytes:
         """Read byte_count bytes from the FTDI bulk IN endpoint.
@@ -288,10 +288,13 @@ class FtdiTransport:
                     raise
                 self._pair.in_.resume()
                 continue
+            prev_len = len(result)
             for offset in range(0, len(data), mps):
                 chunk = data[offset:offset + mps]
                 if len(chunk) > 2:
                     result.extend(chunk[2:])
+            if len(result) > prev_len:
+                deadline = time.monotonic() + self._READ_DEADLINE
         return bytes(result[:byte_count])
 
     async def close(self):
