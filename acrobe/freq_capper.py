@@ -1,5 +1,7 @@
 from contextlib import contextmanager
 
+from .util.pretty import metric
+
 
 class FreqCapper:
     """Mixin for managing named frequency constraints.
@@ -58,11 +60,13 @@ class FreqCapper:
         if freq == self.__freq:
             return
 
-        self.logger.trace("Frequency cap: %s (constraint: %s)", freq, reason)
+        self.logger.trace("Frequency cap: %s (constraint: %s)",
+                          metric(freq, "Hz") if freq is not None else "none",
+                          reason)
         freq = self.freq_update(freq)
         self.__freq = freq
         if freq is not None:
-            self.logger.note("Frequency: %g Hz", freq)
+            self.logger.note("Frequency: %s", metric(freq, "Hz"))
         else:
             self.logger.note("Frequency: unconstrained")
 

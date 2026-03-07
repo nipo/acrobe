@@ -11,6 +11,7 @@ import struct
 
 from ..component import Component
 from ..protocol.spi import Shift
+from ..util.pretty import base2
 
 # Common JEDEC manufacturer IDs (bank 0)
 _JEDEC_MANUFACTURERS = {
@@ -28,15 +29,6 @@ _JEDEC_MANUFACTURERS = {
     0x85: "Puya",
     0x25: "Zetta",
 }
-
-
-def _size_str(size):
-    """Human-readable binary size."""
-    if size >= 1 << 20:
-        return f"{size >> 20}MiB"
-    if size >= 1 << 10:
-        return f"{size >> 10}KiB"
-    return f"{size}B"
 
 
 class SpiFlash(Component):
@@ -159,11 +151,12 @@ class SpiFlash(Component):
                     (65536, self.BLOCK_ERASE_64K),
                 ]
 
-        self.logger.note("Size: %s, page: %dB, addr: %dB",
-                         _size_str(self.total_size), self.page_size,
+        self.logger.note("Size: %s, page: %s, addr: %dB",
+                         base2(self.total_size, "B"),
+                         base2(self.page_size, "B"),
                          self.ADDRESS_SIZE)
         for size, cmd in self.sector_info:
-            self.logger.info("Erase: %s (cmd 0x%02x)", _size_str(size), cmd[0])
+            self.logger.info("Erase: %s (cmd 0x%02x)", base2(size, "B"), cmd[0])
 
     async def _sfdp_read(self, addr, size):
         """Read SFDP data at the given address."""
