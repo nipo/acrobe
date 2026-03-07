@@ -200,6 +200,10 @@ class MockTransport:
             return rsp
         return bytes(byte_count)
 
+    async def transfer(self, data: bytes, byte_count: int) -> bytes:
+        await self.write(data)
+        return await self.read(byte_count)
+
 
 class TestMpsseEngine:
     @pytest.mark.asyncio
@@ -268,6 +272,8 @@ class TestMpsseEngine:
             async def write(self, data):
                 raise IOError("USB error")
             async def read(self, byte_count):
+                raise IOError("USB error")
+            async def transfer(self, data, byte_count):
                 raise IOError("USB error")
 
         engine = MpsseEngine(FailTransport(), _test_logger)
