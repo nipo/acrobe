@@ -52,7 +52,7 @@ class FtdiTransport:
 
         try:
             device.handle.detachKernelDriver(interface_index)
-        except (usb1.USBErrorNotFound, usb1.USBErrorNotSupported):
+        except (usb1.USBErrorNotFound, usb1.USBErrorNotSupported, usb1.USBErrorAccess):
             pass
 
         device.handle.claimInterface(interface_index)
@@ -96,7 +96,7 @@ class FtdiTransport:
         """
         try:
             device.handle.detachKernelDriver(interface_index)
-        except (usb1.USBErrorNotFound, usb1.USBErrorNotSupported):
+        except (usb1.USBErrorNotFound, usb1.USBErrorNotSupported, usb1.USBErrorAccess):
             pass
 
         device.handle.claimInterface(interface_index)
