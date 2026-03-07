@@ -220,4 +220,5 @@ class Component:
 
 from . import xilinx  # noqa: F401, E402
 from . import gowin  # noqa: F401, E402
+from . import lattice  # noqa: F401, E402
 from . import spi_flash  # noqa: F401, E402
