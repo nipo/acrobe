@@ -1,0 +1,42 @@
+name: blink
+
+root:
+  name: top
+  sources:
+    - file_type: vhdl
+      files:
+        - ../../src/func.pkg.vhd
+        - ../../src/jtag_spi.vhd
+        - ../boundary.vhd
+    - file_type: ecp5-lpf
+      files:
+        - pins.lpf
+  deps:
+    - nsl_hwdep.clock
+    - nsl_hwdep.reset
+    - nsl_spi.transactor
+    - nsl_bnoc.framed
+    - nsl_jtag.fifo_transport
+    - nsl_indication.activity
+
+output:
+  - name: pnr
+    topcell: boundary
+    backend_config:
+      gbs.builtin.yosys:
+        yosys_tool: "yosys"
+        steps:
+          - flatten
+          - tribuf -logic
+          - deminout
+      gbs.builtin.nextpnr:
+        nextpnr_tool: "nextpnr-ecp5"
+        part: 25k
+        package: TQFP144
+#        package: CABGA256
+      gbs.builtin.ecppack:
+        ecppack_tool: "ecppack"
+    outputs:
+      - type: ecp5-bitstream
+        path: ../../../../acrobe/component/lattice/fw/0x41111043_jtag_spi.bin.gz
+

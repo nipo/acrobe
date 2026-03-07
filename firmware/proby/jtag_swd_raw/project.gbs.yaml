@@ -1,0 +1,27 @@
+name: blink
+
+root:
+  name: top
+  sources:
+    - file_type: vhdl
+      files:
+        - boundary.vhd
+    - file_type: xilinx-ucf
+      files:
+        - ../pinout/ftdi_jtag.ucf
+        - ../pinout/io0_dbg.ucf
+        - ../pinout/user.ucf
+        - ../pinout/clk.ucf
+  deps:
+    - nsl_indication.activity
+
+output:
+  - name: synthesis
+    topcell: boundary
+    backend_config:
+      gbs.builtin.ise:
+        target:
+          part: xc6slx9-2tqg144
+    outputs:
+      - type: ise-bitstream
+        path: ../../../crobe/adapter/proby/fw/jtag_swd_raw.bit.gz

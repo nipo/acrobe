@@ -1,0 +1,40 @@
+name: jtag_spi_bridge-0x0001281b
+description: 
+
+root:
+  name: top
+  sources:
+    - file_type: vhdl
+      files:
+        - ../../src/func.pkg.vhd
+        - ../../src/jtag_spi.vhd
+        - ../boundary.vhd
+    - file_type: gowin-cst
+      files:
+        - pins.cst
+  deps:
+    - nsl_hwdep.clock
+    - nsl_hwdep.reset
+    - nsl_spi.transactor
+    - nsl_bnoc.framed
+    - nsl_jtag.fifo_transport
+    - nsl_indication.activity
+
+output:
+  - name: synthesis
+    topcell: boundary
+    filter_vars:
+      vendor: gowin
+      target: synthesis
+    target:
+      part: GW5A-LV25MG121NC1/I0#A
+      use_as_gpio:
+        - mspi
+        - done
+        - cpu
+    backend_config:
+      gbs.builtin.gowin:
+        part: GW5A-LV25MG121NC1/I0#A
+    outputs:
+      - type: gowin-fs
+        path: ../../../../acrobe/component/gowin/fw/0x0001281b_jtag_spi.fs.gz
