@@ -77,6 +77,7 @@ def _part_ids(*prefixes):
 
 class GowinFpga(Tap, JtagSramFpga):
     irlen = 8
+    max_freq = 25e6
 
     USER_IR = [0x42, 0x43]
 
@@ -238,4 +239,5 @@ class Gw2a(GowinFpga):
 
 @Tap.db.register(*_part_ids("GW5A"))
 class Gw5a(GowinFpga):
+    max_freq = 30e6
     _status_type = Gw5aStatus

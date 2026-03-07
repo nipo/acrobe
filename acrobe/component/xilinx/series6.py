@@ -8,6 +8,7 @@ from .config_access_port import ConfigAccessPort
 
 class Series6(Tap, JtagSramFpga, ConfigAccessPort):
     irlen = 6
+    max_freq = 66e6
 
     USER_IR = [0x02, 0x03, 0x1a, 0x1b]
 

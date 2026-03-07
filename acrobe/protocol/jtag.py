@@ -4,6 +4,7 @@ import math
 
 from ..engine import Batcher
 from ..component import Component
+from ..freq_capper import FreqCapper
 from ..bitstring import BitString, BitStringBase
 from ..db import Db, NoMatch
 
@@ -219,6 +220,7 @@ def _idcode_eq(key, lookup):
 
 class Tap(Batcher, Component, InstructionRegistry):
     irlen = None
+    max_freq = None
     db = Db("TAP idcode", eq_func=_idcode_eq)
 
     def __init__(self, interface, idcode=None, irlen=None, name=None):
@@ -375,14 +377,15 @@ class Tap(Batcher, Component, InstructionRegistry):
 
 # JTAG Interface
 
-class JtagInterface(Component):
+class JtagInterface(Component, FreqCapper):
     """JTAG master interface. Holds a single Chain as child.
 
     Supports multiple chains (e.g. behind a mux) in the future.
     """
 
     def __init__(self, interface, name="jtag"):
-        super().__init__(name)
+        Component.__init__(self, name)
+        FreqCapper.__init__(self)
         self._interface = interface
         self.child_add(Chain(interface))
 
@@ -392,6 +395,17 @@ class JtagInterface(Component):
         self._interface.logger = self.logger
         if hasattr(self._interface, '_engine'):
             self._interface._engine.logger = self.logger
+
+    def freq_update(self, freq):
+        """Delegate frequency changes to the underlying JTAG adapter."""
+        return self._interface.freq_update(freq)
+
+    def option_set(self, opt):
+        if opt.startswith("fmax="):
+            from ..util.pretty import sci_parse
+            self.freq_cap("user", sci_parse(opt[5:]))
+            return
+        super().option_set(opt)
 
 
 # Chain
@@ -411,7 +425,16 @@ class Chain(Component):
         self.total_drlen = 0
 
     async def start(self):
-        await self.discover()
+        jtag_iface = self.parent_of_class(JtagInterface)
+        with jtag_iface.freq_capped("enumeration", 1e6):
+            await self.discover()
+
+    def children_changed(self):
+        try:
+            jtag_iface = self.parent_of_class(JtagInterface)
+        except LookupError:
+            return
+        jtag_iface.freq_cap_min(self.children)
 
     async def _shift_discover(self, max_length=512, shift_in=None):
         """Probe a register's length by shifting a marker through.

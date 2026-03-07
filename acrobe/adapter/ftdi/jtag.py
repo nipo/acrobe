@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 
 from .mpsse import (
     MpsseEngine, SetBitsLow, SetBitsHigh,
@@ -38,7 +39,48 @@ class JtagMpsse(Batcher):
         self._state = self.STATE_UNKNOWN
         self._gpio_oe = 0
         self._gpio_val = 0
+        self._clock_state = None
+        self._read_pol = "+"
         self.logger = logger
+
+    def freq_update(self, freq):
+        """Compute and apply clock divisor for the requested frequency.
+
+        Returns the actual achieved frequency (never exceeds freq).
+        Posts ClockDiv5 + ClockDivisor ops only if the divisor changed.
+
+        At >= 10 MHz, switches TDO sampling to falling edge for better
+        setup margin (matches crobe behavior).
+        """
+        if freq is None:
+            self._read_pol = "+"
+            return None
+
+        # Clock calculation for FT2232H (60 MHz base):
+        # With DIV5 enabled: base = 12 MHz, freq = 12e6 / (divisor * 2)
+        # With DIV5 disabled: base = 60 MHz, freq = 60e6 / (divisor * 2)
+        #
+        # Try both modes and pick the highest actual freq that
+        # does not exceed the requested cap.
+        best = None
+        for try_div5, base in [(False, 60e6), (True, 12e6)]:
+            divisor = max(1, math.ceil(base / (2 * freq)))
+            actual = base / (2 * divisor)
+            if actual <= freq and (best is None or actual > best[0]):
+                best = (actual, try_div5, divisor)
+        actual, div5, divisor = best
+
+        # At high clock rates, sample TDO on the falling edge to give
+        # extra propagation margin (full period instead of half).
+        self._read_pol = "-" if actual >= 10e6 else "+"
+
+        new_state = (div5, divisor)
+        if new_state != self._clock_state:
+            self._clock_state = new_state
+            self._engine.post(ClockDiv5(div5))
+            self._engine.post(ClockDivisor(divisor))
+
+        return actual
 
     async def setup(self, gpio_oe=0, gpio_val=0, freq=1e6):
         """Initialize MPSSE for JTAG and configure GPIO pins.
@@ -56,24 +98,12 @@ class JtagMpsse(Batcher):
         self._gpio_oe = jtag_oe | gpio_oe
         self._gpio_val = gpio_val
 
-        # Clock calculation for FT2232H (60 MHz base):
-        # With DIV5 enabled: base = 12 MHz, freq = 12e6 / (divisor * 2)
-        # With DIV5 disabled: base = 60 MHz, freq = 60e6 / (divisor * 2)
-        # Use DIV5 for frequencies below 6 MHz, disable for higher.
-        if freq <= 6e6:
-            div5 = True
-            base = 12e6
-        else:
-            div5 = False
-            base = 60e6
-        divisor = max(1, round(base / (2 * freq)))
+        self.freq_update(freq)
 
         ops = [
             ThreePhase(False),
             Adaptive(False),
             Loopback(False),
-            ClockDiv5(div5),
-            ClockDivisor(divisor),
             SetBitsLow(self._gpio_val & 0xFF, self._gpio_oe & 0xFF),
         ]
         if self._gpio_oe & 0xFF00:
@@ -214,21 +244,22 @@ class JtagMpsse(Batcher):
         offset = 0
 
         # Shift all but the last bit
+        read_pol = self._read_pol
         while left >= 8:
             c = min(left, 65536 * 8) & ~7
             chunk = tdi[offset:offset + c]
-            mpsse_ops.append(ShiftBytes(chunk, read=read))
+            mpsse_ops.append(ShiftBytes(chunk, read=read, read_pol=read_pol))
             offset += c
             left -= c
 
         if left > 0:
             chunk = int(tdi[offset:offset + left])
-            mpsse_ops.append(ShiftBits(chunk, left, read=read))
+            mpsse_ops.append(ShiftBits(chunk, left, read=read, read_pol=read_pol))
             offset += left
 
         # Last bit via TMS: shifts the bit AND transitions to Exit1
         last_bit = int(tdi[-1])
-        mpsse_ops.append(ShiftTms(0b1, 1, tdi=last_bit, read=read))
+        mpsse_ops.append(ShiftTms(0b1, 1, tdi=last_bit, read=read, read_pol=read_pol))
 
         mpsse_end = len(mpsse_ops)
 

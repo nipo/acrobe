@@ -42,6 +42,7 @@ class ECP5Status(Bitfield):
 @Tap.db.register(*_ECP5_PARTS.keys())
 class ECP5(Tap, JtagSramFpga):
     irlen = 8
+    max_freq = 25e6
 
     USER_IR = [0x32, 0x38]
 

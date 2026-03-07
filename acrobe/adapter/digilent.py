@@ -47,7 +47,10 @@ class FtdiJtagAdapter(Adapter):
 
     async def child_spawn(self, name):
         if name.lower() == "jtag":
-            return JtagInterface(self._jtag, name="jtag")
+            iface = JtagInterface(self._jtag, name="jtag")
+            # FT2232H max JTAG clock: 30 MHz (60 MHz base / min divisor 1 / 2)
+            iface.freq_cap("hardware", 30e6)
+            return iface
         raise NoMatch("interface", name)
 
     async def close(self):

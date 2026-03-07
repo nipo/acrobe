@@ -132,6 +132,10 @@ class Component:
         finally:
             handle.close()
 
+    def option_set(self, opt):
+        """Apply an option to this component. Override in subclasses."""
+        raise ValueError(f"Unknown option: {opt!r}")
+
     def child_lookup(self, name):
         """Find existing child by name.
 
@@ -175,6 +179,20 @@ class Component:
                 continue
         raise NoMatch("child", name)
 
+    @staticmethod
+    def _parse_options(name):
+        """Parse "name(opt1,opt2)" into (name, [opt1, opt2]).
+
+        Returns (name, []) if no options are present.
+        """
+        if name.endswith(")"):
+            paren = name.index("(")
+            opts_str = name[paren + 1:-1]
+            bare_name = name[:paren]
+            opts = [o.strip() for o in opts_str.split(",") if o.strip()]
+            return bare_name, opts
+        return name, []
+
     async def child_summon(self, *parts):
         """Resolve a path through the component tree, spawning as needed.
 
@@ -182,18 +200,25 @@ class Component:
         Each component along the path is started (if not already) before
         navigating deeper, so that start() can populate children
         (e.g. Chain.start() discovers TAPs).
+
+        Supports "name(opt1,opt2)" syntax: options are applied via
+        option_set() before the component is started.
         """
         if not parts:
             return self
-        name, *rest = parts
-        child = self.child_lookup(name)
+        raw_name, *rest = parts
+        bare_name, opts = self._parse_options(raw_name)
+        child = self.child_lookup(bare_name)
         if child is None:
-            child = await self._child_spawn_mro(name)
+            child = await self._child_spawn_mro(bare_name)
             if isinstance(child, Component) and child._parent is None:
                 self._child_attach(child)
-        if isinstance(child, Component) and not child._started:
-            await child.start()
-            child._started = True
+        if isinstance(child, Component):
+            for opt in opts:
+                child.option_set(opt)
+            if not child._started:
+                await child.start()
+                child._started = True
         if not rest:
             return child
         return await child.child_summon(*rest)
