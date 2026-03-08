@@ -36,5 +36,5 @@ output:
       gbs.builtin.gowin:
         part: GW5A-LV25MG121NC1/I0#A
     outputs:
-      - type: gowin-fs
+      - type: gowin-fs+gzip
         path: ../../../../acrobe/component/gowin/fw/0x0001281b_jtag_spi.fs.gz
