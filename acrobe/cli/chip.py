@@ -27,7 +27,7 @@ async def chip(ctx, root_paths, target_sel):
     for path in root_paths:
         parts = path.strip("/").split("/")
         leaf = await hw_root.child_summon(*parts)
-        if isinstance(leaf, Component) and not leaf.started:
+        if isinstance(leaf, Component):
             await leaf.start_tree()
         roots.append(leaf)
 

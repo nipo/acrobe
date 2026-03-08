@@ -57,8 +57,8 @@ async def enumerate(root_path):
     if isinstance(leaf, Component):
         await leaf.start_tree()
 
-    click.echo("Root resolution:")
-    component_dump(hw_root, "  ")
+    click.echo("Component tree:")
+    component_dump(leaf, "  ")
 
     # If leaf is a raw JTAG interface (Batcher but not Component), discover chain
     if hasattr(leaf, 'post') and not isinstance(leaf, Component):
