@@ -527,9 +527,7 @@ class _Parser:
         # Try keyword prefix (e.g. "IF(" → keyword "IF", rest "(...")
         for kw in _KEYWORDS:
             if keyword.startswith(kw) and len(keyword) > len(kw):
-                remainder = text[len(kw):]
-                if rest:
-                    remainder = remainder + ' ' + rest
+                remainder = text[len(kw):].strip()
                 handler = getattr(self, f'_parse_{kw.lower()}', None)
                 if handler is not None:
                     return handler(remainder, stmt)
