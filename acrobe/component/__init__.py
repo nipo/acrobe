@@ -243,6 +243,7 @@ class Component:
             await child.stop_tree()
 
 
+from . import altera  # noqa: F401, E402
 from . import xilinx  # noqa: F401, E402
 from . import gowin  # noqa: F401, E402
 from . import lattice  # noqa: F401, E402
