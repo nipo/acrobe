@@ -449,6 +449,35 @@ For the 8-bit FIFO interface, the mapping is likely:
   use a dedicated FIFO channel or the same mailbox with a different
   opcode
 
+### JTAG VDR Shift Register Semantics
+
+**Critical implementation detail**: The VIR and VDR are **single-word
+shift registers**, not FIFOs. Each DR scan of N bits simultaneously
+shifts N bits in (TDI) and N bits out (TDO). The TDO value is the
+**previous** DR content, not the response to the current TDI.
+
+This means:
+- Scan 0: TDI=word0, TDO=previous_state (discard)
+- Scan 1: TDI=word1, TDO=response_to_word0
+- Scan 2: TDI=word2, TDO=response_to_word1
+- ...
+
+The STAPL `j89` (VIR write) and `j97` (VDR exchange) both operate
+**one word at a time** in a loop for this reason. Multi-word
+transactions cannot be sent as a single large DR shift.
+
+For VIR writes (`j89`):
+1. First scan reads FIFO level (12-bit counter)
+2. Subsequent scans push command words one at a time
+
+For VDR exchanges (`j97`):
+1. Each scan sends one data word and captures the response to the
+   previous word
+2. The response is checked against mask/expected values
+3. If the check fails, the word is retried
+4. The valid/ready bit (bit 0 at device offset) indicates whether
+   the SDM has processed the command
+
 ### Open Questions
 
 - The sync2 handshake signatures — what do the magic numbers encode?

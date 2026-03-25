@@ -1,22 +1,121 @@
 import asyncio
-import struct
 
 from ...protocol.jtag import Tap, Dr, Instruction
 from ..fpga import JtagSramFpga
 from ...bitstring import BitString
+from .sdm_jtag import SdmJtagTransport
 
 
 class SdmError(Exception):
     """Raised when SDM communication fails."""
 
 
+class SdmMailbox:
+    """SDM mailbox protocol over an Avalon-ST transport.
+
+    Provides the SDM command layer: sync, simple commands, status
+    queries, and multi-word transactions.  The transport is pluggable
+    (currently JTAG VIR/VDR via SdmJtagTransport).
+    """
+
+    # Busy bit in VDR response payload — always masked out
+    BUSY_MASK = 0xFF7FFFFF
+
+    def __init__(self, transport):
+        self._tr = transport
+
+    # ------------------------------------------------------------------
+    # Low-level transaction helpers
+    # ------------------------------------------------------------------
+
+    async def _vdr_transact(self, send_words, n_response,
+                            mask_words=None, retries=75):
+        """Send VDR words, collect responses, optionally check mask.
+
+        Because the VDR is a shift register with pipelined responses,
+        this collects all TDO values and searches for a matching window.
+        """
+        for attempt in range(retries):
+            responses = await self._tr.vdr_exchange(send_words, n_response)
+
+            if mask_words is None:
+                return responses[:n_response]
+
+            # Search for a matching window in the response stream
+            for offset in range(len(responses) - n_response + 1):
+                window = responses[offset:offset + n_response]
+                ok = True
+                for i, (payload, sop, eop) in enumerate(window):
+                    if i < len(mask_words) and mask_words[i] is not None:
+                        exp_payload, exp_mask = mask_words[i]
+                        if (payload & exp_mask) != (exp_payload & exp_mask):
+                            ok = False
+                            break
+                if ok:
+                    return window
+
+        raise SdmError(f"SDM VDR transaction failed after {retries} retries")
+
+    async def transact(self, vir_words, vdr_send, vdr_n_response,
+                       vdr_mask=None, retries=75):
+        """Complete SDM transaction: VIR command write + VDR data exchange."""
+        await self._tr.vir_write(vir_words)
+        return await self._vdr_transact(
+            vdr_send, vdr_n_response, vdr_mask, retries)
+
+    # ------------------------------------------------------------------
+    # SDM commands
+    # ------------------------------------------------------------------
+
+    async def sync(self, sync2_vir=None, sync2_vdr=None, sync2_mask=None):
+        """Synchronize with the SDM.
+
+        Phase 1: flush/reset.
+        Phase 2 (optional): device-specific handshake.
+        """
+        p = self._tr.pack_word
+
+        # Phase 1: flush
+        flush_vir = [p(0xC0000000), p(0x80000000)]
+        ack_vdr = [p(0x00000000, sop=True, eop=True)]
+        ack_mask = [(0x00000000, self.BUSY_MASK)]
+        await self.transact(flush_vir, ack_vdr, 1, ack_mask)
+
+        # Phase 2: handshake
+        if sync2_vir is not None:
+            await self.transact(
+                sync2_vir, sync2_vdr,
+                len(sync2_vdr), sync2_mask)
+
+    async def command(self, cmd_id, sop=True, eop=False, retries=75):
+        """Send a simple SDM command (bit[31]=1, cmd_id in [7:0]).
+
+        Returns single VDR ack response payload.
+        """
+        p = self._tr.pack_word
+        payload = 0x80000000 | (cmd_id & 0xFF)
+        vir = [p(payload, sop=sop, eop=eop)]
+        ack = [p(0, sop=True, eop=True)]
+        ack_mask = [(0x00000000, self.BUSY_MASK)]
+        resp = await self.transact(vir, ack, 1, ack_mask, retries)
+        return resp[0][0]
+
+    async def status(self):
+        """Query SDM status (5 VDR response words).
+
+        Returns list of (payload, sop, eop) tuples.
+        """
+        p = self._tr.pack_word
+        vir = [p(0x80000001)]  # cmd_id=1, no SOP
+        await self._tr.vir_write(vir)
+        return await self._tr.vdr_exchange(
+            [p(0)] * 5, 5)
+
+
 class Agilex5(Tap, JtagSramFpga):
-    """Altera/Intel Agilex 5 FPGA with SDM (Secure Device Manager).
+    """Altera/Intel Agilex 5 FPGA with SDM.
 
-    Unlike Cyclone 10 LP which uses direct JTAG bitstream shift,
-    Agilex 5 communicates through an SDM mailbox over Virtual JTAG.
-    All configuration and flash operations go through this mailbox.
-
+    All configuration goes through the SDM mailbox over Virtual JTAG.
     See NOTES.md for full protocol documentation.
     """
 
@@ -41,194 +140,27 @@ class Agilex5(Tap, JtagSramFpga):
     VDR = Instruction(0x202, None)
     CONFIG_STATUS_VJ = Instruction(0x208, None)
 
-    # Status register
     CONF_DONE_BIT = 13
-
-    # SDM protocol constants
-    _SDM_WORD_BITS = 34
-    _SDM_FIFO_POLL_BITS = 12
 
     # Bitstream streaming constants
     _STREAM_HEADER = 0xA17E2A00_FFFFFFFF
     _STREAM_HEADER_BITS = 64
-    _STREAM_TRAILER_BITS = 1
     _STREAM_INITIAL_CHUNK = 32768
     _STREAM_STATUS_RETRIES = 6000
 
-    # Sync signatures (device-specific, from STAPL dj161)
-    _SYNC2_VIR = None   # Subclass must set
-    _SYNC2_VDR = None   # Subclass must set
-    _SYNC2_MASK = None  # Subclass must set
+    # Subclass must set these for sync phase 2
+    _SYNC2_VIR = None
+    _SYNC2_VDR = None
+    _SYNC2_MASK = None
+
+    def _build_sdm(self):
+        """Build the SDM mailbox stack."""
+        transport = SdmJtagTransport(self, vir_ir=int(self.VIR),
+                                     vdr_ir=int(self.VDR))
+        return SdmMailbox(transport)
 
     # ------------------------------------------------------------------
-    # SDM transport layer
-    # ------------------------------------------------------------------
-
-    def _pack_sdm_word(self, payload, sop=False, eop=False):
-        """Pack a 32-bit payload into a 34-bit Avalon-ST word."""
-        return (payload << 2) | (int(eop) << 1) | int(sop)
-
-    def _unpack_sdm_word(self, word):
-        """Unpack a 34-bit word into (payload, sop, eop)."""
-        return (word >> 2) & 0xFFFFFFFF, bool(word & 1), bool(word & 2)
-
-    def _pack_sdm_words(self, words):
-        """Pack list of 34-bit words into a BitString."""
-        total_bits = len(words) * self._SDM_WORD_BITS
-        val = 0
-        for i, w in enumerate(words):
-            val |= (w & 0x3FFFFFFFF) << (i * self._SDM_WORD_BITS)
-        data = val.to_bytes((total_bits + 7) // 8, 'little')
-        return BitString(data, total_bits)
-
-    def _unpack_sdm_response(self, tdo_bytes, n_words):
-        """Unpack DR capture into list of (payload, sop, eop)."""
-        val = int.from_bytes(tdo_bytes, 'little')
-        words = []
-        for i in range(n_words):
-            w = (val >> (i * self._SDM_WORD_BITS)) & 0x3FFFFFFFF
-            words.append(self._unpack_sdm_word(w))
-        return words
-
-    async def _sdm_vir_write(self, words):
-        """Write command words to the SDM via VIR.
-
-        Polls VDR for FIFO free slots, then sends command words.
-        """
-        n_words = len(words)
-        tdi = self._pack_sdm_words(words)
-
-        # Set IR to VIR
-        await self.ir(int(self.VIR))(read_tdo=False)
-        await self.run(16)
-
-        # Poll for FIFO free slots
-        # (In a single-device chain, DR = SDM_WORD_BITS)
-        for _ in range(50):
-            zero_tdi = BitString(0, self._SDM_WORD_BITS)
-            result = await self.ir(int(self.VDR), dr_length=self._SDM_WORD_BITS)(
-                zero_tdi, read_tdo=True)
-            await self.run(16)
-            val = int(result) & ((1 << self._SDM_FIFO_POLL_BITS) - 1)
-            free_slots = 16 - val
-            if free_slots >= n_words:
-                break
-        else:
-            raise SdmError("SDM VIR FIFO not ready (timeout)")
-
-        # Send command words
-        await self.ir(int(self.VDR), dr_length=len(tdi))(tdi, read_tdo=False)
-        await self.run(16)
-
-    async def _sdm_vdr_exchange(self, send_words, n_response,
-                                mask_words=None, retries=75):
-        """Exchange data words via VDR.
-
-        Sends send_words, then reads n_response words.
-        If mask_words is provided, checks responses against expected values.
-        Returns list of (payload, sop, eop) tuples.
-        """
-        # Set IR to VDR
-        await self.ir(int(self.VDR))(read_tdo=False)
-        await self.run(16)
-
-        total_bits = n_response * self._SDM_WORD_BITS
-        send_tdi = self._pack_sdm_words(send_words)
-
-        for attempt in range(retries):
-            # Send and capture
-            zero_tdi = BitString(0, total_bits)
-            result = await self.ir(int(self.VDR), dr_length=total_bits)(
-                zero_tdi, read_tdo=True)
-            await self.run(16)
-
-            result_bytes = bytes(result.data[:(total_bits + 7) // 8])
-            response = self._unpack_sdm_response(result_bytes, n_response)
-
-            if mask_words is None:
-                return response
-
-            # Check against mask
-            ok = True
-            for i, (payload, sop, eop) in enumerate(response):
-                if i < len(mask_words) and mask_words[i] is not None:
-                    exp_payload, exp_mask = mask_words[i]
-                    if (payload & exp_mask) != (exp_payload & exp_mask):
-                        ok = False
-                        break
-            if ok:
-                return response
-
-        raise SdmError(f"SDM VDR exchange failed after {retries} retries")
-
-    async def _sdm_transact(self, vir_words, vdr_send, vdr_n_response,
-                            vdr_mask=None, retries=75):
-        """Complete SDM transaction: VIR write + VDR exchange."""
-        await self._sdm_vir_write(vir_words)
-        return await self._sdm_vdr_exchange(
-            vdr_send, vdr_n_response, vdr_mask, retries)
-
-    # ------------------------------------------------------------------
-    # SDM command layer
-    # ------------------------------------------------------------------
-
-    async def sdm_sync(self):
-        """Synchronize with the SDM.
-
-        Two-phase sync: flush + handshake.
-        """
-        # Phase 1: flush/reset
-        self.logger.trace("SDM sync phase 1...")
-        flush_vir = [
-            self._pack_sdm_word(0xC0000000),
-            self._pack_sdm_word(0x80000000),
-        ]
-        ack_vdr = [self._pack_sdm_word(0x00000000, sop=True, eop=True)]
-        ack_mask = [(0x00000000, 0xFF7FFFFF)]
-        await self._sdm_transact(flush_vir, ack_vdr, 1, ack_mask, retries=75)
-
-        # Phase 2: handshake (device-specific signature)
-        if self._SYNC2_VIR is not None:
-            self.logger.trace("SDM sync phase 2...")
-            await self._sdm_transact(
-                self._SYNC2_VIR, self._SYNC2_VDR,
-                len(self._SYNC2_VDR), self._SYNC2_MASK, retries=75)
-
-    async def sdm_command(self, cmd_id, sop=True, eop=False, retries=75):
-        """Send a simple SDM command (bit[31]=1, cmd_id in [7:0]).
-
-        Returns single VDR ack response payload.
-        """
-        payload = 0x80000000 | (cmd_id & 0xFF)
-        vir = [self._pack_sdm_word(payload, sop=sop, eop=eop)]
-        ack = [self._pack_sdm_word(0x00000000, sop=True, eop=True)]
-        ack_mask = [(0x00000000, 0xFF7FFFFF)]
-        resp = await self._sdm_transact(vir, ack, 1, ack_mask, retries)
-        return resp[0][0]  # payload
-
-    async def sdm_status(self, retries=75):
-        """Query SDM status (5 VDR response words).
-
-        Returns list of 5 (payload, sop, eop) tuples.
-        """
-        payload = 0x80000000 | 0x01
-        vir = [self._pack_sdm_word(payload, sop=False, eop=False)]
-        # No mask — just read
-        await self._sdm_vir_write(vir)
-
-        # Read 5 words
-        total_bits = 5 * self._SDM_WORD_BITS
-        zero_tdi = BitString(0, total_bits)
-        await self.ir(int(self.VDR))(read_tdo=False)
-        await self.run(16)
-        result = await self.ir(int(self.VDR), dr_length=total_bits)(
-            zero_tdi, read_tdo=True)
-        await self.run(16)
-        result_bytes = bytes(result.data[:(total_bits + 7) // 8])
-        return self._unpack_sdm_response(result_bytes, 5)
-
-    # ------------------------------------------------------------------
-    # Bitstream streaming
+    # Bitstream streaming (CONFIG DR path, not VIR/VDR)
     # ------------------------------------------------------------------
 
     async def _stream_status_check(self, request_data=False,
@@ -237,7 +169,7 @@ class Agilex5(Tap, JtagSramFpga):
 
         Returns (done, error, progress_bits, fifo_free).
         """
-        dr_bits = self._SDM_WORD_BITS + 3  # 37 bits for single device
+        dr_bits = 37
         tdi_val = 0
         if request_data:
             tdi_val |= 1
@@ -247,8 +179,6 @@ class Agilex5(Tap, JtagSramFpga):
             tdi_val |= 4
 
         tdi = BitString(tdi_val, dr_bits)
-        await self.ir(int(self.CONFIG_STATUS_VJ))(read_tdo=False)
-        await self.run(16)
         result = await self.ir(int(self.CONFIG_STATUS_VJ), dr_length=dr_bits)(
             tdi, read_tdo=True)
         await self.run(16)
@@ -263,10 +193,9 @@ class Agilex5(Tap, JtagSramFpga):
     async def _stream_bitstream(self, data, total_bits):
         """Stream bitstream data to SDM via IR 0x002 (CONFIG).
 
-        Implements adaptive chunk sizing with status checks between chunks.
+        Implements adaptive chunk sizing with status checks.
         """
         chunk_size = self._STREAM_INITIAL_CHUNK
-        max_chunk = total_bits  # will be capped by SDM flow control
         sent_bits = 0
         first = True
 
@@ -284,34 +213,25 @@ class Agilex5(Tap, JtagSramFpga):
             first = False
 
             if error:
-                raise SdmError(f"SDM error during streaming at {sent_bits}/{total_bits} bits")
-
-            if done and sent_bits > 0:
-                # SDM stalled, reduce chunk size
-                if chunk_size > self._STREAM_INITIAL_CHUNK:
-                    chunk_size //= 2
-            elif not done:
-                # SDM keeping up, increase chunk size
-                chunk_size = min(chunk_size * 2, max_chunk)
+                raise SdmError(
+                    f"SDM error during streaming at {sent_bits}/{total_bits}")
 
             if progress >= total_bits:
                 break
 
-            # Compute this chunk
-            remaining = total_bits - sent_bits
-            n = min(chunk_size, remaining)
+            if done and sent_bits > 0:
+                # SDM stalled — shrink chunks
+                chunk_size = max(self._STREAM_INITIAL_CHUNK, chunk_size // 2)
+            elif not done and chunk_size < total_bits:
+                chunk_size = min(chunk_size * 2, total_bits)
 
-            # Build DR frame: [header 64] [data N] [trailer 1]
+            n = min(chunk_size, total_bits - sent_bits)
             data_slice = BitString(
-                bytes(data[sent_bits // 8:(sent_bits + n + 7) // 8]),
-                n)
-            trailer = BitString(0, self._STREAM_TRAILER_BITS)
-
+                bytes(data[sent_bits // 8:(sent_bits + n + 7) // 8]), n)
+            trailer = BitString(0, 1)
             frame = header_bs + data_slice + trailer
-            total_dr = len(frame)
 
-            # Shift
-            await self.ir(int(self.CONFIG), dr_length=total_dr)(
+            await self.ir(int(self.CONFIG), dr_length=len(frame))(
                 frame, read_tdo=False)
             await self.run(16)
 
@@ -327,49 +247,39 @@ class Agilex5(Tap, JtagSramFpga):
                          self.idcode, configured)
 
     async def load(self, program):
-        """Load bitstream into Agilex 5 via SDM.
-
-        The program should contain a single segment with bitstream data
-        (e.g. from a JIC/RBF file suitable for this device).
-        """
+        """Load bitstream into Agilex 5 via SDM."""
         if len(program) != 1:
-            raise ValueError("Bitstream programming requires exactly one segment")
+            raise ValueError("Bitstream requires exactly one segment")
 
         blob = program[0].data
         total_bits = len(blob) * 8
+        sdm = self._build_sdm()
 
-        # Sync with SDM
         self.logger.trace("Synchronizing with SDM...")
-        await self.sdm_sync()
+        await sdm.sync(self._SYNC2_VIR, self._SYNC2_VDR, self._SYNC2_MASK)
 
-        # Request configuration
         self.logger.trace("Requesting configuration...")
-        await self.sdm_command(0x01, sop=True, retries=300)
+        await sdm.command(0x01, sop=True, retries=300)
 
-        # Stream bitstream
-        self.logger.trace("Streaming %d bits of bitstream...", total_bits)
+        self.logger.trace("Streaming %d bits...", total_bits)
         with self.progress("config", len(blob), unit="B"):
             await self._stream_bitstream(blob, total_bits)
 
-        # Poll for completion
         self.logger.trace("Waiting for CONF_DONE...")
         for attempt in range(15):
             await asyncio.sleep(0.1)
-            status = await self.sdm_status(retries=75)
-            # Check if all response words matched (simple heuristic:
-            # word[1] payload should indicate completion)
-            self.logger.protocol("SDM status: %s", status)
-            # For now, check word 0 for errors
-            if len(status) >= 2:
-                w1_payload = status[1][0]
-                if w1_payload == 0x10000000:
-                    self.logger.note("Configuration complete")
-                    return
+            status = await sdm.status()
+            self.logger.protocol("SDM status: %s",
+                                 [(hex(p), s, e) for p, s, e in status[:3]])
+            # TODO: proper CONF_DONE extraction from status response
+            # For now, check word[0] patterns from observed behavior
+            if len(status) >= 1 and status[0][0] == 0x10000000:
+                self.logger.note("Configuration complete")
+                return
 
-        raise SdmError("Configuration timeout: CONF_DONE not asserted after 1.5s")
+        raise SdmError("Configuration timeout: CONF_DONE not asserted")
 
     async def erase(self):
-        # Agilex 5 is SDM-managed. A new load overwrites.
         pass
 
     async def is_configured(self) -> bool:
@@ -390,17 +300,12 @@ _AGILEX5_PARTS = {
 class Agilex5E(Agilex5):
     """Agilex 5 E-series."""
 
-    # Sync phase 2 signature for configuration mode (from STAPL dj161)
-    _SYNC2_VIR = None  # decoded below in __init_subclass__
-    _SYNC2_VDR = None
-    _SYNC2_MASK = None
-
     def __init__(self, interface, idcode, **kw):
         name = _AGILEX5_PARTS.get(idcode, f"Agilex5-0x{idcode:08x}")
         super().__init__(interface, idcode, name=name, **kw)
 
-        # Sync2 signatures for this device (from STAPL dj161 transaction 2)
-        p = self._pack_sdm_word
+        p = SdmJtagTransport.pack_word
+        # Sync2 signatures for configuration mode (from STAPL dj161)
         self._SYNC2_VIR = [
             p(0x7C000400, sop=True),
             p(0x8F812007, eop=True),
