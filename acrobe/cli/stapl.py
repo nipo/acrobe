@@ -1,6 +1,8 @@
 """STAPL file inspection CLI commands."""
 
 import sys
+from pathlib import Path
+
 import asyncclick as click
 
 from . import base
@@ -262,3 +264,42 @@ def dump(filename, no_crc):
                 indent += 1
 
         click.echo()
+
+
+@stapl.command(help="Transpile STAPL file to Python")
+@click.argument('filename', type=click.Path(exists=True))
+@click.option('-o', '--output', 'output_dir', required=True,
+              type=click.Path(), help="Output directory")
+@click.option('--no-crc', is_flag=True, help="Skip CRC verification")
+@click.option('--data-threshold', default=256, type=int,
+              help="Boolean arrays >= this many bits are externalized (default: 256)")
+def transpile(filename, output_dir, no_crc, data_threshold):
+    from ..stapl import load
+    from ..stapl.transpile import transpile as do_transpile, TranspileConfig
+
+    with open(filename, 'r') as f:
+        source = f.read()
+
+    prog = load(source, check_crc=not no_crc)
+    config = TranspileConfig(data_threshold=data_threshold)
+    source_name = Path(filename).name
+
+    python_source, data_files = do_transpile(prog, config, source_name)
+
+    # Write output
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    py_file = out / "program.py"
+    py_file.write_text(python_source)
+    click.echo(f"Wrote {py_file}")
+
+    if data_files:
+        data_dir = out / "data"
+        data_dir.mkdir(exist_ok=True)
+        for name, data in data_files.items():
+            path = data_dir / name
+            path.write_bytes(data)
+            click.echo(f"Wrote {path} ({len(data)} bytes)")
+
+    click.echo(f"Transpilation complete: {len(data_files)} data file(s)")

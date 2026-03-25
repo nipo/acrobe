@@ -54,11 +54,13 @@ class BitArray:
         return self._size
 
     def get_bit(self, index: int) -> int:
-        assert 0 <= index < self._size, f"Bit index {index} out of range [0, {self._size})"
+        if index < 0 or index >= self._size:
+            return 0
         return (self._data[index >> 3] >> (index & 7)) & 1
 
     def set_bit(self, index: int, value: int):
-        assert 0 <= index < self._size, f"Bit index {index} out of range [0, {self._size})"
+        if index < 0 or index >= self._size:
+            return
         byte_idx = index >> 3
         bit_idx = index & 7
         if value:
