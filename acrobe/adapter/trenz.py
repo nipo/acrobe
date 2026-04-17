@@ -1,5 +1,5 @@
 from .model import AdapterInfo, adapter_db
-from .digilent import FtdiJtagAdapter
+from .ftdi.jtag_adapter import FtdiJtagAdapter
 
 
 @adapter_db.register(AdapterInfo(
