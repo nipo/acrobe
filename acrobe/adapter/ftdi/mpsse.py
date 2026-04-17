@@ -350,17 +350,34 @@ class MpsseEngine(Batcher):
         super().__init__()
         self._transport = transport
         self.logger = logger
+        self._bracket_pre = b""
+        self._bracket_post = b""
+
+    def set_bracket(self, pre: bytes, post: bytes):
+        """Raw MPSSE bytes prepended/appended to each batch's command stream.
+
+        Both sequences must produce zero response bytes. Used to pulse
+        activity LEDs or similar per-batch side-effects.
+        """
+        self._bracket_pre = pre
+        self._bracket_post = post
 
     async def flush_ops(self, batch):
         cmd_parts = []
         rsp_ranges = []
         total_rsp = 0
 
+        if self._bracket_pre:
+            cmd_parts.append(self._bracket_pre)
+
         for op, future in batch:
             cmd, rsp_len, _ = op.cmd_data()
             cmd_parts.append(cmd)
             rsp_ranges.append((total_rsp, total_rsp + rsp_len))
             total_rsp += rsp_len
+
+        if self._bracket_post:
+            cmd_parts.append(self._bracket_post)
 
         if total_rsp == 0:
             # Need at least 1 response byte to synchronize
