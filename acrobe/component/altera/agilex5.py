@@ -399,6 +399,7 @@ class Agilex5(Tap, JtagSramFpga):
 
 _AGILEX5_PARTS = {
     0x0364f0dd: "A5ED065BB32AR0",
+    0x0362c0dd: "A5EA013BB23B",
 }
 
 
@@ -407,7 +408,7 @@ class Agilex5E(Agilex5):
     """Agilex 5 E-series."""
 
     def __init__(self, interface, idcode, **kw):
-        name = _AGILEX5_PARTS.get(idcode, f"Agilex5-0x{idcode:08x}")
+        name = _AGILEX5_PARTS.get(idcode & 0xfffffff, f"Agilex5-0x{idcode:08x}")
         super().__init__(interface, idcode, name=name, **kw)
 
         p = SdmJtagTransport.pack_word
