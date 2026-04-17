@@ -14,5 +14,8 @@ acrobe = "acrobe.cli.console:main"
 [project.optional-dependencies]
 test = ["pytest", "pytest-asyncio"]
 
+[tool.setuptools.packages.find]
+include = ["acrobe*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
