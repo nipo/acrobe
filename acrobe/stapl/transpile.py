@@ -236,6 +236,10 @@ def _build_blocks(stmts, labels):
         end = boundaries[bi + 1] if bi + 1 < len(boundaries) else len(stmts)
 
         if start >= len(stmts):
+            # Label at the very end of the procedure (e.g. before ENDPROC).
+            # Still create an empty block so GOTOs to it work.
+            name = idx_to_label.get(start, f'_block_{start}')
+            blocks.append(Block(name, bi, [], Fallthrough()))
             break
 
         name = idx_to_label.get(start, f'_block_{start}')
@@ -348,17 +352,47 @@ def _negate_expr(expr: Expr) -> Expr:
     return UnaryOp('!', expr)
 
 
+def _has_unresolved_gotos(nodes):
+    """Check if any structured IR nodes contain unresolved GotoStmt."""
+    for node in nodes:
+        match node:
+            case SWhileTrue(body=body):
+                if _has_unresolved_gotos(body):
+                    return True
+            case SWhile(body=body):
+                if _has_unresolved_gotos(body):
+                    return True
+            case SIf(then_body=body, else_body=eb):
+                if _has_unresolved_gotos(body):
+                    return True
+                if eb and _has_unresolved_gotos(eb):
+                    return True
+            case SFor(body=body):
+                if _has_unresolved_gotos(body):
+                    return True
+            case SStmt(stmt=s):
+                if isinstance(s, GotoStmt):
+                    return True
+                if isinstance(s, IfStmt) and isinstance(s.then_stmt, GotoStmt):
+                    return True
+    return False
+
+
 def _recover_control_flow(blocks, name_to_idx):
     """Attempt to recover structured control flow from basic blocks.
 
     Returns a list of structured IR nodes. Falls back to SDispatch
-    if the control flow cannot be fully recovered.
+    if the control flow cannot be fully recovered, or if unresolved
+    GOTO statements remain after structuring.
     """
     if not blocks:
         return []
 
     try:
         result = _structure_region(blocks, 0, len(blocks), name_to_idx)
+        # Check for leftover GOTOs that the structurer couldn't handle
+        if _has_unresolved_gotos(result):
+            return [SDispatch(blocks[0].name, blocks, name_to_idx)]
         return result
     except _UnstructurableError:
         return [SDispatch(blocks[0].name, blocks, name_to_idx)]
@@ -896,6 +930,7 @@ class _StmtEmitter:
         self._var_infos = var_infos
         self._proc_locals = proc_locals
         self._program = program
+        self._in_dispatch = False  # True when inside _emit_dispatch
 
     def emit_structured(self, nodes):
         """Emit a list of structured IR nodes."""
@@ -977,6 +1012,8 @@ class _StmtEmitter:
     def _emit_dispatch(self, entry, blocks):
         """Emit block dispatch fallback."""
         w = self._w
+        old_in_dispatch = self._in_dispatch
+        self._in_dispatch = True
         w.line(f'_block = {entry!r}')
         w.line('while _block is not None:')
         w.indent()
@@ -1020,6 +1057,7 @@ class _StmtEmitter:
             w.dedent()
             first = False
         w.dedent()
+        self._in_dispatch = old_in_dispatch
 
     def _emit_plain_stmt(self, stmt):
         """Emit a plain STAPL statement."""
@@ -1096,7 +1134,11 @@ class _StmtEmitter:
                 w.dedent()
 
             case GotoStmt(label=l):
-                w.line(f'pass  # GOTO {l}')
+                if self._in_dispatch:
+                    w.line(f'_block = {l.upper()!r}')
+                    w.line('continue')
+                else:
+                    w.line(f'pass  # GOTO {l}')
 
             case PushStmt(value=v):
                 w.line(f'self._stack.append({e.int_expr(v)})')

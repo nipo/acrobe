@@ -456,6 +456,14 @@ class _Parser:
         while self._cur() is not None:
             kw = self._keyword(self._cur())
             if kw == 'ENDPROC':
+                # Record any label on the same line as ENDPROC
+                # (e.g. "L84: ENDPROC" where the tokenizer merged them)
+                text = self._cur().text
+                colon = text.find(':')
+                if colon > 0:
+                    before = text[:colon].strip()
+                    if before and all(c.isalnum() or c == '_' for c in before):
+                        labels[before.upper()] = len(body_stmts)
                 self._advance()
                 break
             self._parse_body_statement_into(body_stmts, labels)

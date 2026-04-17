@@ -121,11 +121,10 @@ Each section: tag(1) + flags(1) + length(4 LE) + data(length)
 | 0x24 | EMBEDDED      | Embedded files (hashes, JDI, SLD)        |
 | 0x08 | END           | End marker                               |
 
-The CONFIG_DATA section is in Quartus **internal frame format**, not
+The CONFIG_DATA section is in Quartus **internal representation**, not
 RBF. The SOF-to-RBF conversion is non-trivial and proprietary:
-different spatial layout, different bit counts (38K vs 69K set bits),
-different byte-value distributions. Not a simple compression or
-reordering.
+different spatial layout, different bit counts, different byte-value
+distributions. Not a simple compression or reordering.
 
 ### Status Register (732 bits)
 
@@ -136,9 +135,6 @@ programming. Bit 285 also correlates with configuration state.
 The register content changes with the loaded bitstream — most bits
 are configuration-data-dependent, not status flags. USERCODE is NOT
 embedded in the status register (it's a separate DR via IR 0x007).
-
-Two consecutive reads of the same state produce identical results
-(deterministic, no noise).
 
 
 ## Agilex 5 (A5ED065BB32AR0, IDCODE 0x0364F0DD)
@@ -158,28 +154,13 @@ Two consecutive reads of the same state produce identical results
 | Alt type (A105)    | 45           | Flash programming variant       |
 | Flash size         | 64 MB        | External SPI NOR                |
 
-### Architecture Difference from Cyclone 10
+### Architecture
 
-Agilex 5 does NOT use direct JTAG bitstream shift. Instead, all
-configuration goes through the **Secure Device Manager (SDM)** using
-a Virtual JTAG bridge:
+Agilex 5 does NOT use direct JTAG bitstream shift. All configuration
+goes through the **Secure Device Manager (SDM)** using Virtual JTAG.
 
-- **CONFIGURE** action: `_proc_dj161` — sends bitstream to SDM via
-  the VIR/VDR protocol, SDM configures the FPGA fabric
-- **PROGRAM** action: `_proc_dj0` — programs external SPI flash via
-  the SDM's flash controller
-- Cyclone 10's `_proc_l141` (direct JTAG shift) does not exist in
-  the Agilex 5 code
-
-### Flash Database (A148)
-
-The STAPL includes a 65-entry SPI flash compatibility database with
-device names, sizes, timing parameters, and programming options.
-Supported flash families include: S25FL (Spansion/Infineon), EPCQ
-(Altera), MX25U/MX25L (Macronix), MT25QU/MT25QL (Micron).
-
-The flash programming uses the SDM's built-in SPI controller, accessed
-through the same VIR/VDR mailbox protocol as configuration.
+The bitstream is in Agilex-native SDM format (header `0x62294895` LE),
+not RBF (no `0x6AF7F7F7` sync word). It ends with `dummy_hash_block`.
 
 
 ## SDM Communication Protocol
@@ -190,237 +171,236 @@ The SDM is accessed through Intel's Virtual JTAG (VJ) interface:
 
 - **IR 0x201** (VIR): shifts command/address words into the SDM
 - **IR 0x202** (VDR): shifts data words to/from the SDM
-- **IR 0x002** (CONFIG): bulk bitstream streaming (bypasses VJ overhead)
+- **IR 0x002** (CONFIG): bulk bitstream streaming (bypasses VJ)
+- **IR 0x208** (CONFIG_STATUS_VJ): streaming status check
 
-Word format: **34 bits** per word:
+### 34-bit Word Format (asymmetric by direction)
+
+The two low bits have different semantics for commands vs responses:
+
+**VIR command words (host → SDM):**
+```
+[33:2] = 32-bit command payload
+[1]    = LAST  (end of multi-word command / release)
+[0]    = FIRST (start of command / write request)
+```
+
+Encoding:
+- `00` = read-only query (no new command for SDM)
+- `01` = write request / first word of multi-word command
+- `10` = last word of multi-word command
+- `11` = complete single-word write+close command
+
+Evidence: config request and status query use IDENTICAL payload
+`0x80000001` — they differ only in bit[0] (FIRST=1 for request,
+FIRST=0 for query). Similarly access check vs close use same
+payload `0x80000003` with different modifier bits.
+
+**VDR response words (SDM → host):**
+```
+[33:2] = 32-bit response payload
+[0]    = VALID (response data present)
+[1]    = LAST  (end of response packet)
+```
+
+Evidence: j97 checks only bit[0] to decide whether to capture
+response data. Bit 23 of the payload is always masked out
+(busy/pending indicator).
+
+### JTAG VIR/VDR Shift Register Semantics
+
+**Critical**: VIR and VDR are **single-word shift registers**, not
+FIFOs. Each DR scan of 34 bits simultaneously shifts one word in
+(TDI) and one word out (TDO).
+
+For VIR writes:
+1. First scan reads FIFO level (12-bit counter in bits [11:0])
+2. Subsequent scans push command words one at a time
+
+For VDR exchanges:
+1. Each scan sends one data word and captures the response
+2. Responses are pipelined — may appear at any position in the
+   response stream
+3. Bit 23 of response payload = busy flag (always masked out)
+
+### Transaction Pattern (j88)
 
 ```
-[33:2] = 32-bit payload
-[1]    = EOP (end of packet)
-[0]    = SOP (start of packet)
+1. Set IR to VIR (0x201)
+2. Poll VIR DR for FIFO free slots: bits[11:0] = used count
+3. Push command words into VIR DR one at a time
+4. Set IR to VDR (0x202)
+5. Exchange data words one at a time, check responses against mask
 ```
 
-This is **Avalon-ST** framing — the same streaming protocol used
-internally by Intel FPGAs. The 32-bit payloads should be identical
-across all SDM transports (JTAG, 8-bit FIFO, etc.).
-
-### Transaction Pattern
-
-Each SDM transaction follows this pattern (implemented by `j88`):
-
-1. **Set VIR** (`j89`):
-   - Switch to IR 0x201 (VIR)
-   - Poll VDR to read FIFO free slots (bits [11:0])
-   - Push command words into VDR (with SOP/EOP framing)
-   - Wait for SDM to process
-
-2. **Exchange VDR** (`j97`):
-   - Switch to IR 0x202 (VDR)
-   - Send data words, read responses
-   - Compare responses against expected values with mask
-   - Retry on mismatch (with timeout)
-
-The VIR write uses a FIFO-based flow control: before sending
-commands, the host reads the VDR to check how many slots are free
-(12-bit counter in bits [11:0]). Commands are written in batches
-that fit the available FIFO depth.
-
-### SDM Mailbox Commands
-
-The VIR command words encode SDM mailbox operations. All 26 j88 call
-sites have been decoded. There are two command formats:
-
-#### VIR Command Format
+### SDM Command Formats
 
 **Simple commands** (bit[31]=1): single VIR word
 
 ```
-[31]    = 1 (simple command flag)
-[30:8]  = 0 (reserved)
+[31]    = 1
 [7:0]   = command ID
 ```
 
-Known command IDs:
-| cmd_id | Name                | Purpose                        |
-|--------|---------------------|--------------------------------|
-| 0x01   | CONFIG_REQUEST      | Request SRAM configuration     |
-| 0x0C   | ACCESS_CHECK        | Check/release flash access     |
-| 0x1D   | SFDP_READ           | Read flash SFDP table          |
+| cmd_id | Name             | Purpose                        |
+|--------|------------------|--------------------------------|
+| 0x01   | CONFIG_REQUEST   | Request SRAM configuration     |
+| 0x0C   | ACCESS_CHECK     | Check/release flash access     |
+| 0x1D   | SFDP_READ        | Read flash SFDP table          |
 
-The SOP/EOP framing on simple commands varies:
-- Config request: SOP=1, EOP=0
-- Status query (same cmd_id 0x01): SOP=0, EOP=0
-- Access check: SOP=0, EOP=1 (or SOP=1, EOP=1 for close)
+**Multi-word SPI commands** (bit[31]=0): for flash access
 
-**Multi-word SPI commands** (bit[31]=0): multiple VIR words
+**Dynamic commands**: type-byte encoded operations
+(0x34=chip_select, 0x38=erase, 0x39=program, 0x3A=verify, 0x6E=blank_check)
 
-```
-Word 0 (header):
-  [31]    = 0 (SPI transaction)
-  [30]    = 1 (always set)
-  [23:16] = byte count of SPI transaction
-  [15:8]  = 0
-  [7:0]   = 0x0D (flash SPI command marker)
-
-Word 1 (SPI opcode):
-  [7:0]   = SPI opcode byte
-  remaining bits = address/parameters
-
-Word 2+: additional parameter words
-```
-
-**Dynamic commands** (built at runtime via type byte):
+### Configuration Flow (dj161)
 
 ```
-Word 0:
-  [33:2] payload:
-    [31:24] = 0x00
-    [23:12] = word count (number of parameter words following)
-    [11:0]  = 0
-  [10:2]  = type byte (opcode) in bits [10:2] of raw 34-bit word
-  [1:0]   = SOP/EOP
+1. Sync phase 1: flush/reset
+   VIR: [0xC0000000, 0x80000000]
+   VDR: probe with mask 0xFF7FFFFF
 
-Type bytes:
-  0x34 = Set SPI chip select
-  0x36 = Write SPI register (WRNVCR, WRVCR)
-  0x38 = Erase sector
-  0x39 = Program page
-  0x3A = Read and verify
-  0x6E = Read and blank-check
+2. Sync phase 2: device-specific handshake
+   VIR: [device_signature...]
+   VDR: [expected_response...]
+
+3. Config request: cmd_id=0x01, SOP=1
+   VDR: ack probe
+
+4. Bitstream streaming (see below)
+
+5. Final status polling via VIR/VDR cmd_id=0x01
+   VDR: read 5 words, check CONF_DONE
+   Poll up to 15× at 100ms intervals
 ```
 
-#### VDR Response Format
-
-Every VDR response word has:
-- Bit 0 (SOP position in the 34-bit frame): valid/ready flag
-- **Bit 23 of the 32-bit payload**: busy/pending indicator (always
-  masked out — every single-word mask is 0xFF7FFFFF)
-- Remaining bits: response data
-
-For read operations (J85 > 1), captured data goes into J82 for
-extraction by the caller.
-
-#### Synchronization Sequence
-
-Two transactions, performed at the start of both configuration
-(dj161) and flash programming (dj0):
-
-Transaction 1 — Reset/flush:
-```
-VIR: [0xC0000000, 0x80000000]  (no SOP/EOP — raw flush)
-VDR: [0x00000000] SOP+EOP      mask=0xFF7FFFFF
-Retry: 50-75
-```
-
-Transaction 2 — Handshake (device-specific signature):
-```
-VIR: [0x7C000400 SOP, (signature)]  EOP on last
-VDR: [expected1, expected2]          with masks
-```
-The sync2 signature differs between configuration mode and flash
-programming mode. This may select different SDM subsystems.
-
-#### Configuration Flow (dj161)
-
-```
-1. Sync (transactions 1+2)
-2. VIR: cmd_id=0x01 SOP=1  →  Configuration request
-   VDR: ack probe           →  SDM accepts
-3. Bitstream streaming (j127, see below)
-4. Status polling (dj192, see below)
-```
-
-#### Bitstream Streaming (j127)
+### Bitstream Streaming (j127)
 
 After the SDM accepts the configuration request, bitstream data is
-streamed via IR 0x002 (CONFIG). This is a dedicated bulk path that
-bypasses VIR/VDR for throughput.
+streamed via IR 0x002 (CONFIG) with interleaved status checks.
 
-The stream alternates between data chunks and status checks:
+**Status check (j125)**: IR = 0x208 (CONFIG_STATUS_VJ), 37-bit DR
 
 ```
+DR TDI bits:
+  [0] = request_data  (kick SDM to continue processing)
+  [1] = start_config  (first iteration only)
+  [2] = enable         (first iteration only)
+
+DR TDO bits:
+  [0]     = DONE (SDM finished current buffer, needs more data or complete)
+  [1]     = ERROR (fatal, abort)
+  [31:2]  = progress (30 bits, in units of 32 bits consumed)
+  [36:32] = FIFO free count (5 bits)
+```
+
+**Data frame**: IR = 0x002, variable-length DR
+
+```
+DR layout (LSB shifted first):
+  [63:0]          = Frame header: 0xA17E2A00_FFFFFFFF (constant)
+  [63+N:64]       = Bitstream data (N bits, variable)
+  [64+N]          = Trailer (1 bit)
+  Total: 65 + N bits
+```
+
+**Flow control loop**:
+
+```
+chunk_size = 32768 bits (initial)
 loop:
-  1. Check status: IR = 0x208 (CONFIG_STATUS_VJ)
-     DR scan: 37 bits (single device, no bypass)
-       bit[0]     = DONE (configuration complete)
-       bit[1]     = ERROR (abort with error code 10)
-       bits[31:2] = progress (30 bits, in units of 32 bits consumed)
-       bits[36:32] = FIFO free slots (5 bits)
-     If DONE=1: break (success)
-     If ERROR=1: abort
-
-  2. Send data chunk: IR = 0x002 (CONFIG)
-     DR frame layout (LSB shifted first):
-       bits[63:0]          = Frame header (constant)
-       bits[63+N:64]       = Bitstream data (N bits)
-       bit[64+N]           = Trailer (1 bit)
-     Total DR width = 65 + N bits
-
-     Frame header (64 bits, constant):
-       0xA17E2A00_FFFFFFFF
-       Lower 32 = 0xFFFFFFFF (padding / sync)
-       Upper 32 = 0xA17E2A00 (SDM frame marker)
-
-  3. Adaptive chunk sizing:
-     N starts at 32768 bits (4 KiB)
-     On success (SDM consumed data): N *= 2
-     On stall (DONE=1 but not finished): N /= 2
-     N capped at maximum (device-specific)
-
-  4. Repeat until progress == total bitstream size
+  1. Status check (j125)
+  2. If DONE=1: do NOT send data, set request_data on next check
+     Halve chunk_size. Loop to 1.
+     (This is the critical back-pressure mechanism)
+  3. If DONE=0: send one chunk via CONFIG DR
+     Double chunk_size (up to max). Loop to 1.
+  4. If progress == total: done
+  5. If ERROR: abort
 ```
 
-First iteration has special handling: the status check DR sets
-bits [0:2] = 0b111 (request data + start config + enable), then
-subsequent iterations only set bit[0] when SDM stalls.
+The `request_data` bit is asserted when:
+- First iteration (along with `start_config` and `enable`)
+- SDM stalled: DONE=1 AND FIFO free count == 0
 
-Total bitstream: J1[device] * 8 bits = 0x6E000 * 8 = 3,604,480
-bits for the Agilex 5 FSBL.
+**IMPORTANT**: When DONE=1, the GOTO J131 in the STAPL source skips
+the data send entirely. This was missing in early implementations
+and caused the SDM's internal buffer to overflow.
 
-#### Final Status Polling (dj192)
+### Current Status (as of 2026-03-25)
 
-After streaming completes, poll for CONF_DONE via the VIR/VDR
-mailbox (not the CONFIG_STATUS_VJ DR):
+**Working**:
+- SDM sync (both phases)
+- Config request (cmd_id=0x01, FIRST=1)
+- Bitstream streaming with flow control (95.5% of data consumed)
+- Back-pressure handling (DONE=1 → don't send, retry status)
 
-```
-loop (up to 15 times, 100ms between):
-  Wait 100ms
-  VIR: cmd_id=0x01 (no SOP) → status query
-  VDR: read 5 words (34 bits each = 170 bits)
-    word[0] bits[24:14] = error status (DJ201)
-    word[1] payload     = CONF_DONE register (DJ202)
-      expected: 0x10000000 for success
-    word[3] payload     = additional status (DJ203)
-    word[4] payload     = additional status (DJ204)
-  If all 5 words match expected/mask: CONF_DONE, break
-  If iteration 14 and not done: check DJ202 for failure
-```
+**Known Issue**:
+- SDM stalls at progress=3,441,152 out of 3,604,480 bits (163,328
+  bits = ~20 KiB remaining)
+- No error reported, DONE stays False, progress doesn't advance
+- The stall point is consistent across runs
+- Data at the stall point is normal (not padding or markers)
+- Adding extra idle cycles between IR/DR does not help
+- Zero-padding beyond J2.bin does not help
+- All chunk boundaries are byte-aligned
 
-#### Flash Programming Flow (dj0)
+Likely cause: subtle difference in chunk sizing/boundaries between
+our implementation and the STAPL j127. The STAPL's adaptive sizing
+may produce different chunk boundaries that keep the SDM's internal
+pipeline happy. Or there may be something in the j125 status check
+interaction (the request_data/start_config/enable bit encoding) that
+we don't replicate exactly.
 
-```
-1. Sync (transactions 1+2, different sync2 signature)
-2. Access check: cmd_id=0x0C
-3. For each chip select:
-   a. Set chip select: type=0x34
-   b. Read flash JEDEC ID: SPI 0x9F + 0xAF
-   c. Validate against A148 database
-   d. Read SFDP: cmd_id=0x1D (if needed)
-4. Configure flash registers:
-   a. Read NVCR (SPI 0xB5), VCR (SPI 0x85)
-   b. Write Enable (SPI 0x06)
-   c. Write NVCR (SPI 0xB1), VCR (SPI 0x81)
-   d. Verify writes
-5. Erase sectors: type=0x38 (per 256K sector)
-6. Blank-check: type=0x6E (per 64K block, 17 VDR words)
-7. Program pages: type=0x39 (per 4K page, slow mode)
-8. Verify: type=0x3A (per 64K block, compare against file)
-9. Close: cmd_id=0x0C SOP+EOP
-```
+**Findings from STAPL JAM source comparison**:
+- Transpiler has 5 dropped forward GOTOs (j89: 2, j97: 2, j127: 1)
+- j89 GOTO J95 is critical: VIR word-send loop never executes
+- j127 GOTO J131 is critical: data sent during SDM stall
+- j97 sends ZEROS through VDR (A29), NOT the expected values (J80).
+  J80/J81 are comparison patterns only.
+- J120 = 524288 (max chunk size cap, was missing in our code)
+- request_data condition: `J113==0 && J111==1` (fifo empty AND done)
+
+**Remaining issue**: SDM stalls at 3,441,152/3,604,480 bits (95.5%).
+All data has been sent. The SDM stops processing the last 163,328
+bits despite having received them. This suggests a missing
+end-of-stream signal, final commit, or different frame format for the
+last chunk.
+
+**CRITICAL FINDING (from SPI debugging)**:
+VIR writes MUST be atomic — all command words packed into a single
+DR scan of N×34 bits.  Word-by-word VIR shifts produce `0x1FF`
+("unknown command") responses.  Atomic VIR writes produce correct
+responses.  This likely also explains the bitstream streaming stall.
+
+**SPI flash RDID successfully read**:
+After atomic VIR fix, RDID returns JEDEC ID: manufacturer 0x01
+(Spansion/Infineon), type 0x03, capacity 0x19 (256 Mbit = 32 MiB).
+The SDM SPI passthrough is functional.
+
+**IMPORTANT**: Atomic vs word-by-word VIR produces DIFFERENT SDM
+responses.  Atomic VIR returns real multi-word SPI data (7 words for
+RDID), while word-by-word returns single-word acks.  The STAPL uses
+word-by-word (j89 pushes words one at a time after FIFO poll).
+
+The SDM SPI response data with word-by-word VIR does NOT contain
+the expected Micron JEDEC ID (0x20, 0xBB, 0x22 for MT25QU02G).
+This suggests the word-by-word response is metadata/acks rather
+than raw SPI MISO data, and the actual MISO data extraction requires
+matching j97's exact state machine (phase 0 match → phase 1 capture).
+
+The board has a **Micron MT25QU02GCBB8E12** (2 Gbit, marking RW251).
+Expected JEDEC: manufacturer=0x20 (Micron), type=0xBB, density=0x22.
+
+Next steps:
+- Carefully replicate j97's two-phase read with retry/delay logic
+- The VDR response with valid=0 between words is the flow control
+  mechanism — j97 retries (with 20ms delays at J103) until valid
+  data appears
+- Need to distinguish between "SDM ack" words and "SPI MISO data"
+  words in the response stream
 
 ### Transport Abstraction
-
-The SDM mailbox protocol has clear layering:
 
 ```
 Application layer:  SDM commands (configure, status, flash ops)
@@ -432,62 +412,16 @@ Transport layer:    JTAG VIR/VDR (IR 0x201/0x202)
                     -or- other SDM interfaces
 ```
 
-The JTAG transport adds:
-- FIFO flow control: read VDR to get free slot count before writing
-- VIR/VDR IR switching overhead per transaction
-- 34-bit word packing into DR shift registers with bypass padding
-
-The 32-bit command/response payloads at the application layer should
-be identical regardless of transport. The Avalon-ST SOP/EOP framing
-is the packet boundary mechanism.
-
-For the 8-bit FIFO interface, the mapping is likely:
-- 4 bytes per 32-bit word (simple byte packing)
-- SOP/EOP signaled by sideband signals on the FIFO interface
-- No JTAG IR switching or FIFO level polling needed
-- The bitstream streaming path (IR 0x002 with 37-bit frames) would
-  use a dedicated FIFO channel or the same mailbox with a different
-  opcode
-
-### JTAG VDR Shift Register Semantics
-
-**Critical implementation detail**: The VIR and VDR are **single-word
-shift registers**, not FIFOs. Each DR scan of N bits simultaneously
-shifts N bits in (TDI) and N bits out (TDO). The TDO value is the
-**previous** DR content, not the response to the current TDI.
-
-This means:
-- Scan 0: TDI=word0, TDO=previous_state (discard)
-- Scan 1: TDI=word1, TDO=response_to_word0
-- Scan 2: TDI=word2, TDO=response_to_word1
-- ...
-
-The STAPL `j89` (VIR write) and `j97` (VDR exchange) both operate
-**one word at a time** in a loop for this reason. Multi-word
-transactions cannot be sent as a single large DR shift.
-
-For VIR writes (`j89`):
-1. First scan reads FIFO level (12-bit counter)
-2. Subsequent scans push command words one at a time
-
-For VDR exchanges (`j97`):
-1. Each scan sends one data word and captures the response to the
-   previous word
-2. The response is checked against mask/expected values
-3. If the check fails, the word is retried
-4. The valid/ready bit (bit 0 at device offset) indicates whether
-   the SDM has processed the command
+Implementation:
+- `sdm_jtag.py`: `SdmJtagTransport` — word-at-a-time VIR/VDR
+- `agilex5.py`: `SdmMailbox` — protocol layer, transport-agnostic
 
 ### Open Questions
 
-- The sync2 handshake signatures — what do the magic numbers encode?
-  Are they device-specific or mode-specific?
-- The `0xA17E2A00` bitstream frame header — SDM routing tag? CRC seed?
-- VDR response bit 23 — confirmed as busy/pending, but what
-  triggers it?
-- Whether the 8-bit FIFO uses Avalon-ST framing or a simplified
-  32-bit word protocol with sideband SOP/EOP signals
-- Full SDM command set beyond configure/status/flash — what other
-  services does the SDM expose?
-- The 37-bit (not 34-bit) word size during bitstream streaming —
-  what are the extra 3 bits?
+- Why does streaming stall at 95.5%? Is it a timing issue, IR/DR
+  state machine transition, or something else?
+- The `0xA17E2A00` frame header meaning
+- Whether the 8-bit FIFO uses Avalon-ST framing or a simpler protocol
+- Full SDM command set beyond configure/status/flash
+- Whether the STAPL inserts idle cycles between IR and DR shifts
+  that are critical (j61 does `_wait('IDLE', 16, None, None)`)

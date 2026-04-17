@@ -558,6 +558,8 @@ class Interpreter:
                 if name in self._integers:
                     arr = self._integers[name]
                     assert isinstance(arr, list)
+                    if idx < 0 or idx >= len(arr):
+                        return 0
                     return arr[idx]
                 if name in self._booleans:
                     return self._booleans[name].get_bit(idx)
