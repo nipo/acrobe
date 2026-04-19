@@ -1251,7 +1251,7 @@ class _StmtEmitter:
                         args.append(f'{p!r}')
                     else:
                         args.append(e.int_expr(p))
-                w.line(f'print({", ".join(args)})')
+                w.line(f'print({", ".join(args)}, sep="")')
 
             case ExportStmt(key=k, value=v):
                 w.line(f'await self._export({k!r}, {e.int_expr(v)})')
