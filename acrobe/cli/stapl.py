@@ -280,7 +280,6 @@ async def run(filename, root_path, action_name, no_crc, includes):
     from ..stapl import load, Interpreter, StaplExit
     from ..stapl.player import AcrobePlayer
     from ..adapter.model import HwRoot, UsbEnumerator
-    from ..component import Component
     from .. import log
 
     log.setup(level=logging.INFO)
@@ -297,22 +296,15 @@ async def run(filename, root_path, action_name, no_crc, includes):
     hw_root = HwRoot()
     hw_root.add_enumerator(UsbEnumerator())
 
-    # Resolve to JTAG interface (e.g. tei-/jtag or ub3-/jtag).
-    # The STAPL player works at the raw interface level, not through
-    # a Tap — the STAPL program handles chain discovery itself.
     from ..protocol.jtag import JtagInterface
     parts = root_path.strip('/').split('/')
     leaf = await hw_root.child_summon(*parts)
-    if isinstance(leaf, Component):
-        await leaf.start_tree()
-    if isinstance(leaf, JtagInterface):
-        interface = leaf._interface
-    elif hasattr(leaf, '_interface'):
-        interface = leaf._interface
-    else:
+    if not isinstance(leaf, JtagInterface):
         click.echo(f"Error: {root_path} resolved to {type(leaf).__name__}, "
-                    "expected a JTAG interface (e.g. adapter/jtag)", err=True)
+                    "expected a JtagInterface (e.g. adapter/jtag)", err=True)
         raise SystemExit(1)
+    await leaf.start_tree()
+    interface = leaf._interface
 
     player = AcrobePlayer(interface)
     interp = Interpreter(prog)
