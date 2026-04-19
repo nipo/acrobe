@@ -51,6 +51,7 @@ class VarInfo:
     init_bit_count: int | None
     scope: str  # 'data' | 'local'
     data_block: str | None  # DATA block name, if scope == 'data'
+    is_read: bool = True  # False if variable is never read (dead)
 
 
 # ============================================================
@@ -701,6 +702,113 @@ def _wrap_stmt(stmt):
 # Variable analysis
 # ============================================================
 
+def _collect_read_vars(program):
+    """Collect all variable names that are READ in any expression.
+
+    A variable is "read" if it appears in a VarRef, ArrayIndex, or
+    ArraySubrange in an expression context (not as an assignment target).
+    Variables that are only written to (declared, assigned, used as FOR
+    iterators) but never read can be eliminated.
+    """
+    read_vars = set()
+
+    def _walk_expr(expr):
+        if expr is None:
+            return
+        match expr:
+            case VarRef(name=n):
+                read_vars.add(n)
+            case ArrayIndex(name=n, index=idx):
+                read_vars.add(n)
+                _walk_expr(idx)
+            case ArraySubrange(name=n, high=h, low=l):
+                read_vars.add(n)
+                _walk_expr(h)
+                _walk_expr(l)
+            case ArrayWhole(name=n):
+                read_vars.add(n)
+            case BinOp(left=a, right=b):
+                _walk_expr(a)
+                _walk_expr(b)
+            case UnaryOp(operand=a):
+                _walk_expr(a)
+            case FuncCall(arg=a):
+                _walk_expr(a)
+
+    def _walk_stmt(stmt):
+        match stmt:
+            case AssignStmt(target=_, index=idx, high=h, low=l, value=v):
+                # target is a write, but index/subrange/value are reads
+                _walk_expr(idx)
+                _walk_expr(h)
+                _walk_expr(l)
+                _walk_expr(v)
+            case IfStmt(condition=c, then_stmt=t):
+                _walk_expr(c)
+                _walk_stmt(t)
+            case ForStmt(start=s, end=e, step=st):
+                _walk_expr(s)
+                _walk_expr(e)
+                if st:
+                    _walk_expr(st)
+            case GotoStmt() | NextStmt():
+                pass
+            case CallStmt():
+                pass
+            case ExitStmt(code=c):
+                _walk_expr(c)
+            case PrintStmt(parts=parts):
+                for p in parts:
+                    if not isinstance(p, str):
+                        _walk_expr(p)
+            case ExportStmt(value=v):
+                _walk_expr(v)
+            case DrScanStmt(length=l, tdi=t, capture=c, compare=cmp, mask=m, result=r):
+                _walk_expr(l)
+                _walk_expr(t)
+                # capture/compare/mask/result are array refs (writes + reads)
+                if c: _walk_expr(c)
+                if cmp: _walk_expr(cmp)
+                if m: _walk_expr(m)
+                if r: _walk_expr(r)
+            case IrScanStmt(length=l, tdi=t, capture=c, compare=cmp, mask=m, result=r):
+                _walk_expr(l)
+                _walk_expr(t)
+                if c: _walk_expr(c)
+                if cmp: _walk_expr(cmp)
+                if m: _walk_expr(m)
+                if r: _walk_expr(r)
+            case PreDrStmt(count=c, data=d) | PostDrStmt(count=c, data=d) | \
+                 PreIrStmt(count=c, data=d) | PostIrStmt(count=c, data=d):
+                _walk_expr(c)
+                _walk_expr(d)
+            case WaitStmt(cycles=c, usecs=u):
+                if c: _walk_expr(c)
+                if u: _walk_expr(u)
+            case PushStmt(value=v):
+                _walk_expr(v)
+
+    for proc in program.procedures.values():
+        for stmt in proc.statements:
+            _walk_stmt(stmt)
+            # Also walk IfStmt conditions that contain GOTOs
+            # (these become CondJump terminals in blocks, but the
+            # condition expression still reads variables)
+            if isinstance(stmt, IfStmt):
+                _walk_expr(stmt.condition)
+
+    for data_block in program.data_blocks.values():
+        for stmt in data_block.statements:
+            # DATA block declarations: init expressions reference variables
+            if isinstance(stmt, IntegerDecl) and stmt.init:
+                for v in stmt.init:
+                    _walk_expr(v)
+            elif isinstance(stmt, BooleanDecl) and stmt.size:
+                _walk_expr(stmt.size)
+
+    return read_vars
+
+
 def _analyze_variables(program, config):
     """Analyze all variables in the program.
 
@@ -733,6 +841,11 @@ def _analyze_variables(program, config):
                 vi = _analyze_decl(stmt, 'local', None)
                 if vi and vi.name not in var_infos:
                     var_infos[vi.name] = vi
+
+    # Mark dead variables (written but never read)
+    read_vars = _collect_read_vars(program)
+    for vi in var_infos.values():
+        vi.is_read = vi.name in read_vars
 
     return var_infos, data_files
 
@@ -957,6 +1070,7 @@ class _StmtEmitter:
 
     def __init__(self, w, expr_em, var_infos, proc_locals, program):
         self._w = w
+        self._dead_vars = {n for n, vi in var_infos.items() if not vi.is_read}
         self._expr = expr_em
         self._var_infos = var_infos
         self._proc_locals = proc_locals
@@ -1011,15 +1125,19 @@ class _StmtEmitter:
             case SIf(condition=cond, then_body=then_b, else_body=else_b):
                 w.line(f'if {self._expr.int_expr(cond)}:')
                 w.indent()
+                before = len(w._lines)
                 if then_b:
                     self.emit_structured(then_b)
-                else:
+                if len(w._lines) == before:
                     w.line('pass')
                 w.dedent()
                 if else_b:
                     w.line('else:')
                     w.indent()
+                    before = len(w._lines)
                     self.emit_structured(else_b)
+                    if len(w._lines) == before:
+                        w.line('pass')
                     w.dedent()
 
             case SBreak():
@@ -1053,8 +1171,11 @@ class _StmtEmitter:
             kw = 'if' if first else 'elif'
             w.line(f'{kw} _block == {block.name!r}:')
             w.indent()
+            lines_before = len(w._lines)
             for stmt in block.stmts:
                 self._emit_plain_stmt(stmt)
+            if len(w._lines) == lines_before:
+                w.line('pass  # all statements eliminated (dead vars)')
             # Terminal
             match block.terminal:
                 case Fallthrough():
@@ -1096,6 +1217,9 @@ class _StmtEmitter:
         e = self._expr
 
         match stmt:
+            case IntegerDecl(name=n, size=sz, init=init) if n in self._dead_vars:
+                pass  # dead variable, skip
+
             case IntegerDecl(name=n, size=sz, init=init):
                 ref = n if n in self._proc_locals else f'self.{n}'
                 if sz is not None:
@@ -1111,6 +1235,9 @@ class _StmtEmitter:
                         w.line(f'{ref} = {e.int_expr(init[0])}')
                     else:
                         w.line(f'{ref} = 0')
+
+            case BooleanDecl(name=n, size=sz, init=init) if n in self._dead_vars:
+                pass  # dead variable, skip
 
             case BooleanDecl(name=n, size=sz, init=init):
                 ref = n if n in self._proc_locals else f'self.{n}'
@@ -1133,6 +1260,9 @@ class _StmtEmitter:
                         w.line(f'{ref} = {e.int_expr(init)}')
                     else:
                         w.line(f'{ref} = 0')
+
+            case AssignStmt(target=t) if t in self._dead_vars:
+                pass  # dead variable, skip assignment
 
             case AssignStmt(target=t, index=idx, high=h, low=l, value=v):
                 ref = t if t in self._proc_locals else f'self.{t}'
@@ -1158,6 +1288,10 @@ class _StmtEmitter:
 
             case ExitStmt(code=c):
                 w.line(f'raise _StaplExit({e.int_expr(c)})')
+
+            case IfStmt(condition=c, then_stmt=AssignStmt(target=t2)) \
+                    if t2 in self._dead_vars:
+                pass  # if body is dead assignment, skip entire if
 
             case IfStmt(condition=c, then_stmt=t):
                 w.line(f'if {e.int_expr(c)}:')
@@ -1628,9 +1762,13 @@ def _emit_data_init(w, program, var_infos, config):
         w.dedent()
         w.line(f'self._initialized.add({block_name!r})')
 
+        dead_vars = {n for n, vi in var_infos.items() if not vi.is_read}
         expr_em = _ExprEmitter(var_infos, set())
         for stmt in data_block.statements:
             match stmt:
+                case IntegerDecl(name=n) | BooleanDecl(name=n) if n in dead_vars:
+                    pass  # dead variable, skip
+
                 case IntegerDecl(name=n, size=sz, init=init):
                     if sz is not None:
                         size_s = expr_em.int_expr(sz)
