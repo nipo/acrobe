@@ -84,6 +84,7 @@ class VarInfo:
     is_read: bool = True  # False if variable is never read (dead)
     is_const: bool = False  # True if scalar int, has init, never reassigned
     const_value: int | None = None
+    extern_filename: str | None = None  # .bin filename if externalized
 
 
 # ============================================================
@@ -851,6 +852,8 @@ def _analyze_variables(program, config):
     """
     var_infos = {}
     data_files = {}
+    # Map data content to filename for deduplication
+    _data_content_to_file = {}
 
     # Collect DATA block variables
     for block_name, data_block in program.data_blocks.items():
@@ -862,8 +865,12 @@ def _analyze_variables(program, config):
                 if (vi.vtype == 'boolean' and vi.init_data is not None
                         and vi.init_bit_count is not None
                         and vi.init_bit_count >= config.data_threshold):
-                    filename = f"{vi.name}.bin"
-                    data_files[filename] = vi.init_data
+                    if vi.init_data in _data_content_to_file:
+                        vi.extern_filename = _data_content_to_file[vi.init_data]
+                    else:
+                        vi.extern_filename = f"{vi.name}.bin"
+                        data_files[vi.extern_filename] = vi.init_data
+                        _data_content_to_file[vi.init_data] = vi.extern_filename
                     vi.init_data = None  # mark as externalized
 
     # Collect procedure-local variables
@@ -916,6 +923,11 @@ def _analyze_variables(program, config):
                                 vi.is_const = True
                                 vi.const_value = folded[0]
                         break
+
+    # Prune data files for dead variables
+    referenced_files = {vi.extern_filename for vi in var_infos.values()
+                        if vi.is_read and vi.extern_filename is not None}
+    data_files = {k: v for k, v in data_files.items() if k in referenced_files}
 
     return var_infos, data_files
 
@@ -1360,10 +1372,10 @@ class _StmtEmitter:
                     size_s = e.int_expr(sz)
                     if init is not None and isinstance(init, BooleanLiteral):
                         vi = self._var_infos.get(n)
-                        if vi and vi.init_data is None and vi.scope == 'data':
+                        if vi and vi.extern_filename is not None:
                             # Externalized to file
                             w.line(f'{ref} = BitArray({init.bit_count}, '
-                                   f'(self.DATA_DIR / "{n}.bin").read_bytes())')
+                                   f'(self.DATA_DIR / "{vi.extern_filename}").read_bytes())')
                         else:
                             # Inline
                             w.line(f'{ref} = BitArray({init.bit_count}, {init.data!r})')
@@ -1913,10 +1925,10 @@ def _emit_data_init(w, program, var_infos, config):
                     vi = var_infos.get(n)
                     if sz is not None:
                         if (init is not None and isinstance(init, BooleanLiteral)
-                                and vi and vi.init_data is None):
+                                and vi and vi.extern_filename is not None):
                             # Externalized
                             w.line(f'self.{n} = BitArray({init.bit_count}, '
-                                   f'(self.DATA_DIR / "{n}.bin").read_bytes())')
+                                   f'(self.DATA_DIR / "{vi.extern_filename}").read_bytes())')
                         elif init is not None and isinstance(init, BooleanLiteral):
                             # Inline (small)
                             w.line(f'self.{n} = BitArray({init.bit_count}, '
