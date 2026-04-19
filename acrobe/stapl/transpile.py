@@ -1223,23 +1223,35 @@ def _analyze_variables(program, config):
                         written_in_procs.add(name)
 
     for vi in var_infos.values():
-        if (vi.scope == 'data' and vi.vtype == 'integer'
-                and vi.has_init
+        if (vi.scope == 'data' and vi.has_init
                 and vi.name not in written_in_procs and vi.is_read):
-            # Check if all init values are constant-foldable
-            for block in program.data_blocks.values():
-                for stmt in block.statements:
-                    if (isinstance(stmt, IntegerDecl) and stmt.name == vi.name
-                            and stmt.init):
-                        folded = [_try_const_fold(v) for v in stmt.init]
-                        if all(v is not None for v in folded):
-                            if vi.is_array:
+            if vi.vtype == 'integer':
+                # Check if all init values are constant-foldable
+                for block in program.data_blocks.values():
+                    for stmt in block.statements:
+                        if (isinstance(stmt, IntegerDecl) and stmt.name == vi.name
+                                and stmt.init):
+                            folded = [_try_const_fold(v) for v in stmt.init]
+                            if all(v is not None for v in folded):
+                                if vi.is_array:
+                                    vi.is_const = True
+                                    vi.const_value = list(reversed(folded))
+                                else:
+                                    vi.is_const = True
+                                    vi.const_value = folded[0]
+                            break
+            elif vi.vtype == 'boolean' and not vi.is_array:
+                # Boolean scalars with literal init
+                for block in program.data_blocks.values():
+                    for stmt in block.statements:
+                        if (isinstance(stmt, BooleanDecl) and stmt.name == vi.name
+                                and stmt.init is not None
+                                and not isinstance(stmt.init, BooleanLiteral)):
+                            val = _try_const_fold(stmt.init)
+                            if val is not None:
                                 vi.is_const = True
-                                vi.const_value = list(reversed(folded))
-                            else:
-                                vi.is_const = True
-                                vi.const_value = folded[0]
-                        break
+                                vi.const_value = val
+                            break
 
     # Prune data files for dead variables
     referenced_files = {vi.extern_filename for vi in var_infos.values()
