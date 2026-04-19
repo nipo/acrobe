@@ -268,7 +268,7 @@ def dump(filename, no_crc):
 
 @stapl.command(help="Run STAPL file against hardware")
 @click.argument('filename', type=click.Path(exists=True))
-@click.option('-r', '--root', 'root_path', required=True,
+@click.option('-r', '--root', 'root_path',
               help='Path to JTAG interface (e.g. tei-/jtag)')
 @click.option('-a', '--action', 'action_name', required=True,
               help='Action to execute')
@@ -296,15 +296,18 @@ async def run(filename, root_path, action_name, no_crc, includes):
     hw_root = HwRoot()
     hw_root.add_enumerator(UsbEnumerator())
 
-    from ..protocol.jtag import JtagInterface
-    parts = root_path.strip('/').split('/')
-    leaf = await hw_root.child_summon(*parts)
-    if not isinstance(leaf, JtagInterface):
-        click.echo(f"Error: {root_path} resolved to {type(leaf).__name__}, "
-                    "expected a JtagInterface (e.g. adapter/jtag)", err=True)
-        raise SystemExit(1)
-    await leaf.start_tree()
-    interface = leaf._interface
+    if root_path:
+        from ..protocol.jtag import JtagInterface
+        parts = root_path.strip('/').split('/')
+        leaf = await hw_root.child_summon(*parts)
+        if not isinstance(leaf, JtagInterface):
+            click.echo(f"Error: {root_path} resolved to {type(leaf).__name__}, "
+                        "expected a JtagInterface (e.g. adapter/jtag)", err=True)
+            raise SystemExit(1)
+        await leaf.start_tree()
+        interface = leaf._interface
+    else:
+        interface = None
 
     player = AcrobePlayer(interface)
     interp = Interpreter(prog)
