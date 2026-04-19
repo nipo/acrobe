@@ -1057,6 +1057,108 @@ def _find_demotable_vars(program):
     return candidates
 
 
+def _find_var_proc_map(program):
+    """Map each DATA variable to the set of procedures that reference it.
+
+    A variable is "referenced" if it appears in any expression or as
+    an assignment target in the procedure's statements.
+    """
+    # Collect all DATA variable names
+    data_vars = set()
+    for db in program.data_blocks.values():
+        for stmt in db.statements:
+            if isinstance(stmt, (IntegerDecl, BooleanDecl)):
+                data_vars.add(stmt.name)
+
+    if not data_vars:
+        return {}
+
+    def _expr_names(expr):
+        names = set()
+        if expr is None:
+            return names
+        match expr:
+            case VarRef(name=n) | ArrayIndex(name=n) | \
+                 ArraySubrange(name=n) | ArrayWhole(name=n):
+                names.add(n)
+            case _:
+                pass
+        match expr:
+            case ArrayIndex(index=idx):
+                names |= _expr_names(idx)
+            case ArraySubrange(high=h, low=l):
+                names |= _expr_names(h)
+                names |= _expr_names(l)
+            case BinOp(left=a, right=b):
+                names |= _expr_names(a)
+                names |= _expr_names(b)
+            case UnaryOp(operand=a) | FuncCall(arg=a):
+                names |= _expr_names(a)
+        return names
+
+    def _stmt_names(stmt):
+        names = set()
+        match stmt:
+            case AssignStmt(target=t, index=idx, high=h, low=l, value=v):
+                names.add(t)
+                names |= _expr_names(idx)
+                names |= _expr_names(h)
+                names |= _expr_names(l)
+                names |= _expr_names(v)
+            case ForStmt(var=v, start=s, end=e, step=st):
+                names.add(v)
+                names |= _expr_names(s)
+                names |= _expr_names(e)
+                if st: names |= _expr_names(st)
+            case IfStmt(condition=c, then_stmt=t):
+                names |= _expr_names(c)
+                names |= _stmt_names(t)
+            case PopStmt(target=t, index=idx):
+                names.add(t)
+                names |= _expr_names(idx)
+            case PushStmt(value=v) | ExitStmt(code=v):
+                names |= _expr_names(v)
+            case PrintStmt(parts=parts):
+                for p in parts:
+                    if not isinstance(p, str):
+                        names |= _expr_names(p)
+            case ExportStmt(value=v):
+                names |= _expr_names(v)
+            case DrScanStmt(length=l, tdi=t, capture=c, compare=cmp, mask=m, result=r) | \
+                 IrScanStmt(length=l, tdi=t, capture=c, compare=cmp, mask=m, result=r):
+                for e in (l, t, c, cmp, m, r):
+                    names |= _expr_names(e)
+            case PreDrStmt(count=c, data=d) | PostDrStmt(count=c, data=d) | \
+                 PreIrStmt(count=c, data=d) | PostIrStmt(count=c, data=d):
+                names |= _expr_names(c)
+                if d: names |= _expr_names(d)
+            case WaitStmt(cycles=c, usecs=u):
+                if c: names |= _expr_names(c)
+                if u: names |= _expr_names(u)
+        return names
+
+    var_procs = {n: set() for n in data_vars}
+    for proc_name, proc in program.procedures.items():
+        # Which data vars does this proc have access to?
+        proc_data = set()
+        for dn in proc.uses:
+            db = program.data_blocks.get(dn.upper())
+            if db:
+                for stmt in db.statements:
+                    if isinstance(stmt, (IntegerDecl, BooleanDecl)):
+                        proc_data.add(stmt.name)
+        if not proc_data:
+            continue
+
+        # Find which of those are actually referenced
+        for stmt in proc.statements:
+            referenced = _stmt_names(stmt) & proc_data
+            for n in referenced:
+                var_procs[n].add(proc_name)
+
+    return var_procs
+
+
 def _analyze_variables(program, config):
     """Analyze all variables in the program.
 
@@ -1877,7 +1979,13 @@ def transpile(program: Program, config: TranspileConfig | None = None,
         config = TranspileConfig()
 
     var_infos, data_files = _analyze_variables(program, config)
-    demotable = _find_demotable_vars(program)
+    var_proc_map = _find_var_proc_map(program)
+    # Single-procedure vars can be inlined as locals
+    single_proc_vars = {n for n, procs in var_proc_map.items()
+                        if len(procs) == 1
+                        and n in var_infos and var_infos[n].is_read
+                        and not var_infos[n].is_const}
+    demotable = _find_demotable_vars(program) | single_proc_vars
 
     w = _Writer()
 
@@ -1946,7 +2054,8 @@ def transpile(program: Program, config: TranspileConfig | None = None,
 
     # --- Procedures ---
     for proc_name, proc in program.procedures.items():
-        _emit_procedure(w, proc, program, var_infos, config, demotable)
+        _emit_procedure(w, proc, program, var_infos, config,
+                        demotable, var_proc_map)
 
     # --- Actions ---
     for action_name, action in program.actions.items():
@@ -2162,11 +2271,18 @@ def _emit_data_init(w, program, var_infos, config, demotable=set()):
         w.line()
 
 
-def _emit_procedure(w, proc, program, var_infos, config, demotable=set()):
+def _emit_procedure(w, proc, program, var_infos, config,
+                    demotable=set(), var_proc_map=None):
     """Emit a procedure as an async method."""
-    proc_locals = _collect_proc_locals(proc) | (
-        _collect_data_vars(proc, program) & demotable)
-    data_vars = _collect_data_vars(proc, program)
+    proc_data_vars = _collect_data_vars(proc, program)
+    # Only demote vars that are actually referenced in this procedure
+    if var_proc_map is not None:
+        proc_demotable = {n for n in demotable
+                          if proc.name in var_proc_map.get(n, set())}
+    else:
+        proc_demotable = demotable
+    proc_locals = _collect_proc_locals(proc) | (proc_data_vars & proc_demotable)
+    data_vars = proc_data_vars
 
     w.line(f'async def _proc_{proc.name.lower()}(self):')
     w.indent()
@@ -2177,6 +2293,49 @@ def _emit_procedure(w, proc, program, var_infos, config, demotable=set()):
         dn = data_name.upper()
         if dn in program.data_blocks:
             w.line(f'self._init_data_{dn.lower()}()')
+
+    # Emit inline init for demoted DATA vars referenced in this procedure
+    inlined = proc_data_vars & proc_demotable
+    if inlined:
+        expr_em = _ExprEmitter(var_infos, proc_locals)
+        for data_name in proc.uses:
+            db = program.data_blocks.get(data_name.upper())
+            if not db:
+                continue
+            for stmt in db.statements:
+                match stmt:
+                    case IntegerDecl(name=n) if n in inlined:
+                        if stmt.size is not None:
+                            if stmt.init is not None:
+                                vals = ', '.join(expr_em.int_expr(v)
+                                                 for v in reversed(stmt.init))
+                                w.line(f'{n} = [{vals}]')
+                            else:
+                                w.line(f'{n} = [0] * {expr_em.int_expr(stmt.size)}')
+                        else:
+                            if stmt.init is not None:
+                                w.line(f'{n} = {expr_em.int_expr(stmt.init[0])}')
+                            else:
+                                w.line(f'{n} = 0')
+                    case BooleanDecl(name=n) if n in inlined:
+                        vi = var_infos.get(n)
+                        if stmt.size is not None:
+                            if (stmt.init is not None
+                                    and isinstance(stmt.init, BooleanLiteral)
+                                    and vi and vi.extern_filename is not None):
+                                w.line(f'{n} = BitArray({stmt.init.bit_count}, '
+                                       f'(self.DATA_DIR / "{vi.extern_filename}").read_bytes())')
+                            elif (stmt.init is not None
+                                    and isinstance(stmt.init, BooleanLiteral)):
+                                w.line(f'{n} = BitArray({stmt.init.bit_count}, '
+                                       f'{stmt.init.data!r})')
+                            else:
+                                w.line(f'{n} = BitArray({expr_em.int_expr(stmt.size)})')
+                        else:
+                            if stmt.init is not None:
+                                w.line(f'{n} = {expr_em.int_expr(stmt.init)}')
+                            else:
+                                w.line(f'{n} = 0')
 
     # Build control flow
     stmts = proc.statements
