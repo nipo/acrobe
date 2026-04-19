@@ -1070,7 +1070,8 @@ class _StmtEmitter:
                 if sz is not None:
                     size_s = e.int_expr(sz)
                     if init is not None:
-                        vals = ', '.join(e.int_expr(v) for v in init)
+                        # JESD71: init values are listed high-to-low
+                        vals = ', '.join(e.int_expr(v) for v in reversed(init))
                         w.line(f'{ref} = [{vals}]')
                     else:
                         w.line(f'{ref} = [0] * {size_s}')
@@ -1605,7 +1606,8 @@ def _emit_data_init(w, program, var_infos, config):
                     if sz is not None:
                         size_s = expr_em.int_expr(sz)
                         if init is not None:
-                            vals = ', '.join(expr_em.int_expr(v) for v in init)
+                            # JESD71: init values listed high-to-low
+                            vals = ', '.join(expr_em.int_expr(v) for v in reversed(init))
                             w.line(f'self.{n} = [{vals}]')
                         else:
                             w.line(f'self.{n} = [0] * {size_s}')

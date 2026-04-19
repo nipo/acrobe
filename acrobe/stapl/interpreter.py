@@ -4,6 +4,7 @@ Executes a parsed STAPL Program by evaluating expressions, managing
 variables, and dispatching JTAG operations to a pluggable Player.
 """
 
+import asyncio
 import math
 from dataclasses import dataclass
 
@@ -245,9 +246,14 @@ class Interpreter:
             # If it's another procedure, that's fine — USES can reference both
 
         pc = 0
+        step = 0
         while pc < len(proc.statements):
             stmt = proc.statements[pc]
             pc = await self._execute_stmt(stmt, pc, proc, player)
+            step += 1
+            if step % 100000 == 0:
+                # Yield to event loop periodically for long procedures
+                await asyncio.sleep(0)
 
     async def _execute_stmt(self, stmt, pc: int, proc: ProcedureDef,
                              player: StaplPlayer) -> int:
@@ -361,7 +367,14 @@ class Interpreter:
         if decl.size is not None:
             size = self._eval_int(decl.size)
             if decl.init:
-                self._integers[decl.name] = [self._eval_int(v) for v in decl.init]
+                # JESD71: INTEGER A[n] = v(n-1), v(n-2), ..., v(1), v(0)
+                # Init values are listed from highest index to lowest.
+                vals = [self._eval_int(v) for v in decl.init]
+                vals.reverse()
+                # Pad to declared size if fewer values provided
+                while len(vals) < size:
+                    vals.append(0)
+                self._integers[decl.name] = vals
             else:
                 self._integers[decl.name] = [0] * size
         else:
