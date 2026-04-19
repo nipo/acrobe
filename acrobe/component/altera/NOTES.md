@@ -4,6 +4,35 @@ These notes are derived from analysis of STAPL (JAM) transpiled output,
 SVF files, openFPGALoader source, and live hardware experiments with
 Cyclone 10 LP and Agilex 5 devices.
 
+## STAPL INTEGER Array Init Order
+
+**JESD71 specifies that INTEGER array init values are listed from
+highest index to lowest**:
+
+    INTEGER A[n] = v(n-1), v(n-2), ..., v(1), v(0);
+
+This means the FIRST listed value goes to `A[n-1]` and the LAST
+listed value goes to `A[0]`.  Our parser and interpreter reverse the
+init list before storing.
+
+Impact: all multi-element INTEGER arrays in the STAPL have reversed
+storage order compared to naive parsing.  Size-1 arrays and BOOLEAN
+arrays are unaffected.
+
+**Affected arrays**: A0, A1, A5, A6, A7, A8 (device type lookup
+tables, 46 entries each), A61 (IDCODE list), A148 (flash database,
+2015 entries), and any multi-element INTEGER arrays in procedures.
+
+**Not affected**: size-1 arrays (A12, A13, A25, A43, A59, A60,
+A147, A217, J0, J1, J4, J5, J19, J20), BOOLEAN arrays (J2, J77,
+J80, J81 — all VIR/VDR command/response data), and constants
+derived from SVF or live hardware.
+
+All SDM driver constants (IR codes, sync signatures, VIR/VDR command
+words, CONF_DONE positions) were derived from size-1 INTEGER arrays,
+BOOLEAN arrays, SVF analysis, or live hardware — they are correct.
+
+
 ## JTAG Chain Framework (ALG_VERSION 68)
 
 All Altera devices share the same generic JTAG chain management
@@ -18,6 +47,8 @@ framework. The STAPL algorithm version 68 implements:
 
 ### Device Capability Bits (A13)
 
+A13 is a size-1 per-device array (not affected by init reversal).
+
 | Bit | Mask     | Name              | Meaning                                      |
 |-----|----------|-------------------|----------------------------------------------|
 | 2   | 0x004    | DEVICE_ACTIVE     | Master enable, checked with every other bit   |
@@ -31,6 +62,9 @@ Bits 0, 1, 8, 9, 11, 14, 17 are for older ISP/flash-based devices
 Agilex 5.
 
 ### IR Instructions (10-bit, shared across families)
+
+These values are from BOOLEAN arrays and SVF — not affected by
+init reversal.
 
 | IR    | Name              | Used for                                    |
 |-------|-------------------|---------------------------------------------|
@@ -51,10 +85,21 @@ Agilex 5.
 | 0x332 | VERIFY_ENABLE     | Enter verify mode                            |
 | 0x3FF | BYPASS            | Standard JTAG bypass                         |
 
+### Device Type Lookup Tables (A0, A1, A5, etc.)
+
+**WARNING**: These are multi-element INTEGER arrays (46 entries).
+Earlier analysis referenced values at specific indices (e.g.,
+"device type 12") but those indices were based on pre-reversal
+data. The values cited in annotations on the transpiled program.py
+files may be wrong. Re-derive from the interpreter or re-generate
+the transpiled output if needed.
+
 
 ## Cyclone 10 LP (10CL025Y, IDCODE 0x020F30DD)
 
 ### Device Constants
+
+All values below are from size-1 arrays — verified correct.
 
 | Parameter          | Value       | Notes                         |
 |--------------------|-------------|-------------------------------|
@@ -141,6 +186,8 @@ embedded in the status register (it's a separate DR via IR 0x007).
 
 ### Device Constants
 
+All values below are from size-1 arrays — verified correct.
+
 | Parameter          | Value        | Notes                            |
 |--------------------|--------------|----------------------------------|
 | IR length          | 10 bits      | Same as Cyclone 10              |
@@ -150,8 +197,6 @@ embedded in the status register (it's a separate DR via IR 0x007).
 | Status DR length   | 492 bits     | Shorter than Cyclone 10         |
 | CONF_DONE bit      | 13           | Much lower than Cyclone 10's 286|
 | Max JTAG freq      | 12 MHz       | Same as Cyclone 10              |
-| Device type (A12)  | 12           | Same index as Cyclone 10!       |
-| Alt type (A105)    | 45           | Flash programming variant       |
 | Flash size         | 64 MB        | External SPI NOR                |
 
 ### Architecture
@@ -161,6 +206,12 @@ goes through the **Secure Device Manager (SDM)** using Virtual JTAG.
 
 The bitstream is in Agilex-native SDM format (header `0x62294895` LE),
 not RBF (no `0x6AF7F7F7` sync word). It ends with `dummy_hash_block`.
+
+### Flash Database (A148)
+
+**WARNING**: A148 is a 2015-entry INTEGER array. Earlier analysis
+that decoded flash part names from this array was based on
+pre-reversal data and is WRONG. Re-derive if needed.
 
 
 ## SDM Communication Protocol
@@ -213,15 +264,36 @@ response data. Bit 23 of the payload is always masked out
 FIFOs. Each DR scan of 34 bits simultaneously shifts one word in
 (TDI) and one word out (TDO).
 
-For VIR writes:
+For VIR writes (STAPL j89 approach):
 1. First scan reads FIFO level (12-bit counter in bits [11:0])
 2. Subsequent scans push command words one at a time
 
-For VDR exchanges:
-1. Each scan sends one data word and captures the response
-2. Responses are pipelined — may appear at any position in the
-   response stream
-3. Bit 23 of response payload = busy flag (always masked out)
+For VDR reads (STAPL j97 approach):
+1. Host always shifts ZEROS into VDR
+2. SDM loads response data asynchronously
+3. j97 retries (with 20ms delays) until valid response appears
+4. J80/J81 are expected/mask values for CHECKING, not data to send
+
+**Atomic vs word-by-word VIR**: SPI bridge commands require all
+VIR words packed into a single DR scan (N×34 bits). Sync/config
+commands work with word-by-word VIR. The `SdmJtagTransport`
+supports both modes via the `atomic` parameter.
+
+### SDM Access Control
+
+After power cycle, the SDM starts with flash access **denied**.
+The access check command (`cmd_id=0x0C`) returns an error indicating
+access must be unlocked. Quartus programmer performs additional
+authorization before flash access. This is separate from SRAM
+configuration which only needs sync + config request.
+
+### 8-bit Avalon-ST SDM Interface
+
+The SDM also has a parallel 8-bit interface with signals:
+VALID, READY, DATA[7:0], Clock. No SOP/EOP/FIRST/LAST framing —
+just raw bytes with flow control. The 34-bit JTAG framing
+(FIRST/LAST/VALID bits) is JTAG-specific and not part of the
+Avalon-ST protocol itself.
 
 ### Transaction Pattern (j88)
 
@@ -230,7 +302,7 @@ For VDR exchanges:
 2. Poll VIR DR for FIFO free slots: bits[11:0] = used count
 3. Push command words into VIR DR one at a time
 4. Set IR to VDR (0x202)
-5. Exchange data words one at a time, check responses against mask
+5. Shift zeros, check responses against mask, retry with delays
 ```
 
 ### SDM Command Formats
@@ -251,25 +323,27 @@ For VDR exchanges:
 **Multi-word SPI commands** (bit[31]=0): for flash access
 
 **Dynamic commands**: type-byte encoded operations
-(0x34=chip_select, 0x38=erase, 0x39=program, 0x3A=verify, 0x6E=blank_check)
+(0x34=chip_select, 0x38=erase, 0x39=program, 0x3A=verify,
+0x6E=blank_check)
 
 ### Configuration Flow (dj161)
 
 ```
 1. Sync phase 1: flush/reset
-   VIR: [0xC0000000, 0x80000000]
-   VDR: probe with mask 0xFF7FFFFF
+   VIR: [0xC0000000, 0x80000000]  (no FIRST/LAST = read-only flush)
+   VDR: read until valid ack
 
 2. Sync phase 2: device-specific handshake
-   VIR: [device_signature...]
-   VDR: [expected_response...]
+   Config mode and flash mode use DIFFERENT sync2 signatures.
+   VIR: [signature words with FIRST/LAST]
+   VDR: check response against expected values
 
-3. Config request: cmd_id=0x01, SOP=1
+3. Config request: cmd_id=0x01, FIRST=1
    VDR: ack probe
 
 4. Bitstream streaming (see below)
 
-5. Final status polling via VIR/VDR cmd_id=0x01
+5. Final status polling via VIR/VDR cmd_id=0x01 (FIRST=0 = query)
    VDR: read 5 words, check CONF_DONE
    Poll up to 15× at 100ms intervals
 ```
@@ -304,124 +378,56 @@ DR layout (LSB shifted first):
   Total: 65 + N bits
 ```
 
-**Flow control loop**:
+**Flow control loop** (from STAPL j127):
 
 ```
-chunk_size = 32768 bits (initial)
+chunk_size = 32768 bits (initial), max = 524288 (J120)
 loop:
   1. Status check (j125)
   2. If DONE=1: do NOT send data, set request_data on next check
      Halve chunk_size. Loop to 1.
-     (This is the critical back-pressure mechanism)
+     (GOTO J131 in STAPL — critical back-pressure mechanism)
   3. If DONE=0: send one chunk via CONFIG DR
-     Double chunk_size (up to max). Loop to 1.
+     Double chunk_size (up to J120 max). Loop to 1.
   4. If progress == total: done
   5. If ERROR: abort
 ```
 
-The `request_data` bit is asserted when:
-- First iteration (along with `start_config` and `enable`)
-- SDM stalled: DONE=1 AND FIFO free count == 0
-
-**IMPORTANT**: When DONE=1, the GOTO J131 in the STAPL source skips
-the data send entirely. This was missing in early implementations
-and caused the SDM's internal buffer to overflow.
-
-### Current Status (as of 2026-03-25)
+### Current Status
 
 **Working**:
-- SDM sync (both phases)
-- Config request (cmd_id=0x01, FIRST=1)
-- Bitstream streaming with flow control (95.5% of data consumed)
-- Back-pressure handling (DONE=1 → don't send, retry status)
+- Cyclone 10 LP: full SRAM configuration via direct JTAG bitstream
+- Agilex 5 SDM: sync, config request, bitstream streaming (95.5%)
+- STAPL interpreter with `AcrobePlayer`: CHECK_IDCODE verified
+- STAPL transpiler with corrected GOTO handling and init ordering
 
-**Known Issue**:
-- SDM stalls at progress=3,441,152 out of 3,604,480 bits (163,328
-  bits = ~20 KiB remaining)
-- No error reported, DONE stays False, progress doesn't advance
-- The stall point is consistent across runs
-- Data at the stall point is normal (not padding or markers)
-- Adding extra idle cycles between IR/DR does not help
-- Zero-padding beyond J2.bin does not help
-- All chunk boundaries are byte-aligned
-
-Likely cause: subtle difference in chunk sizing/boundaries between
-our implementation and the STAPL j127. The STAPL's adaptive sizing
-may produce different chunk boundaries that keep the SDM's internal
-pipeline happy. Or there may be something in the j125 status check
-interaction (the request_data/start_config/enable bit encoding) that
-we don't replicate exactly.
-
-**Findings from STAPL JAM source comparison**:
-- Transpiler has 5 dropped forward GOTOs (j89: 2, j97: 2, j127: 1)
-- j89 GOTO J95 is critical: VIR word-send loop never executes
-- j127 GOTO J131 is critical: data sent during SDM stall
-- j97 sends ZEROS through VDR (A29), NOT the expected values (J80).
-  J80/J81 are comparison patterns only.
-- J120 = 524288 (max chunk size cap, was missing in our code)
-- request_data condition: `J113==0 && J111==1` (fifo empty AND done)
-
-**Remaining issue**: SDM stalls at 3,441,152/3,604,480 bits (95.5%).
-All data has been sent. The SDM stops processing the last 163,328
-bits despite having received them. This suggests a missing
-end-of-stream signal, final commit, or different frame format for the
-last chunk.
-
-**CRITICAL FINDING (from SPI debugging)**:
-VIR writes MUST be atomic — all command words packed into a single
-DR scan of N×34 bits.  Word-by-word VIR shifts produce `0x1FF`
-("unknown command") responses.  Atomic VIR writes produce correct
-responses.  This likely also explains the bitstream streaming stall.
-
-**SPI flash RDID successfully read**:
-After atomic VIR fix, RDID returns JEDEC ID: manufacturer 0x01
-(Spansion/Infineon), type 0x03, capacity 0x19 (256 Mbit = 32 MiB).
-The SDM SPI passthrough is functional.
-
-**IMPORTANT**: Atomic vs word-by-word VIR produces DIFFERENT SDM
-responses.  Atomic VIR returns real multi-word SPI data (7 words for
-RDID), while word-by-word returns single-word acks.  The STAPL uses
-word-by-word (j89 pushes words one at a time after FIFO poll).
-
-The SDM SPI response data with word-by-word VIR does NOT contain
-the expected Micron JEDEC ID (0x20, 0xBB, 0x22 for MT25QU02G).
-This suggests the word-by-word response is metadata/acks rather
-than raw SPI MISO data, and the actual MISO data extraction requires
-matching j97's exact state machine (phase 0 match → phase 1 capture).
-
-The board has a **Micron MT25QU02GCBB8E12** (2 Gbit, marking RW251).
-Expected JEDEC: manufacturer=0x20 (Micron), type=0xBB, density=0x22.
-
-Next steps:
-- Carefully replicate j97's two-phase read with retry/delay logic
-- The VDR response with valid=0 between words is the flow control
-  mechanism — j97 retries (with 20ms delays at J103) until valid
-  data appears
-- Need to distinguish between "SDM ack" words and "SPI MISO data"
-  words in the response stream
+**Remaining issues**:
+- Agilex 5 streaming stalls at 95.5% — likely VIR atomic vs
+  word-by-word interaction with the CONFIG DR path
+- Flash access denied after power cycle — needs authorization
+  sequence from Quartus trace
 
 ### Transport Abstraction
 
 ```
 Application layer:  SDM commands (configure, status, flash ops)
                     ↕ 32-bit command/response words
-Framing layer:      Avalon-ST (34-bit: SOP + EOP + 32-bit payload)
-                    ↕ 34-bit framed words
+Framing layer:      34-bit words (FIRST/LAST for cmds, VALID/LAST for resp)
+                    ↕ JTAG-specific framing
 Transport layer:    JTAG VIR/VDR (IR 0x201/0x202)
-                    -or- 8-bit FIFO interface
-                    -or- other SDM interfaces
+                    -or- 8-bit Avalon-ST FIFO (VALID/READY/DATA/CLK)
 ```
 
 Implementation:
-- `sdm_jtag.py`: `SdmJtagTransport` — word-at-a-time VIR/VDR
+- `sdm_jtag.py`: `SdmJtagTransport` — word-at-a-time or atomic VIR
+- `sdm_spi.py`: `SdmSpiAdapter` — SPI target API over SDM bridge
 - `agilex5.py`: `SdmMailbox` — protocol layer, transport-agnostic
 
 ### Open Questions
 
-- Why does streaming stall at 95.5%? Is it a timing issue, IR/DR
-  state machine transition, or something else?
+- Why does streaming stall at 95.5%?
 - The `0xA17E2A00` frame header meaning
-- Whether the 8-bit FIFO uses Avalon-ST framing or a simpler protocol
+- How Quartus unlocks flash access after power cycle
 - Full SDM command set beyond configure/status/flash
-- Whether the STAPL inserts idle cycles between IR and DR shifts
-  that are critical (j61 does `_wait('IDLE', 16, None, None)`)
+- Whether the 8-bit FIFO interface packs the 32-bit payloads as
+  4 bytes each, or uses a different framing
