@@ -26,8 +26,12 @@ async def run(module, entry, args):
         ns = _runscript(entry, args)
 
     main = ns.get("main")
-    if main is not None and asyncio.iscoroutinefunction(main):
-        await main()
+    if main is not None:
+        if asyncio.iscoroutinefunction(main):
+            await main()
+        elif hasattr(main, 'main') and asyncio.iscoroutinefunction(main.main):
+            # asyncclick Command: invoke its async main directly
+            await main.main(args, standalone_mode=False)
 
 
 def _runmodule(module_name, args):
@@ -59,7 +63,10 @@ def _runscript(filename, args):
     import __main__
     __main__.__dict__.clear()
     __main__.__dict__.update({
-        "__name__": "__main__",
+        # Use a sentinel name so "if __name__ == '__main__'" blocks
+        # don't fire during exec — we call main() ourselves afterward
+        # in the existing event loop.
+        "__name__": "__acrobe_run__",
         "__file__": mainpyfile,
         "__builtins__": __builtins__,
     })
