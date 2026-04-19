@@ -54,6 +54,46 @@ class BitArray:
     def size(self):
         return self._size
 
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            start, stop, step = key.start, key.stop, key.step
+            if step is None or step == 1:
+                # a[start:stop] → ascending, exclusive end
+                size = stop - start
+                result = BitArray(size)
+                for i in range(size):
+                    result.set_bit(i, self.get_bit(start + i))
+                return result
+            elif step == -1:
+                # a[start:stop:-1] → descending, exclusive end
+                # stop=None means go down to index 0 inclusive
+                end = stop if stop is not None else -1
+                size = start - end
+                result = BitArray(size)
+                for i in range(size):
+                    result.set_bit(i, self.get_bit(start - i))
+                return result
+            else:
+                assert False, f"unsupported step {step}"
+        return self.get_bit(key)
+
+    def __setitem__(self, key, value):
+        if isinstance(key, slice):
+            start, stop, step = key.start, key.stop, key.step
+            if step is None or step == 1:
+                size = stop - start
+                for i in range(min(size, value.size)):
+                    self.set_bit(start + i, value.get_bit(i))
+            elif step == -1:
+                end = stop if stop is not None else -1
+                size = start - end
+                for i in range(min(size, value.size)):
+                    self.set_bit(start - i, value.get_bit(i))
+            else:
+                assert False, f"unsupported step {step}"
+        else:
+            self.set_bit(key, value)
+
     def get_bit(self, index: int) -> int:
         if index < 0 or index >= self._size:
             return 0
@@ -70,30 +110,20 @@ class BitArray:
             self._data[byte_idx] &= ~(1 << bit_idx)
 
     def get_subrange(self, high: int, low: int) -> 'BitArray':
-        """Extract bits [low..high] into a new BitArray."""
+        """Extract bits [low..high] into a new BitArray (STAPL convention)."""
         if high >= low:
-            size = high - low + 1
-            result = BitArray(size)
-            for i in range(size):
-                result.set_bit(i, self.get_bit(low + i))
+            return self[low:high + 1]
         else:
-            # Decreasing order: reverses bits
-            size = low - high + 1
-            result = BitArray(size)
-            for i in range(size):
-                result.set_bit(i, self.get_bit(low - i))
-        return result
+            stop = high - 1 if high > 0 else None
+            return self[low:stop:-1]
 
     def set_subrange(self, high: int, low: int, source: 'BitArray'):
-        """Set bits [low..high] from source BitArray."""
+        """Set bits [low..high] from source BitArray (STAPL convention)."""
         if high >= low:
-            size = high - low + 1
-            for i in range(min(size, source.size)):
-                self.set_bit(low + i, source.get_bit(i))
+            self[low:high + 1] = source
         else:
-            size = low - high + 1
-            for i in range(min(size, source.size)):
-                self.set_bit(low - i, source.get_bit(i))
+            stop = high - 1 if high > 0 else None
+            self[low:stop:-1] = source
 
     def to_bytes(self) -> bytes:
         return bytes(self._data)
