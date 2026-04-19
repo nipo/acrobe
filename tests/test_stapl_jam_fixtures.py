@@ -105,6 +105,7 @@ class TestTranspiledConsistency:
         'test_array_order.jam',
         'test_bool_order.jam',
         'test_bool_subrange.jam',
+        'test_local_demotion.jam',
     ])
     def fixture_name(self, request):
         return request.param

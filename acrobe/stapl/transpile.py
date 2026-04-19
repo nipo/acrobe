@@ -842,6 +842,221 @@ def _collect_read_vars(program):
     return read_vars
 
 
+def _find_demotable_vars(program):
+    """Find DATA variables that can be demoted to procedure locals.
+
+    A variable can be demoted if, in every procedure that uses it,
+    it is unconditionally written before any read. This means the
+    value at procedure entry never matters, so it can be a local.
+
+    Returns a set of variable names that can be demoted.
+    """
+
+    def _expr_reads(expr):
+        """Collect variable names read by an expression."""
+        names = set()
+        if expr is None:
+            return names
+        match expr:
+            case VarRef(name=n):
+                names.add(n)
+            case ArrayIndex(name=n, index=idx):
+                names.add(n)
+                names |= _expr_reads(idx)
+            case ArraySubrange(name=n, high=h, low=l):
+                names.add(n)
+                names |= _expr_reads(h)
+                names |= _expr_reads(l)
+            case ArrayWhole(name=n):
+                names.add(n)
+            case BinOp(left=a, right=b):
+                names |= _expr_reads(a)
+                names |= _expr_reads(b)
+            case UnaryOp(operand=a):
+                names |= _expr_reads(a)
+            case FuncCall(arg=a):
+                names |= _expr_reads(a)
+        return names
+
+    def _stmt_reads(stmt):
+        """Collect variable names read by a statement (not written)."""
+        reads = set()
+        match stmt:
+            case AssignStmt(index=idx, high=h, low=l, value=v):
+                reads |= _expr_reads(idx)
+                reads |= _expr_reads(h)
+                reads |= _expr_reads(l)
+                reads |= _expr_reads(v)
+            case IfStmt(condition=c, then_stmt=t):
+                reads |= _expr_reads(c)
+                reads |= _stmt_reads(t)
+            case ForStmt(start=s, end=e, step=st):
+                reads |= _expr_reads(s)
+                reads |= _expr_reads(e)
+                if st:
+                    reads |= _expr_reads(st)
+            case ExitStmt(code=c):
+                reads |= _expr_reads(c)
+            case PrintStmt(parts=parts):
+                for p in parts:
+                    if not isinstance(p, str):
+                        reads |= _expr_reads(p)
+            case ExportStmt(value=v):
+                reads |= _expr_reads(v)
+            case PushStmt(value=v):
+                reads |= _expr_reads(v)
+            case DrScanStmt(length=l, tdi=t, capture=c, compare=cmp, mask=m, result=r) | \
+                 IrScanStmt(length=l, tdi=t, capture=c, compare=cmp, mask=m, result=r):
+                reads |= _expr_reads(l)
+                reads |= _expr_reads(t)
+                if c: reads |= _expr_reads(c)
+                if cmp: reads |= _expr_reads(cmp)
+                if m: reads |= _expr_reads(m)
+                if r: reads |= _expr_reads(r)
+            case PreDrStmt(count=c, data=d) | PostDrStmt(count=c, data=d) | \
+                 PreIrStmt(count=c, data=d) | PostIrStmt(count=c, data=d):
+                reads |= _expr_reads(c)
+                if d: reads |= _expr_reads(d)
+            case WaitStmt(cycles=c, usecs=u):
+                if c: reads |= _expr_reads(c)
+                if u: reads |= _expr_reads(u)
+        return reads
+
+    def _stmt_writes(stmt):
+        """Get variable name unconditionally written by a statement, or None."""
+        match stmt:
+            case AssignStmt(target=t, index=None, high=None):
+                # Whole variable assignment (not indexed/subrange)
+                return t
+            case ForStmt(var=v):
+                return v
+            case PopStmt(target=t, index=None):
+                return t
+        return None
+
+    def _analyze_proc(proc, data_vars):
+        """Analyze one procedure. Return set of vars that need entry value."""
+        needs_entry = set()
+        definitely_written = set()
+
+        for stmt in proc.statements:
+            # Labels mean we could jump here from elsewhere, so
+            # we can't trust that prior writes happened
+            # (conservative: clear definitely_written)
+            # But actually, labels are jump targets — code before a
+            # label might be skipped. So any var only written before
+            # a label isn't reliably written.
+            # We handle this by stopping analysis at labels.
+
+            # Check for labels at this statement index
+            # (labels are stored in proc.labels as {name: stmt_index})
+
+            reads = _stmt_reads(stmt) & data_vars
+            for r in reads:
+                if r not in definitely_written:
+                    needs_entry.add(r)
+
+            # Only count unconditional writes
+            # (assignments inside IF don't count)
+            written = _stmt_writes(stmt)
+            if written and written in data_vars:
+                definitely_written.add(written)
+
+            # If we hit a GOTO or CALL, be conservative:
+            # GOTO can jump backward (loop) or forward (skip),
+            # CALL can do anything
+            if isinstance(stmt, (GotoStmt, CallStmt)):
+                break
+
+        return needs_entry
+
+    # Collect DATA variables per data block
+    all_data_vars = set()
+    for data_block in program.data_blocks.values():
+        for stmt in data_block.statements:
+            if isinstance(stmt, (IntegerDecl, BooleanDecl)):
+                all_data_vars.add(stmt.name)
+
+    if not all_data_vars:
+        return set()
+
+    # For each variable, track whether we've proven it's locally scoped
+    # in every procedure, or if any procedure needs the entry value.
+    #
+    # A variable is demotable if, in every procedure that USES it,
+    # it is unconditionally written before any read.
+    #
+    # Strategy: start with all DATA vars as candidates, then remove
+    # any that fail the test in any procedure.
+    candidates = set(all_data_vars)
+
+    for proc in program.procedures.values():
+        proc_data_vars = set()
+        for data_name in proc.uses:
+            db = program.data_blocks.get(data_name.upper())
+            if db:
+                for stmt in db.statements:
+                    if isinstance(stmt, (IntegerDecl, BooleanDecl)):
+                        proc_data_vars.add(stmt.name)
+        if not proc_data_vars:
+            continue
+
+        # Collect all variables actually referenced in this procedure
+        all_reads = set()
+        all_writes = set()
+        for stmt in proc.statements:
+            all_reads |= _stmt_reads(stmt) & proc_data_vars
+            w = _stmt_writes(stmt)
+            if w and w in proc_data_vars:
+                all_writes.add(w)
+            # Also count target of indexed/subrange assigns as writes
+            if isinstance(stmt, AssignStmt) and stmt.target in proc_data_vars:
+                all_writes.add(stmt.target)
+
+        used_vars = (all_reads | all_writes) & candidates
+
+        if not used_vars:
+            continue
+
+        label_indices = set(proc.labels.values())
+
+        # If there's a label at index 0, we can't reason about anything
+        if 0 in label_indices:
+            candidates -= used_vars
+            continue
+
+        # Find the first label index
+        first_label = min(label_indices) if label_indices else len(proc.statements)
+
+        # Analyze the prefix before the first label/goto/call
+        needs_entry = set()
+        definitely_written = set()
+
+        for i, stmt in enumerate(proc.statements):
+            if i >= first_label:
+                break
+
+            reads = _stmt_reads(stmt) & used_vars
+            for r in reads:
+                if r not in definitely_written:
+                    needs_entry.add(r)
+
+            written = _stmt_writes(stmt)
+            if written and written in used_vars:
+                definitely_written.add(written)
+
+            if isinstance(stmt, (GotoStmt, CallStmt)):
+                break
+
+        # Variables read before write need self
+        candidates -= needs_entry
+        # Variables used but not resolved in the prefix: be conservative
+        unresolved = used_vars - definitely_written - needs_entry
+        candidates -= unresolved
+
+    return candidates
+
+
 def _analyze_variables(program, config):
     """Analyze all variables in the program.
 
@@ -1662,6 +1877,7 @@ def transpile(program: Program, config: TranspileConfig | None = None,
         config = TranspileConfig()
 
     var_infos, data_files = _analyze_variables(program, config)
+    demotable = _find_demotable_vars(program)
 
     w = _Writer()
 
@@ -1726,11 +1942,11 @@ def transpile(program: Program, config: TranspileConfig | None = None,
     _emit_helpers(w)
 
     # --- Data initialization methods ---
-    _emit_data_init(w, program, var_infos, config)
+    _emit_data_init(w, program, var_infos, config, demotable)
 
     # --- Procedures ---
     for proc_name, proc in program.procedures.items():
-        _emit_procedure(w, proc, program, var_infos, config)
+        _emit_procedure(w, proc, program, var_infos, config, demotable)
 
     # --- Actions ---
     for action_name, action in program.actions.items():
@@ -1886,7 +2102,7 @@ def _emit_helpers(w):
     w.line()
 
 
-def _emit_data_init(w, program, var_infos, config):
+def _emit_data_init(w, program, var_infos, config, demotable=set()):
     """Emit _init_data_XXX methods for each DATA block."""
     for block_name, data_block in program.data_blocks.items():
         w.line(f'def _init_data_{block_name.lower()}(self):')
@@ -1899,7 +2115,7 @@ def _emit_data_init(w, program, var_infos, config):
         w.line(f'self._initialized.add({block_name!r})')
 
         skip_vars = {n for n, vi in var_infos.items()
-                     if not vi.is_read or vi.is_const}
+                     if not vi.is_read or vi.is_const} | demotable
         expr_em = _ExprEmitter(var_infos, set())
         for stmt in data_block.statements:
             match stmt:
@@ -1946,9 +2162,10 @@ def _emit_data_init(w, program, var_infos, config):
         w.line()
 
 
-def _emit_procedure(w, proc, program, var_infos, config):
+def _emit_procedure(w, proc, program, var_infos, config, demotable=set()):
     """Emit a procedure as an async method."""
-    proc_locals = _collect_proc_locals(proc)
+    proc_locals = _collect_proc_locals(proc) | (
+        _collect_data_vars(proc, program) & demotable)
     data_vars = _collect_data_vars(proc, program)
 
     w.line(f'async def _proc_{proc.name.lower()}(self):')

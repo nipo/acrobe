@@ -1,0 +1,47 @@
+NOTE "CREATOR" "local demotion test";
+NOTE "DEVICE" "test";
+NOTE "STAPL_VERSION" "JESD71";
+NOTE "JAM_VERSION" "2.0";
+
+ACTION TEST = DO_TEST;
+
+DATA shared;
+
+' Loop variable: always written (by FOR) before read in every procedure
+INTEGER i;
+
+' Temp variable: always assigned before read
+INTEGER tmp;
+
+' Accumulator: read before write in proc2 (needs self)
+INTEGER acc;
+
+' Array used as temp: always assigned before read
+BOOLEAN buf[8];
+
+ENDDATA;
+
+PROCEDURE DO_TEST USES shared;
+acc = 0;
+CALL proc1;
+CALL proc2;
+EXPORT "acc", acc;
+EXIT 0;
+ENDPROC;
+
+PROCEDURE proc1 USES shared;
+tmp = 10;
+FOR i = 0 TO 2;
+acc = acc + tmp;
+NEXT i;
+ENDPROC;
+
+PROCEDURE proc2 USES shared;
+tmp = acc;
+FOR i = 0 TO 1;
+acc = acc + 1;
+NEXT i;
+EXPORT "tmp_in_proc2", tmp;
+ENDPROC;
+
+CRC 0;
