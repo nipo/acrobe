@@ -1,6 +1,6 @@
 """STAPL player for acrobe JTAG hardware.
 
-Implements StaplPlayer using a Tap instance for JTAG communication.
+Implements StaplPlayer using a raw JTAG interface (not a Tap).
 """
 
 import asyncio
@@ -11,18 +11,18 @@ from .interpreter import StaplPlayer
 
 
 class AcrobePlayer(StaplPlayer):
-    """StaplPlayer that drives hardware via an acrobe Tap.
+    """StaplPlayer that drives hardware via a raw JTAG interface.
 
-    Handles IR/DR scans with chain pre/post bypass padding.
-    Approximates TAP state transitions via run-test/idle cycles
-    (IRPAUSE, DRPAUSE mapped to IDLE — exact state support
-    requires Interface-level access).
+    Takes a JTAG interface (JtagMpsse or similar Batcher) directly,
+    NOT a Tap. The STAPL program handles its own IR/DR assembly
+    with pre/post chain bypass padding.
+
+    TAP state transitions are approximated via run-test/idle cycles
+    (IRPAUSE, DRPAUSE mapped to IDLE).
     """
 
-    def __init__(self, tap):
-        self._tap = tap
-        self._iface = tap._interface
-        self._current_ir = None
+    def __init__(self, interface):
+        self._iface = interface
         self._started = False
 
     async def ir_scan(self, length, tdi, pre, post, capture):
@@ -37,13 +37,7 @@ class AcrobePlayer(StaplPlayer):
             combined.append(post_data, post_bits)
 
         total = len(combined)
-        ir_val = int.from_bytes(tdi, 'little') & ((1 << length) - 1)
-        self._current_ir = ir_val
 
-        # IR scan: shift data into the IR register.
-        # Use the JTAG interface directly (CaptureIr + Shift).
-        # Ensure we're in RTI before the first scan (chain discovery
-        # may leave the TAP in RESET state).
         if not self._started:
             await self._iface.post(Run(1))
             self._started = True
@@ -51,9 +45,6 @@ class AcrobePlayer(StaplPlayer):
         shift_op = Shift(combined, read_tdo=capture)
         result = await self._iface.post(shift_op)
         await self._iface.post(Run(1))
-
-        # Invalidate Tap's IR cache (we shifted IR directly)
-        self._tap._current_ir = None
 
         if capture:
             tdo_all = bytes(result.tdo.data[:((total + 7) // 8)])
@@ -74,7 +65,6 @@ class AcrobePlayer(StaplPlayer):
 
         total = len(combined)
 
-        # DR scan: shift data into the DR register.
         await self._iface.post(CaptureDr())
         shift_op = Shift(combined, read_tdo=capture)
         result = await self._iface.post(shift_op)

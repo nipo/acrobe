@@ -269,7 +269,7 @@ def dump(filename, no_crc):
 @stapl.command(help="Run STAPL file against hardware")
 @click.argument('filename', type=click.Path(exists=True))
 @click.option('-r', '--root', 'root_path', required=True,
-              help='Path to TAP (e.g. tei-/jtag/0/0)')
+              help='Path to JTAG interface (e.g. tei-/jtag)')
 @click.option('-a', '--action', 'action_name', required=True,
               help='Action to execute')
 @click.option('--no-crc', is_flag=True, help="Skip CRC verification")
@@ -297,12 +297,24 @@ async def run(filename, root_path, action_name, no_crc, includes):
     hw_root = HwRoot()
     hw_root.add_enumerator(UsbEnumerator())
 
+    # Resolve to JTAG interface (e.g. tei-/jtag or ub3-/jtag).
+    # The STAPL player works at the raw interface level, not through
+    # a Tap — the STAPL program handles chain discovery itself.
+    from ..protocol.jtag import JtagInterface
     parts = root_path.strip('/').split('/')
     leaf = await hw_root.child_summon(*parts)
     if isinstance(leaf, Component):
         await leaf.start_tree()
+    if isinstance(leaf, JtagInterface):
+        interface = leaf._interface
+    elif hasattr(leaf, '_interface'):
+        interface = leaf._interface
+    else:
+        click.echo(f"Error: {root_path} resolved to {type(leaf).__name__}, "
+                    "expected a JTAG interface (e.g. adapter/jtag)", err=True)
+        raise SystemExit(1)
 
-    player = AcrobePlayer(leaf)
+    player = AcrobePlayer(interface)
     interp = Interpreter(prog)
 
     include_set = {s.upper() for s in includes} if includes else None
