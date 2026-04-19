@@ -7,7 +7,6 @@ DATA blocks with their parsed statements.
 
 from dataclasses import dataclass, field
 from .lexer import Statement, StaplSyntaxError
-from .aca import decompress as aca_decompress
 
 
 # --- Expression AST ---
@@ -65,13 +64,40 @@ class FuncCall(Expr):
     arg: Expr
 
 
-# --- Boolean literal (already decoded to bytes) ---
+# --- Boolean literal ---
 
-@dataclass
 class BooleanLiteral(Expr):
-    """A literal Boolean array value, decoded to a bitstring."""
-    data: bytes
-    bit_count: int
+    """A literal Boolean array value.
+
+    Supports lazy decoding: if _raw_text and _raw_format are set,
+    the data is decoded on first access via the `data` property.
+    This avoids expensive ACA decompression of multi-megabyte arrays
+    at parse time.
+    """
+    __match_args__ = ('data', 'bit_count')
+
+    def __init__(self, *, _data=None, bit_count, _raw_text=None, _raw_format=None):
+        self._data = _data
+        self.bit_count = bit_count
+        self._raw_text = _raw_text
+        self._raw_format = _raw_format
+
+    @property
+    def data(self) -> bytes:
+        if self._data is None:
+            self._data = self._decode()
+            self._raw_text = None  # free the source text
+        return self._data
+
+    def _decode(self) -> bytes:
+        if self._raw_format == 'aca':
+            from .aca import decompress as aca_decompress
+            return bytes(aca_decompress(self._raw_text))
+        elif self._raw_format == 'hex':
+            return bytes(_decode_hex_literal(self._raw_text))
+        elif self._raw_format == 'bin':
+            return bytes(_decode_binary_literal(self._raw_text))
+        raise ValueError(f"Unknown raw format: {self._raw_format}")
 
 
 # --- Parsed Statements ---
@@ -959,14 +985,9 @@ def _parse_boolean_literal_or_expr(text: str) -> Expr:
         return parse_expr(text)
 
 
-def _parse_binary_literal(text: str) -> BooleanLiteral:
-    """Parse binary Boolean literal (after #). LSB is rightmost."""
-    # Strip whitespace within the literal
+def _decode_binary_literal(text: str) -> bytes:
+    """Decode binary Boolean literal text to bytes. LSB is rightmost."""
     text = ''.join(text.split())
-    bit_count = len(text)
-    # Convert to bytes, LSB first
-    # text is MSB-first (leftmost = highest index)
-    # Reverse to get LSB-first bit order
     bits = text[::-1]
     data = bytearray()
     for i in range(0, len(bits), 8):
@@ -978,32 +999,66 @@ def _parse_binary_literal(text: str) -> BooleanLiteral:
             elif b != '0':
                 raise ValueError(f"Invalid binary digit: {b!r}")
         data.append(val)
-    return BooleanLiteral(data=bytes(data), bit_count=bit_count)
+    return bytes(data)
 
 
-def _parse_hex_literal(text: str) -> BooleanLiteral:
-    """Parse hex Boolean literal (after $). LSB of rightmost digit = bit 0."""
+def _decode_hex_literal(text: str) -> bytes:
+    """Decode hex Boolean literal text to bytes. LSB-first."""
     text = ''.join(text.split())
-    bit_count = len(text) * 4
-    # Convert hex string to bytes, LSB-first
-    # Rightmost hex digit is lowest bits
-    # Reverse the hex string to process LSB first
     hex_reversed = text[::-1]
     data = bytearray()
     for i in range(0, len(hex_reversed), 2):
         pair = hex_reversed[i:i+2]
         if len(pair) == 1:
             pair = pair + '0'
-        # pair[0] is low nibble, pair[1] is high nibble
         val = int(pair[0], 16) | (int(pair[1], 16) << 4)
         data.append(val)
-    return BooleanLiteral(data=bytes(data), bit_count=bit_count)
+    return bytes(data)
+
+
+# Threshold: literals larger than this are decoded lazily
+_LAZY_THRESHOLD = 4096
+
+
+def _parse_binary_literal(text: str) -> BooleanLiteral:
+    """Parse binary Boolean literal (after #)."""
+    clean = ''.join(text.split())
+    bit_count = len(clean)
+    if len(clean) > _LAZY_THRESHOLD:
+        return BooleanLiteral(_data=None, bit_count=bit_count,
+                              _raw_text=clean, _raw_format='bin')
+    return BooleanLiteral(_data=_decode_binary_literal(clean),
+                          bit_count=bit_count)
+
+
+def _parse_hex_literal(text: str) -> BooleanLiteral:
+    """Parse hex Boolean literal (after $)."""
+    clean = ''.join(text.split())
+    bit_count = len(clean) * 4
+    if len(clean) > _LAZY_THRESHOLD:
+        return BooleanLiteral(_data=None, bit_count=bit_count,
+                              _raw_text=clean, _raw_format='hex')
+    return BooleanLiteral(_data=_decode_hex_literal(clean),
+                          bit_count=bit_count)
 
 
 def _parse_aca_literal(text: str) -> BooleanLiteral:
-    """Parse ACA-compressed Boolean literal (after @)."""
-    data = aca_decompress(text)
-    return BooleanLiteral(data=bytes(data), bit_count=len(data) * 8)
+    """Parse ACA-compressed Boolean literal (after @).
+
+    Always lazy — ACA decompression is expensive (bit-by-bit
+    decoding of potentially megabytes of data).
+    """
+    # Strip whitespace but keep the text for lazy decoding
+    clean = ''.join(text.split())
+    # We don't know the decompressed size without reading the header,
+    # so use 0 and let the decoder set it.
+    # Actually, the first 4 bytes of the decoded base64 are the length.
+    # Read just enough to get the length (8 base64 chars = 6 bytes > 4 needed).
+    from .aca import _text_to_bits
+    header = _text_to_bits(clean[:8])
+    length = int.from_bytes(header[:4], 'little')
+    return BooleanLiteral(_data=None, bit_count=length * 8,
+                          _raw_text=clean, _raw_format='aca')
 
 
 def _parse_scan_stmt(rest: str, stmt: Statement, cls):
