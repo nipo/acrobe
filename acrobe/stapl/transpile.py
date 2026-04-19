@@ -52,6 +52,8 @@ class VarInfo:
     scope: str  # 'data' | 'local'
     data_block: str | None  # DATA block name, if scope == 'data'
     is_read: bool = True  # False if variable is never read (dead)
+    is_const: bool = False  # True if scalar int, has init, never reassigned
+    const_value: int | None = None
 
 
 # ============================================================
@@ -847,6 +849,31 @@ def _analyze_variables(program, config):
     for vi in var_infos.values():
         vi.is_read = vi.name in read_vars
 
+    # Mark constants: DATA-scope scalar integers with literal init,
+    # never reassigned in any procedure
+    written_in_procs = set()
+    for proc in program.procedures.values():
+        for stmt in proc.statements:
+            if isinstance(stmt, AssignStmt) and stmt.target in var_infos:
+                written_in_procs.add(stmt.target)
+            elif isinstance(stmt, ForStmt) and stmt.var in var_infos:
+                written_in_procs.add(stmt.var)
+            elif isinstance(stmt, PopStmt) and stmt.target in var_infos:
+                written_in_procs.add(stmt.target)
+
+    for vi in var_infos.values():
+        if (vi.scope == 'data' and vi.vtype == 'integer'
+                and not vi.is_array and vi.has_init
+                and vi.name not in written_in_procs and vi.is_read):
+            # Find the literal init value
+            for block in program.data_blocks.values():
+                for stmt in block.statements:
+                    if (isinstance(stmt, IntegerDecl) and stmt.name == vi.name
+                            and stmt.init and isinstance(stmt.init[0], IntLiteral)):
+                        vi.is_const = True
+                        vi.const_value = stmt.init[0].value
+                        break
+
     return var_infos, data_files
 
 
@@ -1583,6 +1610,17 @@ def transpile(program: Program, config: TranspileConfig | None = None,
     w.line('DATA_DIR = Path(__file__).parent / "data"')
     w.line()
 
+    # --- Constants (DATA vars: scalar int, never reassigned) ---
+    constants = [(vi.name, vi.const_value) for vi in var_infos.values()
+                 if vi.is_const]
+    if constants:
+        for name, val in sorted(constants):
+            if val > 255:
+                w.line(f'{name} = 0x{val:X}')
+            else:
+                w.line(f'{name} = {val}')
+        w.line()
+
     # --- Constructor ---
     _emit_constructor(w)
 
@@ -1762,12 +1800,13 @@ def _emit_data_init(w, program, var_infos, config):
         w.dedent()
         w.line(f'self._initialized.add({block_name!r})')
 
-        dead_vars = {n for n, vi in var_infos.items() if not vi.is_read}
+        skip_vars = {n for n, vi in var_infos.items()
+                     if not vi.is_read or vi.is_const}
         expr_em = _ExprEmitter(var_infos, set())
         for stmt in data_block.statements:
             match stmt:
-                case IntegerDecl(name=n) | BooleanDecl(name=n) if n in dead_vars:
-                    pass  # dead variable, skip
+                case IntegerDecl(name=n) | BooleanDecl(name=n) if n in skip_vars:
+                    pass  # dead or constant variable, skip init
 
                 case IntegerDecl(name=n, size=sz, init=init):
                     if sz is not None:
