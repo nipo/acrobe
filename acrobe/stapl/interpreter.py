@@ -367,14 +367,7 @@ class Interpreter:
         if decl.size is not None:
             size = self._eval_int(decl.size)
             if decl.init:
-                # JESD71: INTEGER A[n] = v(n-1), v(n-2), ..., v(1), v(0)
-                # Init values are listed from highest index to lowest.
-                vals = [self._eval_int(v) for v in decl.init]
-                vals.reverse()
-                # Pad to declared size if fewer values provided
-                while len(vals) < size:
-                    vals.append(0)
-                self._integers[decl.name] = vals
+                self._integers[decl.name] = [self._eval_int(v) for v in decl.init]
             else:
                 self._integers[decl.name] = [0] * size
         else:
