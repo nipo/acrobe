@@ -365,27 +365,44 @@ def _negate_expr(expr: Expr) -> Expr:
 
 
 def _has_unresolved_gotos(nodes):
-    """Check if any structured IR nodes contain unresolved GotoStmt."""
+    """Check if any structured IR nodes contain unresolved GotoStmt.
+
+    Also checks for SBreak/SContinue inside nested loops where they
+    might not exit to the right level (the structured recovery may
+    have mapped a GOTO-to-procedure-exit as a simple break, but if
+    the break is inside nested while loops, it only exits the
+    innermost one).
+    """
+    return _check_gotos(nodes, loop_depth=0)
+
+
+def _check_gotos(nodes, loop_depth):
     for node in nodes:
         match node:
             case SWhileTrue(body=body):
-                if _has_unresolved_gotos(body):
+                if _check_gotos(body, loop_depth + 1):
                     return True
             case SWhile(body=body):
-                if _has_unresolved_gotos(body):
+                if _check_gotos(body, loop_depth + 1):
                     return True
             case SIf(then_body=body, else_body=eb):
-                if _has_unresolved_gotos(body):
+                if _check_gotos(body, loop_depth):
                     return True
-                if eb and _has_unresolved_gotos(eb):
+                if eb and _check_gotos(eb, loop_depth):
                     return True
             case SFor(body=body):
-                if _has_unresolved_gotos(body):
+                if _check_gotos(body, loop_depth + 1):
                     return True
             case SStmt(stmt=s):
                 if isinstance(s, GotoStmt):
                     return True
                 if isinstance(s, IfStmt) and isinstance(s.then_stmt, GotoStmt):
+                    return True
+            case SBreak():
+                # A break inside depth > 1 means it was a GOTO that
+                # crossed a loop boundary — the break only exits the
+                # innermost loop, not the target scope.
+                if loop_depth > 1:
                     return True
     return False
 
@@ -851,7 +868,9 @@ class _ExprEmitter:
                 return f'({self.int_expr(a)} or {self.int_expr(b)})'
 
             case BinOp(op=op, left=a, right=b):
-                return f'({self.int_expr(a)} {op} {self.int_expr(b)})'
+                # STAPL has integer-only arithmetic; / is integer division
+                py_op = '//' if op == '/' else op
+                return f'({self.int_expr(a)} {py_op} {self.int_expr(b)})'
 
             case FuncCall(name='ABS', arg=a):
                 return f'abs({self.int_expr(a)})'
@@ -1754,7 +1773,6 @@ def _emit_cli(w, program):
     w.dedent()
     w.line('await leaf.start_tree()')
     w.line('interface = leaf._interface')
-    w.dedent()
     w.line()
     w.line('prog = TranspiledProgram(interface)')
     w.line()

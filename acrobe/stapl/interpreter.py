@@ -41,8 +41,8 @@ class BitArray:
     __slots__ = ('_data', '_size')
 
     def __init__(self, size: int, data: bytes | None = None):
-        self._size = size
-        byte_count = (size + 7) // 8
+        self._size = int(size)
+        byte_count = (self._size + 7) // 8
         if data is not None:
             self._data = bytearray(data[:byte_count])
             if len(self._data) < byte_count:
