@@ -1,0 +1,39 @@
+NOTE "CREATOR" "array order test";
+NOTE "DEVICE" "test";
+NOTE "STAPL_VERSION" "JESD71";
+NOTE "JAM_VERSION" "2.0";
+
+ACTION TEST = DO_TEST;
+
+PROCEDURE DO_TEST;
+
+INTEGER a[5] = 10, 20, 30, 40, 50;
+
+PRINT "a[0] = ", a[0];
+PRINT "a[1] = ", a[1];
+PRINT "a[2] = ", a[2];
+PRINT "a[3] = ", a[3];
+PRINT "a[4] = ", a[4];
+
+' Test A61-like pattern
+INTEGER b[2] = 56946909, 1;
+PRINT "b[0] = ", b[0];
+PRINT "b[1] = ", b[1];
+
+' Test loop with array as count
+PRINT "Loop count = b[0]: ";
+INTEGER count = 0;
+IF (b[0] > 100) THEN PRINT "b[0] is large (", b[0], "), NOT a count";
+IF (b[0] <= 100) THEN PRINT "b[0] is small (", b[0], "), could be a count";
+PRINT "b[1] = ", b[1];
+IF (b[1] > 100) THEN PRINT "b[1] is large (", b[1], "), NOT a count";
+IF (b[1] <= 100) THEN PRINT "b[1] is small (", b[1], "), could be a count";
+
+EXPORT "a0", a[0];
+EXPORT "a4", a[4];
+EXPORT "b0", b[0];
+EXPORT "b1", b[1];
+
+EXIT 0;
+ENDPROC;
+CRC 0;

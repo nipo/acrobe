@@ -1,0 +1,69 @@
+NOTE "CREATOR" "bool order test";
+NOTE "DEVICE" "test";
+NOTE "STAPL_VERSION" "JESD71";
+NOTE "JAM_VERSION" "2.0";
+
+ACTION TEST = DO_TEST;
+
+PROCEDURE DO_TEST;
+
+' Test hex literal ordering
+BOOLEAN bh[8] = $A5;
+PRINT "hex $A5:";
+PRINT " bh[0]=", bh[0];
+PRINT " bh[1]=", bh[1];
+PRINT " bh[2]=", bh[2];
+PRINT " bh[3]=", bh[3];
+PRINT " bh[4]=", bh[4];
+PRINT " bh[5]=", bh[5];
+PRINT " bh[6]=", bh[6];
+PRINT " bh[7]=", bh[7];
+
+' Test binary literal ordering
+BOOLEAN bb[4] = #1010;
+PRINT "bin #1010:";
+PRINT " bb[0]=", bb[0];
+PRINT " bb[1]=", bb[1];
+PRINT " bb[2]=", bb[2];
+PRINT " bb[3]=", bb[3];
+
+' Test 16-bit hex
+BOOLEAN b16[16] = $CAFE;
+PRINT "hex $CAFE:";
+PRINT " b16[0]=", b16[0];
+PRINT " b16[4]=", b16[4];
+PRINT " b16[8]=", b16[8];
+PRINT " b16[12]=", b16[12];
+PRINT " INT(b16[])=";
+EXPORT "b16_int", INT(b16[]);
+
+' Test subrange assignment direction
+BOOLEAN src[8] = $A5;
+BOOLEAN dst[4];
+dst[3..0] = src[7..4];
+PRINT "src=$A5 dst[3..0]=src[7..4]:";
+PRINT " dst[0]=", dst[0];
+PRINT " dst[1]=", dst[1];
+PRINT " dst[2]=", dst[2];
+PRINT " dst[3]=", dst[3];
+EXPORT "dst_0", dst[0];
+EXPORT "dst_1", dst[1];
+EXPORT "dst_2", dst[2];
+EXPORT "dst_3", dst[3];
+
+' Test reversed subrange
+BOOLEAN dst2[4];
+dst2[0..3] = src[7..4];
+PRINT "dst2[0..3]=src[7..4] (reversed target):";
+PRINT " dst2[0]=", dst2[0];
+PRINT " dst2[1]=", dst2[1];
+PRINT " dst2[2]=", dst2[2];
+PRINT " dst2[3]=", dst2[3];
+EXPORT "dst2_0", dst2[0];
+EXPORT "dst2_1", dst2[1];
+EXPORT "dst2_2", dst2[2];
+EXPORT "dst2_3", dst2[3];
+
+EXIT 0;
+ENDPROC;
+CRC 0;
