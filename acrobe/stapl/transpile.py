@@ -1674,10 +1674,10 @@ class _StmtEmitter:
         w.line(f'_block = {entry!r}')
         w.line('while _block is not None:')
         w.indent()
-        first = True
+        w.line('match _block:')
+        w.indent()
         for block in blocks:
-            kw = 'if' if first else 'elif'
-            w.line(f'{kw} _block == {block.name!r}:')
+            w.line(f'case {block.name!r}:')
             w.indent()
             lines_before = len(w._lines)
             for stmt in block.stmts:
@@ -1727,7 +1727,7 @@ class _StmtEmitter:
                 case BlockReturn():
                     w.line('_block = None')
             w.dedent()
-            first = False
+        w.dedent()
         w.dedent()
         self._in_dispatch = old_in_dispatch
 
