@@ -98,30 +98,42 @@ def _preprocess_for_next(stmts, labels):
     """Extract FOR/NEXT regions and adjust label indices.
 
     Returns (processed_stmts, adjusted_labels).
-    Labels inside FOR/NEXT regions cause an assertion failure.
+    FOR/NEXT pairs that contain labels are left as raw statements
+    (the dispatch will handle them). Inner FOR/NEXT pairs that don't
+    contain labels are still extracted even if their outer FOR does.
     """
-    # Find outermost FOR/NEXT pairs
-    pairs = {}  # for_idx → next_idx (outermost only)
-    depth = 0
-    start = None
+    # Find ALL FOR/NEXT pairs at every nesting level using a stack
+    all_pairs = {}  # for_idx → next_idx
+    stack = []
     for i, stmt in enumerate(stmts):
         if isinstance(stmt, ForStmt):
-            if depth == 0:
-                start = i
-            depth += 1
+            stack.append(i)
         elif isinstance(stmt, NextStmt):
-            depth -= 1
-            if depth == 0:
-                pairs[start] = i
+            if stack:
+                for_idx = stack.pop()
+                all_pairs[for_idx] = i
 
-    # Remove FOR/NEXT pairs that contain labels (can't be structured)
+    # Remove pairs that DIRECTLY contain labels
+    # (a label at index L is "inside" FOR[f]..NEXT[n] if f < L <= n)
+    label_indices = set(labels.values())
     tainted = set()
-    for label, idx in labels.items():
-        for f_start, f_end in pairs.items():
+    for f_start, f_end in all_pairs.items():
+        for idx in label_indices:
             if f_start < idx <= f_end:
                 tainted.add(f_start)
+                break
     for t in tainted:
-        del pairs[t]
+        del all_pairs[t]
+
+    # Only keep outermost non-tainted pairs for top-level extraction.
+    # Inner pairs will be extracted recursively by _extract_for_regions.
+    outermost = {}
+    sorted_pairs = sorted(all_pairs.items())
+    skip_until = -1
+    for f_start, f_end in sorted_pairs:
+        if f_start > skip_until:
+            outermost[f_start] = f_end
+            skip_until = f_end
 
     # Build processed list with old→new index mapping
     processed = []
@@ -129,8 +141,8 @@ def _preprocess_for_next(stmts, labels):
     i = 0
     while i < len(stmts):
         old_to_new[i] = len(processed)
-        if i in pairs:
-            next_idx = pairs[i]
+        if i in outermost:
+            next_idx = outermost[i]
             body = _extract_for_regions(stmts[i + 1:next_idx])
             processed.append(ForRegion(stmts[i], body, stmts[next_idx]))
             for j in range(i + 1, next_idx + 1):
