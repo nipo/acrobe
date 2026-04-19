@@ -28,6 +28,36 @@ from .parser import (
 
 
 # ============================================================
+# Helpers
+# ============================================================
+
+def _try_const_fold(expr: Expr) -> int | None:
+    """Try to constant-fold an expression to an integer. Returns None if not constant."""
+    match expr:
+        case IntLiteral(value=v):
+            return v
+        case UnaryOp(op='-', operand=inner):
+            v = _try_const_fold(inner)
+            return -v if v is not None else None
+        case UnaryOp(op='~', operand=inner):
+            v = _try_const_fold(inner)
+            return ~v if v is not None else None
+        case BinOp(op=op, left=l, right=r):
+            lv, rv = _try_const_fold(l), _try_const_fold(r)
+            if lv is None or rv is None:
+                return None
+            match op:
+                case '+': return lv + rv
+                case '-': return lv - rv
+                case '*': return lv * rv
+                case '/': return lv // rv if rv else None
+                case '%': return lv % rv if rv else None
+                case _: return None
+        case _:
+            return None
+
+
+# ============================================================
 # Configuration
 # ============================================================
 
@@ -860,18 +890,31 @@ def _analyze_variables(program, config):
                 written_in_procs.add(stmt.var)
             elif isinstance(stmt, PopStmt) and stmt.target in var_infos:
                 written_in_procs.add(stmt.target)
+            # DRSCAN/IRSCAN CAPTURE writes to the capture array
+            elif isinstance(stmt, (DrScanStmt, IrScanStmt)):
+                if stmt.capture is not None:
+                    cap = stmt.capture
+                    name = getattr(cap, 'name', None)
+                    if name and name in var_infos:
+                        written_in_procs.add(name)
 
     for vi in var_infos.values():
         if (vi.scope == 'data' and vi.vtype == 'integer'
-                and not vi.is_array and vi.has_init
+                and vi.has_init
                 and vi.name not in written_in_procs and vi.is_read):
-            # Find the literal init value
+            # Check if all init values are constant-foldable
             for block in program.data_blocks.values():
                 for stmt in block.statements:
                     if (isinstance(stmt, IntegerDecl) and stmt.name == vi.name
-                            and stmt.init and isinstance(stmt.init[0], IntLiteral)):
-                        vi.is_const = True
-                        vi.const_value = stmt.init[0].value
+                            and stmt.init):
+                        folded = [_try_const_fold(v) for v in stmt.init]
+                        if all(v is not None for v in folded):
+                            if vi.is_array:
+                                vi.is_const = True
+                                vi.const_value = list(reversed(folded))
+                            else:
+                                vi.is_const = True
+                                vi.const_value = folded[0]
                         break
 
     return var_infos, data_files
@@ -967,6 +1010,53 @@ class _ExprEmitter:
         vi = self._var_infos.get(name)
         return vi is not None and vi.vtype == 'boolean' and vi.is_array
 
+    def _exclusive_end(self, expr):
+        """Emit expr + 1 with simplification for slice exclusive end."""
+        match expr:
+            case BinOp(op='-', left=a, right=IntLiteral(value=1)):
+                return self.int_expr(a)
+            case IntLiteral(value=v):
+                return self.int_expr(IntLiteral(value=v + 1))
+            case _:
+                return f'{self.int_expr(expr)} + 1'
+
+    def _exclusive_end_rev(self, expr):
+        """Emit expr - 1 with simplification for reversed slice stop."""
+        match expr:
+            case BinOp(op='+', left=a, right=IntLiteral(value=1)):
+                return self.int_expr(a)
+            case IntLiteral(value=0):
+                return None  # will need special handling
+            case IntLiteral(value=v):
+                return self.int_expr(IntLiteral(value=v - 1))
+            case _:
+                return f'{self.int_expr(expr)} - 1'
+
+    def slice_expr(self, high, low):
+        """Emit slice for a[high..low] subrange (STAPL convention).
+
+        Returns a string like '[0:10]' or '[3::-1]'.
+        Uses _try_const_fold to determine direction statically.
+        Falls back to get_subrange() for dynamic cases.
+        """
+        h_val = _try_const_fold(high)
+        l_val = _try_const_fold(low)
+
+        if h_val is not None and l_val is not None:
+            if h_val >= l_val:
+                # Ascending: a[low:high+1]
+                return f'[{self.int_expr(low)}:{self._exclusive_end(high)}]'
+            else:
+                # Reversed: a[low:high-1:-1] (or a[low::-1] when high=0)
+                stop = self._exclusive_end_rev(high)
+                if stop is None:
+                    return f'[{self.int_expr(low)}::-1]'
+                return f'[{self.int_expr(low)}:{stop}:-1]'
+        else:
+            # Dynamic: cannot determine direction at compile time
+            # Emit ascending and hope for the best (all real STAPL uses ascending)
+            return f'[{self.int_expr(low)}:{self._exclusive_end(high)}]'
+
     def int_expr(self, expr):
         """Emit expression that evaluates to int."""
         match expr:
@@ -981,13 +1071,11 @@ class _ExprEmitter:
             case ArrayIndex(name=n, index=idx):
                 arr = self._ref(n)
                 idx_s = self.int_expr(idx)
-                if self._is_boolean_array(n):
-                    return f'{arr}.get_bit({idx_s})'
                 return f'{arr}[{idx_s}]'
 
             case ArraySubrange(name=n, high=h, low=l):
                 arr = self._ref(n)
-                return f'{arr}.get_subrange({self.int_expr(h)}, {self.int_expr(l)}).to_int()'
+                return f'{arr}{self.slice_expr(h, l)}.to_int()'
 
             case ArrayWhole(name=n):
                 arr = self._ref(n)
@@ -1039,7 +1127,7 @@ class _ExprEmitter:
         match expr:
             case ArraySubrange(name=n, high=h, low=l):
                 arr = self._ref(n)
-                return f'{arr}.get_subrange({self.int_expr(h)}, {self.int_expr(l)}).to_int()'
+                return f'{arr}{self.slice_expr(h, l)}.to_int()'
             case ArrayWhole(name=n):
                 return f'{self._ref(n)}.to_int()'
             case VarRef(name=n):
@@ -1057,7 +1145,7 @@ class _ExprEmitter:
 
             case ArraySubrange(name=n, high=h, low=l):
                 arr = self._ref(n)
-                return f'{arr}.get_subrange({self.int_expr(h)}, {self.int_expr(l)})'
+                return f'{arr}{self.slice_expr(h, l)}'
 
             case ArrayWhole(name=n):
                 return self._ref(n)
@@ -1295,14 +1383,10 @@ class _StmtEmitter:
                 ref = t if t in self._proc_locals else f'self.{t}'
                 if h is not None and l is not None:
                     # Subrange assignment
-                    w.line(f'{ref}.set_subrange({e.int_expr(h)}, {e.int_expr(l)}, '
-                           f'{e.bits_expr(v)})')
+                    w.line(f'{ref}{e.slice_expr(h, l)} = '
+                           f'{e.bits_expr(v)}')
                 elif idx is not None:
-                    vi = self._var_infos.get(t)
-                    if vi and vi.vtype == 'boolean' and vi.is_array:
-                        w.line(f'{ref}.set_bit({e.int_expr(idx)}, {e.int_expr(v)})')
-                    else:
-                        w.line(f'{ref}[{e.int_expr(idx)}] = {e.int_expr(v)}')
+                    w.line(f'{ref}[{e.int_expr(idx)}] = {e.int_expr(v)}')
                 else:
                     vi = self._var_infos.get(t)
                     if vi and vi.vtype == 'boolean' and vi.is_array:
@@ -1487,9 +1571,8 @@ class _StmtEmitter:
         match capture_expr:
             case ArraySubrange(name=n, high=h, low=l):
                 ref = n if n in self._proc_locals else f'self.{n}'
-                w.line(f'{ref}.set_subrange({self._expr.int_expr(h)}, '
-                       f'{self._expr.int_expr(l)}, '
-                       f'BitArray({length_s}, _tdo))')
+                w.line(f'{ref}{self._expr.slice_expr(h, l)} = '
+                       f'BitArray({length_s}, _tdo)')
             case ArrayWhole(name=n):
                 ref = n if n in self._proc_locals else f'self.{n}'
                 w.line(f'{ref} = BitArray({length_s}, _tdo)')
@@ -1542,7 +1625,7 @@ def _collect_data_vars(proc, program):
     """Collect variable names from DATA blocks that a procedure USES."""
     data_vars = set()
     for data_name in proc.uses:
-        data_block = program.data_blocks.get(data_name)
+        data_block = program.data_blocks.get(data_name.upper())
         if data_block:
             for stmt in data_block.statements:
                 if isinstance(stmt, (IntegerDecl, BooleanDecl)):
@@ -1610,15 +1693,18 @@ def transpile(program: Program, config: TranspileConfig | None = None,
     w.line('DATA_DIR = Path(__file__).parent / "data"')
     w.line()
 
-    # --- Constants (DATA vars: scalar int, never reassigned) ---
-    constants = [(vi.name, vi.const_value) for vi in var_infos.values()
-                 if vi.is_const]
+    # --- Constants (DATA int vars, never reassigned) ---
+    constants = [(vi.name, vi.const_value, vi.is_array)
+                 for vi in var_infos.values() if vi.is_const]
     if constants:
-        for name, val in sorted(constants):
-            if val > 255:
-                w.line(f'{name} = 0x{val:X}')
+        def _fmt_int(v):
+            return f'0x{v:X}' if isinstance(v, int) and abs(v) > 255 else str(v)
+        for name, val, is_array in sorted(constants):
+            if is_array:
+                vals_str = ', '.join(_fmt_int(v) for v in val)
+                w.line(f'{name} = [{vals_str}]')
             else:
-                w.line(f'{name} = {val}')
+                w.line(f'{name} = {_fmt_int(val)}')
         w.line()
 
     # --- Constructor ---
@@ -1859,8 +1945,9 @@ def _emit_procedure(w, proc, program, var_infos, config):
 
     # Initialize DATA blocks
     for data_name in proc.uses:
-        if data_name in program.data_blocks:
-            w.line(f'self._init_data_{data_name.lower()}()')
+        dn = data_name.upper()
+        if dn in program.data_blocks:
+            w.line(f'self._init_data_{dn.lower()}()')
 
     # Build control flow
     stmts = proc.statements
@@ -1925,7 +2012,7 @@ def _emit_cli(w, program):
     action_help = ', '.join(action_names) if action_names else 'none'
 
     w.line('@click.command()')
-    w.line("@click.option('-r', '--root', 'root_path', required=True,")
+    w.line("@click.option('-r', '--root', 'root_path',")
     w.line("              help='Path to JTAG interface (e.g. tei-/jtag)')")
     w.line("@click.option('-a', '--action', 'action_name', default=None,")
     w.line(f"              help='Action to execute (available: {action_help})')")
@@ -1941,6 +2028,8 @@ def _emit_cli(w, program):
     w.line('hw_root = HwRoot()')
     w.line('hw_root.add_enumerator(UsbEnumerator())')
     w.line()
+    w.line("if root_path:")
+    w.indent()
     w.line("parts = root_path.strip('/').split('/')")
     w.line('leaf = await hw_root.child_summon(*parts)')
     w.line('if not isinstance(leaf, JtagInterface):')
@@ -1950,6 +2039,11 @@ def _emit_cli(w, program):
     w.dedent()
     w.line('await leaf.start_tree()')
     w.line('interface = leaf._interface')
+    w.dedent()
+    w.line("else:")
+    w.indent()
+    w.line("interface = None")
+    w.dedent()
     w.line()
     w.line('prog = TranspiledProgram(interface)')
     w.line()
