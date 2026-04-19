@@ -1203,13 +1203,27 @@ def _analyze_variables(program, config):
     for vi in var_infos.values():
         vi.is_read = vi.name in read_vars
 
-    # Mark constants: DATA-scope scalar integers with literal init,
-    # never reassigned in any procedure
+    # Mark constants: DATA-scope variables with literal init that are
+    # either never reassigned, or only reassigned the same constant value.
+    #
+    # written_in_procs: set of vars that are written with a non-constant
+    # or different-from-init value (these can't be constants).
+    # We defer the init-value comparison until we know the init value.
     written_in_procs = set()
+    # For vars written only with constant values, track those values
+    proc_write_values = {}  # name -> set of folded values (or None if non-const)
     for proc in program.procedures.values():
         for stmt in proc.statements:
             if isinstance(stmt, AssignStmt) and stmt.target in var_infos:
-                written_in_procs.add(stmt.target)
+                name = stmt.target
+                if stmt.index is None and stmt.high is None:
+                    # Whole-variable assignment — try to fold
+                    val = _try_const_fold(stmt.value)
+                    if val is not None:
+                        proc_write_values.setdefault(name, set()).add(val)
+                        continue
+                # Indexed/subrange/non-constant assignment
+                written_in_procs.add(name)
             elif isinstance(stmt, ForStmt) and stmt.var in var_infos:
                 written_in_procs.add(stmt.var)
             elif isinstance(stmt, PopStmt) and stmt.target in var_infos:
@@ -1226,7 +1240,6 @@ def _analyze_variables(program, config):
         if (vi.scope == 'data' and vi.has_init
                 and vi.name not in written_in_procs and vi.is_read):
             if vi.vtype == 'integer':
-                # Check if all init values are constant-foldable
                 for block in program.data_blocks.values():
                     for stmt in block.statements:
                         if (isinstance(stmt, IntegerDecl) and stmt.name == vi.name
@@ -1234,14 +1247,16 @@ def _analyze_variables(program, config):
                             folded = [_try_const_fold(v) for v in stmt.init]
                             if all(v is not None for v in folded):
                                 if vi.is_array:
-                                    vi.is_const = True
-                                    vi.const_value = list(reversed(folded))
+                                    init_val = list(reversed(folded))
                                 else:
+                                    init_val = folded[0]
+                                # Check proc writes match init value
+                                write_vals = proc_write_values.get(vi.name)
+                                if write_vals is None or write_vals == {init_val}:
                                     vi.is_const = True
-                                    vi.const_value = folded[0]
+                                    vi.const_value = init_val
                             break
             elif vi.vtype == 'boolean' and not vi.is_array:
-                # Boolean scalars with literal init
                 for block in program.data_blocks.values():
                     for stmt in block.statements:
                         if (isinstance(stmt, BooleanDecl) and stmt.name == vi.name
@@ -1249,8 +1264,10 @@ def _analyze_variables(program, config):
                                 and not isinstance(stmt.init, BooleanLiteral)):
                             val = _try_const_fold(stmt.init)
                             if val is not None:
-                                vi.is_const = True
-                                vi.const_value = val
+                                write_vals = proc_write_values.get(vi.name)
+                                if write_vals is None or write_vals == {val}:
+                                    vi.is_const = True
+                                    vi.const_value = val
                             break
 
     # Prune data files for dead variables
@@ -1526,7 +1543,8 @@ class _StmtEmitter:
 
     def __init__(self, w, expr_em, var_infos, proc_locals, program):
         self._w = w
-        self._dead_vars = {n for n, vi in var_infos.items() if not vi.is_read}
+        self._dead_vars = {n for n, vi in var_infos.items()
+                           if not vi.is_read or vi.is_const}
         self._expr = expr_em
         self._var_infos = var_infos
         self._proc_locals = proc_locals
