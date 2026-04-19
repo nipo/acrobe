@@ -31,19 +31,29 @@ from .parser import (
 # Helpers
 # ============================================================
 
-def _try_const_fold(expr: Expr) -> int | None:
-    """Try to constant-fold an expression to an integer. Returns None if not constant."""
+def _try_const_fold(expr: Expr, constants: dict[str, int] | None = None) -> int | None:
+    """Try to constant-fold an expression to an integer. Returns None if not constant.
+
+    If constants is provided, variable references to known constants
+    are resolved.
+    """
     match expr:
         case IntLiteral(value=v):
             return v
+        case VarRef(name=n) if constants is not None and n in constants:
+            return constants[n]
         case UnaryOp(op='-', operand=inner):
-            v = _try_const_fold(inner)
+            v = _try_const_fold(inner, constants)
             return -v if v is not None else None
         case UnaryOp(op='~', operand=inner):
-            v = _try_const_fold(inner)
+            v = _try_const_fold(inner, constants)
             return ~v if v is not None else None
+        case UnaryOp(op='!', operand=inner):
+            v = _try_const_fold(inner, constants)
+            return int(not v) if v is not None else None
         case BinOp(op=op, left=l, right=r):
-            lv, rv = _try_const_fold(l), _try_const_fold(r)
+            lv = _try_const_fold(l, constants)
+            rv = _try_const_fold(r, constants)
             if lv is None or rv is None:
                 return None
             match op:
@@ -52,6 +62,19 @@ def _try_const_fold(expr: Expr) -> int | None:
                 case '*': return lv * rv
                 case '/': return lv // rv if rv else None
                 case '%': return lv % rv if rv else None
+                case '&': return lv & rv
+                case '|': return lv | rv
+                case '^': return lv ^ rv
+                case '==': return int(lv == rv)
+                case '!=': return int(lv != rv)
+                case '>': return int(lv > rv)
+                case '<': return int(lv < rv)
+                case '>=': return int(lv >= rv)
+                case '<=': return int(lv <= rv)
+                case '&&': return int(bool(lv) and bool(rv))
+                case '||': return int(bool(lv) or bool(rv))
+                case '<<': return lv << rv
+                case '>>': return lv >> rv
                 case _: return None
         case _:
             return None
@@ -1545,6 +1568,8 @@ class _StmtEmitter:
         self._w = w
         self._dead_vars = {n for n, vi in var_infos.items()
                            if not vi.is_read or vi.is_const}
+        self._constants = {n: vi.const_value for n, vi in var_infos.items()
+                           if vi.is_const and not vi.is_array}
         self._expr = expr_em
         self._var_infos = var_infos
         self._proc_locals = proc_locals
@@ -1597,22 +1622,31 @@ class _StmtEmitter:
                 w.dedent()
 
             case SIf(condition=cond, then_body=then_b, else_body=else_b):
-                w.line(f'if {self._expr.int_expr(cond)}:')
-                w.indent()
-                before = len(w._lines)
-                if then_b:
-                    self.emit_structured(then_b)
-                if len(w._lines) == before:
-                    w.line('pass')
-                w.dedent()
-                if else_b:
-                    w.line('else:')
+                folded = _try_const_fold(cond, self._constants)
+                if folded is not None:
+                    if folded:
+                        if then_b:
+                            self.emit_structured(then_b)
+                    else:
+                        if else_b:
+                            self.emit_structured(else_b)
+                else:
+                    w.line(f'if {self._expr.int_expr(cond)}:')
                     w.indent()
                     before = len(w._lines)
-                    self.emit_structured(else_b)
+                    if then_b:
+                        self.emit_structured(then_b)
                     if len(w._lines) == before:
                         w.line('pass')
                     w.dedent()
+                    if else_b:
+                        w.line('else:')
+                        w.indent()
+                        before = len(w._lines)
+                        self.emit_structured(else_b)
+                        if len(w._lines) == before:
+                            w.line('pass')
+                        w.dedent()
 
             case SBreak():
                 w.line('break')
@@ -1661,21 +1695,33 @@ class _StmtEmitter:
                 case Jump(target=t):
                     w.line(f'_block = {t!r}')
                 case CondJump(condition=c, target=t):
-                    w.line(f'if {self._expr.int_expr(c)}:')
-                    w.indent()
-                    w.line(f'_block = {t!r}')
-                    w.dedent()
+                    folded = _try_const_fold(c, self._constants)
                     next_idx = block.index + 1
-                    if next_idx < len(blocks):
-                        w.line('else:')
-                        w.indent()
-                        w.line(f'_block = {blocks[next_idx].name!r}')
-                        w.dedent()
+                    if folded is not None:
+                        if folded:
+                            # Always true: jump unconditionally
+                            w.line(f'_block = {t!r}')
+                        else:
+                            # Always false: fall through
+                            if next_idx < len(blocks):
+                                w.line(f'_block = {blocks[next_idx].name!r}')
+                            else:
+                                w.line('_block = None')
                     else:
-                        w.line('else:')
+                        w.line(f'if {self._expr.int_expr(c)}:')
                         w.indent()
-                        w.line('_block = None')
+                        w.line(f'_block = {t!r}')
                         w.dedent()
+                        if next_idx < len(blocks):
+                            w.line('else:')
+                            w.indent()
+                            w.line(f'_block = {blocks[next_idx].name!r}')
+                            w.dedent()
+                        else:
+                            w.line('else:')
+                            w.indent()
+                            w.line('_block = None')
+                            w.dedent()
                 case BlockExit(code=c):
                     w.line(f'raise _StaplExit({self._expr.int_expr(c)})')
                 case BlockReturn():
@@ -1764,10 +1810,17 @@ class _StmtEmitter:
                 pass  # if body is dead assignment, skip entire if
 
             case IfStmt(condition=c, then_stmt=t):
-                w.line(f'if {e.int_expr(c)}:')
-                w.indent()
-                self._emit_plain_stmt(t)
-                w.dedent()
+                folded = _try_const_fold(c, self._constants)
+                if folded is not None:
+                    if folded:
+                        # Always true: emit body unconditionally
+                        self._emit_plain_stmt(t)
+                    # else: always false, skip entirely
+                else:
+                    w.line(f'if {e.int_expr(c)}:')
+                    w.indent()
+                    self._emit_plain_stmt(t)
+                    w.dedent()
 
             case GotoStmt(label=l):
                 if self._in_dispatch:
@@ -2311,7 +2364,9 @@ def _emit_procedure(w, proc, program, var_infos, config,
                           if proc.name in var_proc_map.get(n, set())}
     else:
         proc_demotable = demotable
-    proc_locals = _collect_proc_locals(proc) | (proc_data_vars & proc_demotable)
+    const_names = {n for n, vi in var_infos.items() if vi.is_const}
+    proc_locals = _collect_proc_locals(proc) | (
+        proc_data_vars & proc_demotable - const_names)
     data_vars = proc_data_vars
 
     w.line(f'async def _proc_{proc.name.lower()}(self):')
@@ -2325,7 +2380,7 @@ def _emit_procedure(w, proc, program, var_infos, config,
             w.line(f'self._init_data_{dn.lower()}()')
 
     # Emit inline init for demoted DATA vars referenced in this procedure
-    inlined = proc_data_vars & proc_demotable
+    inlined = proc_data_vars & proc_demotable - const_names
     if inlined:
         expr_em = _ExprEmitter(var_infos, proc_locals)
         for data_name in proc.uses:
