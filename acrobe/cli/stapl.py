@@ -266,6 +266,63 @@ def dump(filename, no_crc):
         click.echo()
 
 
+@stapl.command(help="Run STAPL file against hardware")
+@click.argument('filename', type=click.Path(exists=True))
+@click.option('-r', '--root', 'root_path', required=True,
+              help='Path to TAP (e.g. tei-/jtag/0/0)')
+@click.option('-a', '--action', 'action_name', required=True,
+              help='Action to execute')
+@click.option('--no-crc', is_flag=True, help="Skip CRC verification")
+@click.option('--include', 'includes', multiple=True,
+              help='Include optional procedure (may repeat)')
+async def run(filename, root_path, action_name, no_crc, includes):
+    import logging
+    from ..stapl import load, Interpreter, StaplExit
+    from ..stapl.player import AcrobePlayer
+    from ..adapter.model import HwRoot, UsbEnumerator
+    from ..component import Component
+    from .. import log
+
+    log.setup(level=logging.INFO)
+
+    with open(filename, 'r') as f:
+        source = f.read()
+
+    click.echo(f"Loading {filename} ({len(source)} bytes)...")
+    prog = load(source, check_crc=not no_crc)
+
+    actions = list(prog.actions.keys())
+    click.echo(f"Available actions: {', '.join(actions)}")
+
+    hw_root = HwRoot()
+    hw_root.add_enumerator(UsbEnumerator())
+
+    parts = root_path.strip('/').split('/')
+    leaf = await hw_root.child_summon(*parts)
+    if isinstance(leaf, Component):
+        await leaf.start_tree()
+
+    player = AcrobePlayer(leaf)
+    interp = Interpreter(prog)
+
+    include_set = {s.upper() for s in includes} if includes else None
+
+    try:
+        exit_code = await interp.execute(
+            action_name, player, include=include_set)
+        if exit_code:
+            click.echo(f"Action {action_name} failed with exit code {exit_code}",
+                        err=True)
+            raise SystemExit(exit_code)
+        click.echo(f"Action {action_name} completed successfully.")
+    except StaplExit as e:
+        if e.code:
+            click.echo(f"Action {action_name} failed with exit code {e.code}",
+                        err=True)
+            raise SystemExit(e.code)
+        click.echo(f"Action {action_name} completed successfully.")
+
+
 @stapl.command(help="Transpile STAPL file to Python")
 @click.argument('filename', type=click.Path(exists=True))
 @click.option('-o', '--output', 'output_dir', required=True,
