@@ -367,7 +367,15 @@ class Interpreter:
         if decl.size is not None:
             size = self._eval_int(decl.size)
             if decl.init:
-                self._integers[decl.name] = [self._eval_int(v) for v in decl.init]
+                # Altera's JAM player stores INTEGER array init values
+                # in reverse order: last listed value → index 0.
+                # JESD71 is ambiguous about this, but Quartus-generated
+                # STAPL files depend on this behavior.
+                vals = [self._eval_int(v) for v in decl.init]
+                vals.reverse()
+                while len(vals) < size:
+                    vals.append(0)
+                self._integers[decl.name] = vals
             else:
                 self._integers[decl.name] = [0] * size
         else:

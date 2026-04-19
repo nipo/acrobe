@@ -50,7 +50,13 @@ async def run_stapl(source, action='TEST'):
 
 @pytest.mark.asyncio
 async def test_integer_array_init_order():
-    """INTEGER array[n] = v0, v1, ..., vn-1 should store v0 at index 0."""
+    """INTEGER array init uses Altera reversed order: last value → index 0.
+
+    Altera's JAM player (verified against jam_player-2.6.2) stores
+    INTEGER array init values in reverse: the last listed value goes
+    to index 0.  JESD71 is ambiguous about this ordering, but all
+    Quartus-generated STAPL files depend on it.
+    """
     source = """
     NOTE "test" "test";
     PROCEDURE test;
@@ -65,16 +71,17 @@ async def test_integer_array_init_order():
     CRC 0;
     """
     player, code = await run_stapl(source)
-    assert player.exports['a0'] == 10
-    assert player.exports['a1'] == 20
+    # Altera reversal: a[0]=50 (last), a[4]=10 (first)
+    assert player.exports['a0'] == 50
+    assert player.exports['a1'] == 40
     assert player.exports['a2'] == 30
-    assert player.exports['a3'] == 40
-    assert player.exports['a4'] == 50
+    assert player.exports['a3'] == 20
+    assert player.exports['a4'] == 10
 
 
 @pytest.mark.asyncio
 async def test_integer_array_init_two_elements():
-    """Verify A61-like [idcode, count] pattern: first value at index 0."""
+    """A61-like [idcode, count] pattern: last value (count) → index 0."""
     source = """
     NOTE "test" "test";
     PROCEDURE test;
@@ -86,9 +93,9 @@ async def test_integer_array_init_two_elements():
     CRC 0;
     """
     player, code = await run_stapl(source)
-    # a[0] should be the first listed value (56946909 = 0x0364F0DD)
-    assert player.exports['a0'] == 56946909
-    assert player.exports['a1'] == 1
+    # Altera reversal: a[0]=1 (last=count), a[1]=56946909 (first=IDCODE)
+    assert player.exports['a0'] == 1
+    assert player.exports['a1'] == 56946909
 
 
 # === INTEGER array subrange ===
