@@ -337,11 +337,9 @@ async def run(filename, root_path, action_name, no_crc, includes):
 @click.option('--no-crc', is_flag=True, help="Skip CRC verification")
 @click.option('--data-threshold', default=256, type=int,
               help="Boolean arrays >= this many bits are externalized (default: 256)")
-@click.option('--rename', 'rename_file', type=click.Path(exists=True),
-              help="CSV file mapping original names to new names (columns: original,renamed)")
 @click.option('--config', 'config_file', type=click.Path(exists=True),
               help="YAML config file (renames, enums, bitfields)")
-def transpile(filename, output_dir, no_crc, data_threshold, rename_file, config_file):
+def transpile(filename, output_dir, no_crc, data_threshold, config_file):
     from ..stapl import load
     from ..stapl.transpile import transpile as do_transpile, TranspileConfig
 
@@ -351,18 +349,6 @@ def transpile(filename, output_dir, no_crc, data_threshold, rename_file, config_
     if config_file:
         config = TranspileConfig.from_yaml(config_file)
         config.data_threshold = data_threshold
-    elif rename_file:
-        import csv
-        rename_map = {}
-        with open(rename_file, 'r') as f:
-            for row in csv.reader(f):
-                if len(row) >= 2 and row[0].strip() and row[1].strip():
-                    key = row[0].strip()
-                    if key.startswith('_proc_'):
-                        key = key[6:].upper()
-                    rename_map[key] = row[1].strip()
-        click.echo(f"Loaded {len(rename_map)} renames from {rename_file}")
-        config = TranspileConfig(data_threshold=data_threshold, rename_map=rename_map)
     else:
         config = TranspileConfig(data_threshold=data_threshold)
 
