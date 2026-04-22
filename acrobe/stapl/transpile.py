@@ -1515,9 +1515,29 @@ class _Writer:
 class _ExprEmitter:
     """Emit Python expressions from STAPL AST expressions."""
 
+    # Python operator precedence (higher = binds tighter)
+    # From Python docs (low to high):
+    # or < and < not < comparisons < | < ^ < & < shifts < +- < */% < unary
+    _PRECEDENCE = {
+        '||': 4, 'or': 4,
+        '&&': 5, 'and': 5,
+        '!': 6, 'not': 6,
+        '==': 7, '!=': 7, '<': 7, '>': 7, '<=': 7, '>=': 7,
+        '|': 8,
+        '^': 9,
+        '&': 10,
+        '<<': 11, '>>': 11,
+        '+': 12, '-': 12,
+        '*': 13, '/': 13, '//': 13, '%': 13,
+        '~': 14,
+        'UMINUS': 14,
+    }
+
     def __init__(self, var_infos, local_vars):
         self._var_infos = var_infos
         self._local_vars = local_vars  # set of names declared locally
+        self._constants = {n: vi.const_value for n, vi in var_infos.items()
+                           if vi.is_const and not vi.is_array}
 
     def _ref(self, name):
         """Variable reference: self.NAME for data, NAME for locals."""
@@ -1528,6 +1548,87 @@ class _ExprEmitter:
     def _is_boolean_array(self, name):
         vi = self._var_infos.get(name)
         return vi is not None and vi.vtype == 'boolean' and vi.is_array
+
+    def _simplify(self, expr):
+        """Simplify an expression: fold constants, propagate known values,
+        apply algebraic identities."""
+        match expr:
+            case VarRef(name=n) if n in self._constants:
+                return IntLiteral(value=self._constants[n])
+
+            case UnaryOp(op='!', operand=inner):
+                s = self._simplify(inner)
+                if isinstance(s, IntLiteral):
+                    return IntLiteral(value=int(not s.value))
+                return UnaryOp(op='!', operand=s)
+
+            case UnaryOp(op=op, operand=inner):
+                s = self._simplify(inner)
+                match op:
+                    case '-' if isinstance(s, IntLiteral):
+                        return IntLiteral(value=-s.value)
+                    case '~' if isinstance(s, IntLiteral):
+                        return IntLiteral(value=~s.value)
+                return UnaryOp(op=op, operand=s)
+
+            case BinOp(op=op, left=left, right=right):
+                sl = self._simplify(left)
+                sr = self._simplify(right)
+                # Full constant fold
+                if isinstance(sl, IntLiteral) and isinstance(sr, IntLiteral):
+                    val = _try_const_fold(BinOp(op=op, left=sl, right=sr))
+                    if val is not None:
+                        return IntLiteral(value=val)
+                # Algebraic identities for logical operators
+                match op:
+                    case '||':
+                        if isinstance(sl, IntLiteral):
+                            return IntLiteral(value=1) if sl.value else sr
+                        if isinstance(sr, IntLiteral):
+                            return IntLiteral(value=1) if sr.value else sl
+                    case '&&':
+                        if isinstance(sl, IntLiteral):
+                            return sr if sl.value else IntLiteral(value=0)
+                        if isinstance(sr, IntLiteral):
+                            return sl if sr.value else IntLiteral(value=0)
+                    case '|':
+                        if isinstance(sl, IntLiteral) and sl.value == 0:
+                            return sr
+                        if isinstance(sr, IntLiteral) and sr.value == 0:
+                            return sl
+                    case '&':
+                        if isinstance(sl, IntLiteral) and sl.value == 0:
+                            return IntLiteral(value=0)
+                        if isinstance(sr, IntLiteral) and sr.value == 0:
+                            return IntLiteral(value=0)
+                    case '+':
+                        if isinstance(sl, IntLiteral) and sl.value == 0:
+                            return sr
+                        if isinstance(sr, IntLiteral) and sr.value == 0:
+                            return sl
+                    case '*':
+                        if isinstance(sl, IntLiteral) and sl.value == 1:
+                            return sr
+                        if isinstance(sr, IntLiteral) and sr.value == 1:
+                            return sl
+                        if isinstance(sl, IntLiteral) and sl.value == 0:
+                            return IntLiteral(value=0)
+                        if isinstance(sr, IntLiteral) and sr.value == 0:
+                            return IntLiteral(value=0)
+                return BinOp(op=op, left=sl, right=sr)
+
+            case FuncCall(name=n, arg=a):
+                return FuncCall(name=n, arg=self._simplify(a))
+
+            case ArrayIndex(name=n, index=idx):
+                return ArrayIndex(name=n, index=self._simplify(idx))
+
+            case ArraySubrange(name=n, high=h, low=l):
+                return ArraySubrange(name=n,
+                                     high=self._simplify(h),
+                                     low=self._simplify(l))
+
+        return expr
 
     def _exclusive_end(self, expr):
         """Emit expr + 1 with simplification for slice exclusive end."""
@@ -1576,8 +1677,18 @@ class _ExprEmitter:
             # Emit ascending and hope for the best (all real STAPL uses ascending)
             return f'[{self.int_expr(low)}:{self._exclusive_end(high)}]'
 
-    def int_expr(self, expr):
-        """Emit expression that evaluates to int."""
+    def int_expr(self, expr, _parent_prec=0):
+        """Emit expression that evaluates to int.
+
+        _parent_prec is the precedence of the enclosing operator.
+        Parentheses are only added when needed (child has lower precedence).
+        """
+        # Simplify first (constant propagation, algebraic identities)
+        expr = self._simplify(expr)
+        return self._emit_int(expr, _parent_prec)
+
+    def _emit_int(self, expr, parent_prec=0):
+        """Emit an already-simplified expression."""
         match expr:
             case IntLiteral(value=v):
                 if abs(v) > 255:
@@ -1589,8 +1700,7 @@ class _ExprEmitter:
 
             case ArrayIndex(name=n, index=idx):
                 arr = self._ref(n)
-                idx_s = self.int_expr(idx)
-                return f'{arr}[{idx_s}]'
+                return f'{arr}[{self._emit_int(idx)}]'
 
             case ArraySubrange(name=n, high=h, low=l):
                 arr = self._ref(n)
@@ -1603,36 +1713,46 @@ class _ExprEmitter:
                 return arr
 
             case UnaryOp(op='!', operand=a):
-                return f'(not {self.int_expr(a)})'
+                my_prec = self._PRECEDENCE.get('not', 0)
+                inner = self._emit_int(a, my_prec)
+                s = f'not {inner}'
+                return f'({s})' if my_prec < parent_prec else s
 
             case UnaryOp(op=op, operand=a):
-                return f'({op}{self.int_expr(a)})'
+                my_prec = self._PRECEDENCE.get('UMINUS' if op == '-' else op, 0)
+                inner = self._emit_int(a, my_prec)
+                s = f'{op}{inner}'
+                return f'({s})' if my_prec < parent_prec else s
 
-            case BinOp(op='&&', left=a, right=b):
-                return f'({self.int_expr(a)} and {self.int_expr(b)})'
-
-            case BinOp(op='||', left=a, right=b):
-                return f'({self.int_expr(a)} or {self.int_expr(b)})'
+            case BinOp(op='&&' | '||' as op, left=a, right=b):
+                py_op = 'and' if op == '&&' else 'or'
+                my_prec = self._PRECEDENCE.get(py_op, 0)
+                left_s = self._emit_int(a, my_prec)
+                right_s = self._emit_int(b, my_prec + 1)
+                s = f'{left_s} {py_op} {right_s}'
+                return f'({s})' if my_prec < parent_prec else s
 
             case BinOp(op=op, left=a, right=b):
-                # STAPL has integer-only arithmetic; / is integer division
                 py_op = '//' if op == '/' else op
-                return f'({self.int_expr(a)} {py_op} {self.int_expr(b)})'
+                my_prec = self._PRECEDENCE.get(py_op, 0)
+                left_s = self._emit_int(a, my_prec)
+                right_s = self._emit_int(b, my_prec + 1)
+                s = f'{left_s} {py_op} {right_s}'
+                return f'({s})' if my_prec < parent_prec else s
 
             case FuncCall(name='ABS', arg=a):
-                return f'abs({self.int_expr(a)})'
+                return f'abs({self._emit_int(a)})'
 
             case FuncCall(name='INT', arg=a):
                 return self._int_of_bits(a)
 
             case FuncCall(name='CHR$', arg=a):
-                return f'chr({self.int_expr(a)})'
+                return f'chr({self._emit_int(a)})'
 
             case FuncCall(name=n, arg=a):
-                return f'{n}({self.int_expr(a)})'
+                return f'{n}({self._emit_int(a)})'
 
             case BooleanLiteral(data=d, bit_count=bc):
-                # Small boolean literal → int
                 val = int.from_bytes(d, 'little')
                 if val > 255:
                     return f'0x{val:X}'
