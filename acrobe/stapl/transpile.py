@@ -85,15 +85,71 @@ def _try_const_fold(expr: Expr, constants: dict[str, int] | None = None) -> int 
 # ============================================================
 
 @dataclass
+class EnumDef:
+    """An integer enum type for the transpiled output."""
+    class_name: str
+    values: dict[int, str]  # numeric value → symbolic name
+    variables: set[str]  # variable names tagged with this enum
+
+@dataclass
+class BitfieldDef:
+    """A bitfield (IntFlag) type for the transpiled output."""
+    class_name: str
+    values: dict[int, str]  # bit mask → symbolic name
+    variables: set[str]  # variable names tagged with this bitfield
+
+
+@dataclass
 class TranspileConfig:
     data_threshold: int = 256  # bits; boolean arrays >= this → binary files
     rename_map: dict[str, str] | None = None  # original name → new name
+    enums: list[EnumDef] = field(default_factory=list)
+    bitfields: list[BitfieldDef] = field(default_factory=list)
 
     def rename(self, name: str) -> str:
         """Apply rename map to a name."""
         if self.rename_map is not None and name in self.rename_map:
             return self.rename_map[name]
         return name
+
+    @staticmethod
+    def from_yaml(path: str) -> 'TranspileConfig':
+        """Load config from a YAML file."""
+        import yaml
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+
+        rename_map = None
+        raw_rename = data.get('rename', {})
+        if raw_rename:
+            rename_map = {}
+            for key, val in raw_rename.items():
+                k = str(key)
+                # Accept _proc_xxx as convenience for procedure XXX
+                if k.startswith('_proc_'):
+                    k = k[6:].upper()
+                rename_map[k] = str(val)
+
+        enums = []
+        for name, edef in data.get('enums', {}).items():
+            values = {int(k): str(v) for k, v in edef.get('values', {}).items()}
+            variables = {str(v) for v in edef.get('variables', [])}
+            enums.append(EnumDef(class_name=name, values=values,
+                                 variables=variables))
+
+        bitfields = []
+        for name, bdef in data.get('bitfields', {}).items():
+            values = {int(k): str(v) for k, v in bdef.get('values', {}).items()}
+            variables = {str(v) for v in bdef.get('variables', [])}
+            bitfields.append(BitfieldDef(class_name=name, values=values,
+                                         variables=variables))
+
+        return TranspileConfig(
+            data_threshold=data.get('data_threshold', 256),
+            rename_map=rename_map,
+            enums=enums,
+            bitfields=bitfields,
+        )
 
 
 def _apply_rename_map(program: Program, rename: dict[str, str]) -> Program:
@@ -1683,11 +1739,21 @@ class _ExprEmitter:
         'UMINUS': 14,
     }
 
-    def __init__(self, var_infos, local_vars):
+    def __init__(self, var_infos, local_vars, config=None):
         self._var_infos = var_infos
         self._local_vars = local_vars  # set of names declared locally
         self._constants = {n: vi.const_value for n, vi in var_infos.items()
                            if vi.is_const and not vi.is_array}
+        # Build variable → enum/bitfield type maps
+        self._var_enum = {}  # var name → EnumDef
+        self._var_bitfield = {}  # var name → BitfieldDef
+        if config:
+            for edef in config.enums:
+                for vname in edef.variables:
+                    self._var_enum[vname] = edef
+            for bdef in config.bitfields:
+                for vname in bdef.variables:
+                    self._var_bitfield[vname] = bdef
 
     def _ref(self, name):
         """Variable reference: self.NAME for data, NAME for locals."""
@@ -1698,6 +1764,72 @@ class _ExprEmitter:
     def _is_boolean_array(self, name):
         vi = self._var_infos.get(name)
         return vi is not None and vi.vtype == 'boolean' and vi.is_array
+
+    def _fmt_typed_int(self, value, type_hint=None):
+        """Format an integer literal, using enum/bitfield names if available."""
+        if isinstance(type_hint, EnumDef) and value in type_hint.values:
+            return f'{type_hint.class_name}.{type_hint.values[value]}'
+        if isinstance(type_hint, BitfieldDef):
+            return self._fmt_flags(value, type_hint)
+        if abs(value) > 255:
+            return f'0x{value:X}' if value >= 0 else f'-0x{-value:X}'
+        return str(value)
+
+    def _fmt_flags(self, value, bdef):
+        """Format an integer as a combination of bitfield flags."""
+        if value == 0:
+            return '0'
+        # Negative value: try ~value as flag complement (used in & ~FLAG patterns)
+        if value < 0:
+            inv = ~value
+            inv_fmt = self._fmt_flags_positive(inv, bdef)
+            if inv_fmt is not None:
+                return f'~{inv_fmt}' if ' ' not in inv_fmt else f'~({inv_fmt})'
+        if value > 0:
+            fmt = self._fmt_flags_positive(value, bdef)
+            if fmt is not None:
+                return fmt
+        if abs(value) > 255:
+            return f'0x{value:X}' if value >= 0 else f'-0x{-value:X}'
+        return str(value)
+
+    def _fmt_flags_positive(self, value, bdef):
+        """Try to format a positive value as flag combination. Returns None if no flags match."""
+        parts = []
+        remaining = value
+        for mask in sorted(bdef.values.keys(), reverse=True):
+            if remaining & mask == mask:
+                parts.append(f'{bdef.class_name}.{bdef.values[mask]}')
+                remaining &= ~mask
+        if remaining:
+            if parts:
+                parts.append(f'0x{remaining:X}' if remaining > 255 else str(remaining))
+            else:
+                return None
+        if not parts:
+            return None
+        result = ' | '.join(parts)
+        # Wrap in parens if multiple flags (needed for & precedence)
+        if len(parts) > 1:
+            result = f'({result})'
+        return result
+
+    def _type_for_var(self, name):
+        """Get the enum/bitfield type for a variable, if any."""
+        if name in self._var_enum:
+            return self._var_enum[name]
+        if name in self._var_bitfield:
+            return self._var_bitfield[name]
+        return None
+
+    def _infer_type(self, expr):
+        """Infer enum/bitfield type from an expression (variable ref or array index)."""
+        match expr:
+            case VarRef(name=n):
+                return self._type_for_var(n)
+            case ArrayIndex(name=n):
+                return self._type_for_var(n)
+        return None
 
     def _simplify(self, expr):
         """Simplify an expression: fold constants, propagate known values,
@@ -1827,23 +1959,20 @@ class _ExprEmitter:
             # Emit ascending and hope for the best (all real STAPL uses ascending)
             return f'[{self.int_expr(low)}:{self._exclusive_end(high)}]'
 
-    def int_expr(self, expr, _parent_prec=0):
+    def int_expr(self, expr, _parent_prec=0, _type_hint=None):
         """Emit expression that evaluates to int.
 
         _parent_prec is the precedence of the enclosing operator.
-        Parentheses are only added when needed (child has lower precedence).
+        _type_hint is an EnumDef or BitfieldDef for contextual formatting.
         """
-        # Simplify first (constant propagation, algebraic identities)
         expr = self._simplify(expr)
-        return self._emit_int(expr, _parent_prec)
+        return self._emit_int(expr, _parent_prec, _type_hint)
 
-    def _emit_int(self, expr, parent_prec=0):
+    def _emit_int(self, expr, parent_prec=0, type_hint=None):
         """Emit an already-simplified expression."""
         match expr:
             case IntLiteral(value=v):
-                if abs(v) > 255:
-                    return f'0x{v:X}' if v >= 0 else f'-0x{-v:X}'
-                return str(v)
+                return self._fmt_typed_int(v, type_hint)
 
             case VarRef(name=n):
                 return self._ref(n)
@@ -1885,8 +2014,14 @@ class _ExprEmitter:
             case BinOp(op=op, left=a, right=b):
                 py_op = '//' if op == '/' else op
                 my_prec = self._PRECEDENCE.get(py_op, 0)
-                left_s = self._emit_int(a, my_prec)
-                right_s = self._emit_int(b, my_prec + 1)
+                # Infer type context from variable operands
+                child_hint = type_hint
+                if op in ('==', '!=', '<', '>', '<=', '>='):
+                    child_hint = self._infer_type(a) or self._infer_type(b)
+                elif op in ('&', '|', '^'):
+                    child_hint = self._infer_type(a) or self._infer_type(b)
+                left_s = self._emit_int(a, my_prec, child_hint)
+                right_s = self._emit_int(b, my_prec + 1, child_hint)
                 s = f'{left_s} {py_op} {right_s}'
                 return f'({s})' if my_prec < parent_prec else s
 
@@ -2194,18 +2329,20 @@ class _StmtEmitter:
 
             case AssignStmt(target=t, index=idx, high=h, low=l, value=v):
                 ref = t if t in self._proc_locals else f'self.{t}'
+                th = e._type_for_var(t)
                 if h is not None and l is not None:
                     # Subrange assignment
                     w.line(f'{ref}{e.slice_expr(h, l)} = '
                            f'{e.bits_expr(v)}')
                 elif idx is not None:
-                    w.line(f'{ref}[{e.int_expr(idx)}] = {e.int_expr(v)}')
+                    w.line(f'{ref}[{e.int_expr(idx)}] = '
+                           f'{e.int_expr(v, _type_hint=th)}')
                 else:
                     vi = self._var_infos.get(t)
                     if vi and vi.vtype == 'boolean' and vi.is_array:
                         w.line(f'{ref} = {e.bits_expr(v)}')
                     else:
-                        w.line(f'{ref} = {e.int_expr(v)}')
+                        w.line(f'{ref} = {e.int_expr(v, _type_hint=th)}')
 
             case CallStmt(procedure=p):
                 w.line(f'await self._proc_{p.lower()}()')
@@ -2475,6 +2612,12 @@ def transpile(program: Program, config: TranspileConfig | None = None,
 
     if config.rename_map:
         program = _apply_rename_map(program, config.rename_map)
+        # Apply renames to enum/bitfield variable sets
+        r = config.rename_map.get
+        for edef in config.enums:
+            edef.variables = {r(v, v) for v in edef.variables}
+        for bdef in config.bitfields:
+            bdef.variables = {r(v, v) for v in bdef.variables}
 
     var_infos, data_files = _analyze_variables(program, config)
     var_proc_map = _find_var_proc_map(program)
@@ -2491,6 +2634,9 @@ def transpile(program: Program, config: TranspileConfig | None = None,
     w.line(f'"""Transpiled from: {source_name}"""')
     w.line()
     w.line('import asyncio')
+    has_typed = config.enums or config.bitfields
+    if has_typed:
+        w.line('import enum')
     w.line('from pathlib import Path')
     w.line()
     w.line('import asyncclick as click')
@@ -2508,6 +2654,26 @@ def transpile(program: Program, config: TranspileConfig | None = None,
     w.line('        super().__init__(f"EXIT {code}")')
     w.line()
     w.line()
+
+    # --- Enum / bitfield classes ---
+    for edef in config.enums:
+        w.line(f'class {edef.class_name}(enum.IntEnum):')
+        w.indent()
+        for val in sorted(edef.values.keys()):
+            w.line(f'{edef.values[val]} = {val}')
+        w.dedent()
+        w.line()
+        w.line()
+
+    for bdef in config.bitfields:
+        w.line(f'class {bdef.class_name}(enum.IntFlag):')
+        w.indent()
+        for val in sorted(bdef.values.keys()):
+            name = bdef.values[val]
+            w.line(f'{name} = 0x{val:X}' if val > 255 else f'{name} = {val}')
+        w.dedent()
+        w.line()
+        w.line()
 
     # --- Notes ---
     _emit_notes(w, program)
@@ -2593,23 +2759,24 @@ def _emit_constructor(w, program, var_infos, config, demotable):
     # Initialize DATA block variables
     skip_vars = {n for n, vi in var_infos.items()
                  if not vi.is_read or vi.is_const} | demotable
-    expr_em = _ExprEmitter(var_infos, set())
+    expr_em = _ExprEmitter(var_infos, set(), config)
     for data_block in program.data_blocks.values():
         for stmt in data_block.statements:
             match stmt:
                 case IntegerDecl(name=n) | BooleanDecl(name=n) if n in skip_vars:
                     pass
                 case IntegerDecl(name=n, size=sz, init=init):
+                    th = expr_em._type_for_var(n)
                     if sz is not None:
                         if init is not None:
-                            vals = ', '.join(expr_em.int_expr(v)
+                            vals = ', '.join(expr_em.int_expr(v, _type_hint=th)
                                              for v in reversed(init))
                             w.line(f'self.{n} = [{vals}]')
                         else:
                             w.line(f'self.{n} = [0] * {expr_em.int_expr(sz)}')
                     else:
                         if init is not None:
-                            w.line(f'self.{n} = {expr_em.int_expr(init[0])}')
+                            w.line(f'self.{n} = {expr_em.int_expr(init[0], _type_hint=th)}')
                         else:
                             w.line(f'self.{n} = 0')
                 case BooleanDecl(name=n, size=sz, init=init):
@@ -2772,7 +2939,7 @@ def _emit_procedure(w, proc, program, var_infos, config,
     # Emit inline init for demoted DATA vars referenced in this procedure
     inlined = proc_data_vars & proc_demotable - const_names
     if inlined:
-        expr_em = _ExprEmitter(var_infos, proc_locals)
+        expr_em = _ExprEmitter(var_infos, proc_locals, config)
         for data_name in proc.uses:
             db = program.data_blocks.get(data_name)
             if not db:
@@ -2831,7 +2998,7 @@ def _emit_procedure(w, proc, program, var_infos, config,
     structured = _recover_control_flow(blocks, name_to_idx)
 
     # Emit
-    expr_em = _ExprEmitter(var_infos, proc_locals)
+    expr_em = _ExprEmitter(var_infos, proc_locals, config)
     stmt_em = _StmtEmitter(w, expr_em, var_infos, proc_locals, program)
     stmt_em.emit_structured(structured)
 
