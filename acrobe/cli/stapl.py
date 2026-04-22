@@ -353,7 +353,11 @@ def transpile(filename, output_dir, no_crc, data_threshold, rename_file):
         with open(rename_file, 'r') as f:
             for row in csv.reader(f):
                 if len(row) >= 2 and row[0].strip() and row[1].strip():
-                    rename_map[row[0].strip()] = row[1].strip()
+                    key = row[0].strip()
+                    # Accept _proc_xxx as convenience for procedure XXX
+                    if key.startswith('_proc_'):
+                        key = key[6:].upper()
+                    rename_map[key] = row[1].strip()
         click.echo(f"Loaded {len(rename_map)} renames from {rename_file}")
 
     prog = load(source, check_crc=not no_crc)

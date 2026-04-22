@@ -197,7 +197,7 @@ def _apply_rename_map(program: Program, rename: dict[str, str]) -> Program:
     for name, proc in prog.procedures.items():
         new_name = r(name, name)
         proc.name = new_name
-        proc.uses = [r(u, u) for u in proc.uses]
+        proc.uses = [r(u.upper(), u.upper()) for u in proc.uses]
         # Rename labels
         proc.labels = {r(lbl, lbl): idx for lbl, idx in proc.labels.items()}
         for stmt in proc.statements:
@@ -420,12 +420,12 @@ def _build_blocks(stmts, labels):
     for i, stmt in enumerate(stmts):
         if isinstance(stmt, GotoStmt):
             boundaries.add(i + 1)
-            target = stmt.label.upper()
+            target = stmt.label
             if target in labels:
                 boundaries.add(labels[target])
         elif isinstance(stmt, IfStmt) and isinstance(stmt.then_stmt, GotoStmt):
             boundaries.add(i + 1)
-            target = stmt.then_stmt.label.upper()
+            target = stmt.then_stmt.label
             if target in labels:
                 boundaries.add(labels[target])
         elif isinstance(stmt, ExitStmt):
@@ -457,10 +457,10 @@ def _build_blocks(stmts, labels):
             s = stmts[j]
 
             if isinstance(s, GotoStmt):
-                terminal = Jump(s.label.upper())
+                terminal = Jump(s.label)
                 break
             elif isinstance(s, IfStmt) and isinstance(s.then_stmt, GotoStmt):
-                terminal = CondJump(s.condition, s.then_stmt.label.upper())
+                terminal = CondJump(s.condition, s.then_stmt.label)
                 break
             elif isinstance(s, ExitStmt):
                 terminal = BlockExit(s.code)
@@ -1154,7 +1154,7 @@ def _find_demotable_vars(program):
     for proc in program.procedures.values():
         proc_data_vars = set()
         for data_name in proc.uses:
-            db = program.data_blocks.get(data_name.upper())
+            db = program.data_blocks.get(data_name)
             if db:
                 for stmt in db.statements:
                     if isinstance(stmt, (IntegerDecl, BooleanDecl)):
@@ -1303,7 +1303,7 @@ def _find_var_proc_map(program):
         # Which data vars does this proc have access to?
         proc_data = set()
         for dn in proc.uses:
-            db = program.data_blocks.get(dn.upper())
+            db = program.data_blocks.get(dn)
             if db:
                 for stmt in db.statements:
                     if isinstance(stmt, (IntegerDecl, BooleanDecl)):
@@ -1962,7 +1962,7 @@ class _StmtEmitter:
 
             case GotoStmt(label=l):
                 if self._in_dispatch:
-                    w.line(f'_block = {l.upper()!r}')
+                    w.line(f'_block = {l!r}')
                     w.line('continue')
                 else:
                     w.line(f'pass  # GOTO {l}')
@@ -2175,7 +2175,7 @@ def _collect_data_vars(proc, program):
     """Collect variable names from DATA blocks that a procedure USES."""
     data_vars = set()
     for data_name in proc.uses:
-        data_block = program.data_blocks.get(data_name.upper())
+        data_block = program.data_blocks.get(data_name)
         if data_block:
             for stmt in data_block.statements:
                 if isinstance(stmt, (IntegerDecl, BooleanDecl)):
@@ -2198,6 +2198,10 @@ def transpile(program: Program, config: TranspileConfig | None = None,
     """
     if config is None:
         config = TranspileConfig()
+
+    # Normalize USES references to match DATA block key casing
+    for proc in program.procedures.values():
+        proc.uses = [u.upper() for u in proc.uses]
 
     if config.rename_map:
         program = _apply_rename_map(program, config.rename_map)
@@ -2516,16 +2520,15 @@ def _emit_procedure(w, proc, program, var_infos, config,
 
     # Initialize DATA blocks
     for data_name in proc.uses:
-        dn = data_name.upper()
-        if dn in program.data_blocks:
-            w.line(f'self._init_data_{dn.lower()}()')
+        if data_name in program.data_blocks:
+            w.line(f'self._init_data_{data_name.lower()}()')
 
     # Emit inline init for demoted DATA vars referenced in this procedure
     inlined = proc_data_vars & proc_demotable - const_names
     if inlined:
         expr_em = _ExprEmitter(var_infos, proc_locals)
         for data_name in proc.uses:
-            db = program.data_blocks.get(data_name.upper())
+            db = program.data_blocks.get(data_name)
             if not db:
                 continue
             for stmt in db.statements:
