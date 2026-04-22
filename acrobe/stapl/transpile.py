@@ -87,6 +87,144 @@ def _try_const_fold(expr: Expr, constants: dict[str, int] | None = None) -> int 
 @dataclass
 class TranspileConfig:
     data_threshold: int = 256  # bits; boolean arrays >= this → binary files
+    rename_map: dict[str, str] | None = None  # original name → new name
+
+    def rename(self, name: str) -> str:
+        """Apply rename map to a name."""
+        if self.rename_map is not None and name in self.rename_map:
+            return self.rename_map[name]
+        return name
+
+
+def _apply_rename_map(program: Program, rename: dict[str, str]) -> Program:
+    """Apply a rename map to all identifiers in a parsed Program.
+
+    Returns a new Program with renamed variables, procedures, data blocks,
+    and labels. The original program is not modified.
+    """
+    import copy
+    prog = copy.deepcopy(program)
+    r = rename.get
+
+    def _rename_expr(expr):
+        if expr is None:
+            return
+        match expr:
+            case VarRef():
+                expr.name = r(expr.name, expr.name)
+            case ArrayIndex():
+                expr.name = r(expr.name, expr.name)
+                _rename_expr(expr.index)
+            case ArraySubrange():
+                expr.name = r(expr.name, expr.name)
+                _rename_expr(expr.high)
+                _rename_expr(expr.low)
+            case ArrayWhole():
+                expr.name = r(expr.name, expr.name)
+            case BinOp():
+                _rename_expr(expr.left)
+                _rename_expr(expr.right)
+            case UnaryOp():
+                _rename_expr(expr.operand)
+            case FuncCall():
+                _rename_expr(expr.arg)
+
+    def _rename_stmt(stmt):
+        match stmt:
+            case IntegerDecl():
+                stmt.name = r(stmt.name, stmt.name)
+                _rename_expr(stmt.size)
+                if stmt.init:
+                    for e in stmt.init:
+                        _rename_expr(e)
+            case BooleanDecl():
+                stmt.name = r(stmt.name, stmt.name)
+                _rename_expr(stmt.size)
+                if stmt.init and not isinstance(stmt.init, BooleanLiteral):
+                    _rename_expr(stmt.init)
+            case AssignStmt():
+                stmt.target = r(stmt.target, stmt.target)
+                _rename_expr(stmt.index)
+                _rename_expr(stmt.high)
+                _rename_expr(stmt.low)
+                _rename_expr(stmt.value)
+            case IfStmt():
+                _rename_expr(stmt.condition)
+                _rename_stmt(stmt.then_stmt)
+            case ForStmt():
+                stmt.var = r(stmt.var, stmt.var)
+                _rename_expr(stmt.start)
+                _rename_expr(stmt.end)
+                if stmt.step:
+                    _rename_expr(stmt.step)
+            case NextStmt():
+                stmt.var = r(stmt.var, stmt.var)
+            case GotoStmt():
+                stmt.label = r(stmt.label, stmt.label)
+            case CallStmt():
+                stmt.procedure = r(stmt.procedure, stmt.procedure)
+            case ExitStmt():
+                _rename_expr(stmt.code)
+            case PushStmt():
+                _rename_expr(stmt.value)
+            case PopStmt():
+                stmt.target = r(stmt.target, stmt.target)
+                _rename_expr(stmt.index)
+            case PrintStmt():
+                for i, p in enumerate(stmt.parts):
+                    if not isinstance(p, str):
+                        _rename_expr(p)
+            case ExportStmt():
+                _rename_expr(stmt.value)
+            case DrScanStmt() | IrScanStmt():
+                _rename_expr(stmt.length)
+                _rename_expr(stmt.tdi)
+                _rename_expr(stmt.capture)
+                _rename_expr(stmt.compare)
+                _rename_expr(stmt.mask)
+                _rename_expr(stmt.result)
+            case PreDrStmt() | PostDrStmt() | PreIrStmt() | PostIrStmt():
+                _rename_expr(stmt.count)
+                _rename_expr(stmt.data)
+            case WaitStmt():
+                _rename_expr(stmt.cycles)
+                _rename_expr(stmt.usecs)
+            case FrequencyStmt():
+                _rename_expr(stmt.value)
+
+    # Rename procedures
+    new_procs = {}
+    for name, proc in prog.procedures.items():
+        new_name = r(name, name)
+        proc.name = new_name
+        proc.uses = [r(u, u) for u in proc.uses]
+        # Rename labels
+        proc.labels = {r(lbl, lbl): idx for lbl, idx in proc.labels.items()}
+        for stmt in proc.statements:
+            _rename_stmt(stmt)
+        new_procs[new_name] = proc
+    prog.procedures = new_procs
+
+    # Rename data blocks
+    new_data = {}
+    for name, db in prog.data_blocks.items():
+        new_name = r(name, name)
+        db.name = new_name
+        for stmt in db.statements:
+            _rename_stmt(stmt)
+        new_data[new_name] = db
+    prog.data_blocks = new_data
+
+    # Rename actions
+    new_actions = {}
+    for name, action in prog.actions.items():
+        new_name = r(name, name)
+        action.name = new_name
+        action.procedures = [(r(p, p), mod) for p, mod in action.procedures]
+        new_actions[new_name] = action
+    prog.actions = new_actions
+
+    return prog
 
 
 # ============================================================
@@ -2060,6 +2198,9 @@ def transpile(program: Program, config: TranspileConfig | None = None,
     """
     if config is None:
         config = TranspileConfig()
+
+    if config.rename_map:
+        program = _apply_rename_map(program, config.rename_map)
 
     var_infos, data_files = _analyze_variables(program, config)
     var_proc_map = _find_var_proc_map(program)

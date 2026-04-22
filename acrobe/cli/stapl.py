@@ -337,15 +337,27 @@ async def run(filename, root_path, action_name, no_crc, includes):
 @click.option('--no-crc', is_flag=True, help="Skip CRC verification")
 @click.option('--data-threshold', default=256, type=int,
               help="Boolean arrays >= this many bits are externalized (default: 256)")
-def transpile(filename, output_dir, no_crc, data_threshold):
+@click.option('--rename', 'rename_file', type=click.Path(exists=True),
+              help="CSV file mapping original names to new names (columns: original,renamed)")
+def transpile(filename, output_dir, no_crc, data_threshold, rename_file):
+    import csv
     from ..stapl import load
     from ..stapl.transpile import transpile as do_transpile, TranspileConfig
 
     with open(filename, 'r') as f:
         source = f.read()
 
+    rename_map = None
+    if rename_file:
+        rename_map = {}
+        with open(rename_file, 'r') as f:
+            for row in csv.reader(f):
+                if len(row) >= 2 and row[0].strip() and row[1].strip():
+                    rename_map[row[0].strip()] = row[1].strip()
+        click.echo(f"Loaded {len(rename_map)} renames from {rename_file}")
+
     prog = load(source, check_crc=not no_crc)
-    config = TranspileConfig(data_threshold=data_threshold)
+    config = TranspileConfig(data_threshold=data_threshold, rename_map=rename_map)
     source_name = Path(filename).name
 
     python_source, data_files = do_transpile(prog, config, source_name)
