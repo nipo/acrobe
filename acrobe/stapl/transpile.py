@@ -1003,6 +1003,145 @@ def _collect_read_vars(program):
     return read_vars
 
 
+def _collect_read_vars_simplified(program, constants):
+    """Like _collect_read_vars, but simplifies expressions first.
+
+    After constant propagation, some variable references disappear
+    (e.g. `x or V100` where V100=0 simplifies to just `x`).
+    """
+    def simplify(expr):
+        if expr is None:
+            return expr
+        match expr:
+            case VarRef(name=n) if n in constants:
+                return IntLiteral(value=constants[n])
+            case UnaryOp(op=op, operand=inner):
+                s = simplify(inner)
+                if isinstance(s, IntLiteral):
+                    v = _try_const_fold(UnaryOp(op=op, operand=s))
+                    if v is not None:
+                        return IntLiteral(value=v)
+                return UnaryOp(op=op, operand=s)
+            case BinOp(op=op, left=left, right=right):
+                sl, sr = simplify(left), simplify(right)
+                if isinstance(sl, IntLiteral) and isinstance(sr, IntLiteral):
+                    v = _try_const_fold(BinOp(op=op, left=sl, right=sr))
+                    if v is not None:
+                        return IntLiteral(value=v)
+                match op:
+                    case '||':
+                        if isinstance(sl, IntLiteral):
+                            return IntLiteral(value=1) if sl.value else sr
+                        if isinstance(sr, IntLiteral):
+                            return IntLiteral(value=1) if sr.value else sl
+                    case '&&':
+                        if isinstance(sl, IntLiteral):
+                            return sr if sl.value else IntLiteral(value=0)
+                        if isinstance(sr, IntLiteral):
+                            return sl if sr.value else IntLiteral(value=0)
+                    case '|':
+                        if isinstance(sl, IntLiteral) and sl.value == 0:
+                            return sr
+                        if isinstance(sr, IntLiteral) and sr.value == 0:
+                            return sl
+                    case '&':
+                        if isinstance(sl, IntLiteral) and sl.value == 0:
+                            return IntLiteral(value=0)
+                        if isinstance(sr, IntLiteral) and sr.value == 0:
+                            return IntLiteral(value=0)
+                    case '+':
+                        if isinstance(sl, IntLiteral) and sl.value == 0:
+                            return sr
+                        if isinstance(sr, IntLiteral) and sr.value == 0:
+                            return sl
+                    case '*':
+                        if isinstance(sl, IntLiteral) and sl.value == 0:
+                            return IntLiteral(value=0)
+                        if isinstance(sr, IntLiteral) and sr.value == 0:
+                            return IntLiteral(value=0)
+                return BinOp(op=op, left=sl, right=sr)
+            case FuncCall(name=n, arg=a):
+                return FuncCall(name=n, arg=simplify(a))
+            case ArrayIndex(name=n, index=idx):
+                return ArrayIndex(name=n, index=simplify(idx))
+            case ArraySubrange(name=n, high=h, low=l):
+                return ArraySubrange(name=n, high=simplify(h), low=simplify(l))
+        return expr
+
+    read_vars = set()
+
+    def walk(expr):
+        if expr is None:
+            return
+        match expr:
+            case VarRef(name=n):
+                read_vars.add(n)
+            case ArrayIndex(name=n, index=idx):
+                read_vars.add(n)
+                walk(idx)
+            case ArraySubrange(name=n, high=h, low=l):
+                read_vars.add(n)
+                walk(h)
+                walk(l)
+            case ArrayWhole(name=n):
+                read_vars.add(n)
+            case BinOp(left=a, right=b):
+                walk(a)
+                walk(b)
+            case UnaryOp(operand=a):
+                walk(a)
+            case FuncCall(arg=a):
+                walk(a)
+
+    def walk_stmt(stmt):
+        match stmt:
+            case AssignStmt(index=idx, high=h, low=l, value=v):
+                walk(simplify(idx))
+                walk(simplify(h))
+                walk(simplify(l))
+                walk(simplify(v))
+            case IfStmt(condition=c, then_stmt=t):
+                sc = simplify(c)
+                if isinstance(sc, IntLiteral):
+                    if sc.value:
+                        walk_stmt(t)
+                    # else: dead branch, don't walk
+                else:
+                    walk(sc)
+                    walk_stmt(t)
+            case ForStmt(start=s, end=e, step=st):
+                walk(simplify(s))
+                walk(simplify(e))
+                if st: walk(simplify(st))
+            case ExitStmt(code=c):
+                walk(simplify(c))
+            case PrintStmt(parts=parts):
+                for p in parts:
+                    if not isinstance(p, str):
+                        walk(simplify(p))
+            case ExportStmt(value=v):
+                walk(simplify(v))
+            case PushStmt(value=v):
+                walk(simplify(v))
+            case DrScanStmt(length=l, tdi=t, capture=c, compare=cmp, mask=m, result=r) | \
+                 IrScanStmt(length=l, tdi=t, capture=c, compare=cmp, mask=m, result=r):
+                for e in (l, t, c, cmp, m, r):
+                    walk(simplify(e))
+            case PreDrStmt(count=c, data=d) | PostDrStmt(count=c, data=d) | \
+                 PreIrStmt(count=c, data=d) | PostIrStmt(count=c, data=d):
+                walk(simplify(c))
+                if d: walk(simplify(d))
+            case WaitStmt(cycles=c, usecs=u):
+                if c: walk(simplify(c))
+                if u: walk(simplify(u))
+
+    for proc in program.procedures.values():
+        for stmt in proc.statements:
+            walk_stmt(stmt)
+
+    return read_vars
+
+
 def _find_demotable_vars(program):
     """Find DATA variables that can be demoted to procedure locals.
 
@@ -1430,6 +1569,17 @@ def _analyze_variables(program, config):
                                     vi.is_const = True
                                     vi.const_value = val
                             break
+
+    # Re-check which variables are still read after constant propagation.
+    # Constants get substituted in _simplify, so variables that were only
+    # referenced in expressions alongside constants may no longer be needed.
+    constants = {n: vi.const_value for n, vi in var_infos.items()
+                 if vi.is_const and not vi.is_array}
+    if constants:
+        post_read = _collect_read_vars_simplified(program, constants)
+        for vi in var_infos.values():
+            if vi.is_read and not vi.is_const and vi.name not in post_read:
+                vi.is_read = False
 
     # Prune data files for dead variables
     referenced_files = {vi.extern_filename for vi in var_infos.values()
