@@ -2271,14 +2271,11 @@ def transpile(program: Program, config: TranspileConfig | None = None,
                 w.line(f'{name} = {_fmt_int(val)}')
         w.line()
 
-    # --- Constructor ---
-    _emit_constructor(w)
+    # --- Constructor (includes DATA block init) ---
+    _emit_constructor(w, program, var_infos, config, demotable)
 
     # --- JTAG helpers ---
     _emit_helpers(w)
-
-    # --- Data initialization methods ---
-    _emit_data_init(w, program, var_infos, config, demotable)
 
     # --- Procedures ---
     for proc_name, proc in program.procedures.items():
@@ -2308,7 +2305,7 @@ def _emit_notes(w, program):
         w.line()
 
 
-def _emit_constructor(w):
+def _emit_constructor(w, program, var_infos, config, demotable):
     w.line('def __init__(self, interface):')
     w.indent()
     w.line('self._iface = interface')
@@ -2321,8 +2318,52 @@ def _emit_constructor(w):
     w.line('self._post_dr = (0, None)')
     w.line('self._pre_ir = (0, None)')
     w.line('self._post_ir = (0, None)')
-    w.line('self._initialized = set()')
     w.line('self._did_operation = False')
+
+    # Initialize DATA block variables
+    skip_vars = {n for n, vi in var_infos.items()
+                 if not vi.is_read or vi.is_const} | demotable
+    expr_em = _ExprEmitter(var_infos, set())
+    for data_block in program.data_blocks.values():
+        for stmt in data_block.statements:
+            match stmt:
+                case IntegerDecl(name=n) | BooleanDecl(name=n) if n in skip_vars:
+                    pass
+                case IntegerDecl(name=n, size=sz, init=init):
+                    if sz is not None:
+                        if init is not None:
+                            vals = ', '.join(expr_em.int_expr(v)
+                                             for v in reversed(init))
+                            w.line(f'self.{n} = [{vals}]')
+                        else:
+                            w.line(f'self.{n} = [0] * {expr_em.int_expr(sz)}')
+                    else:
+                        if init is not None:
+                            w.line(f'self.{n} = {expr_em.int_expr(init[0])}')
+                        else:
+                            w.line(f'self.{n} = 0')
+                case BooleanDecl(name=n, size=sz, init=init):
+                    vi = var_infos.get(n)
+                    if sz is not None:
+                        if (init is not None
+                                and isinstance(init, BooleanLiteral)
+                                and vi and vi.extern_filename is not None):
+                            w.line(f'self.{n} = BitArray({init.bit_count}, '
+                                   f'(self.DATA_DIR / '
+                                   f'"{vi.extern_filename}").read_bytes())')
+                        elif (init is not None
+                                and isinstance(init, BooleanLiteral)):
+                            w.line(f'self.{n} = BitArray({init.bit_count}, '
+                                   f'{init.data!r})')
+                        else:
+                            w.line(f'self.{n} = BitArray('
+                                   f'{expr_em.int_expr(sz)})')
+                    else:
+                        if init is not None:
+                            w.line(f'self.{n} = {expr_em.int_expr(init)}')
+                        else:
+                            w.line(f'self.{n} = 0')
+
     w.dedent()
     w.line()
 
@@ -2439,66 +2480,6 @@ def _emit_helpers(w):
     w.line()
 
 
-def _emit_data_init(w, program, var_infos, config, demotable=set()):
-    """Emit _init_data_XXX methods for each DATA block."""
-    for block_name, data_block in program.data_blocks.items():
-        w.line(f'def _init_data_{block_name.lower()}(self):')
-        w.indent()
-        w.line(f'"""Initialize DATA block {block_name}."""')
-        w.line(f'if {block_name!r} in self._initialized:')
-        w.indent()
-        w.line('return')
-        w.dedent()
-        w.line(f'self._initialized.add({block_name!r})')
-
-        skip_vars = {n for n, vi in var_infos.items()
-                     if not vi.is_read or vi.is_const} | demotable
-        expr_em = _ExprEmitter(var_infos, set())
-        for stmt in data_block.statements:
-            match stmt:
-                case IntegerDecl(name=n) | BooleanDecl(name=n) if n in skip_vars:
-                    pass  # dead or constant variable, skip init
-
-                case IntegerDecl(name=n, size=sz, init=init):
-                    if sz is not None:
-                        size_s = expr_em.int_expr(sz)
-                        if init is not None:
-                            # Altera reversal: last init value → index 0
-                            vals = ', '.join(expr_em.int_expr(v) for v in reversed(init))
-                            w.line(f'self.{n} = [{vals}]')
-                        else:
-                            w.line(f'self.{n} = [0] * {size_s}')
-                    else:
-                        if init is not None:
-                            w.line(f'self.{n} = {expr_em.int_expr(init[0])}')
-                        else:
-                            w.line(f'self.{n} = 0')
-
-                case BooleanDecl(name=n, size=sz, init=init):
-                    vi = var_infos.get(n)
-                    if sz is not None:
-                        if (init is not None and isinstance(init, BooleanLiteral)
-                                and vi and vi.extern_filename is not None):
-                            # Externalized
-                            w.line(f'self.{n} = BitArray({init.bit_count}, '
-                                   f'(self.DATA_DIR / "{vi.extern_filename}").read_bytes())')
-                        elif init is not None and isinstance(init, BooleanLiteral):
-                            # Inline (small)
-                            w.line(f'self.{n} = BitArray({init.bit_count}, '
-                                   f'{init.data!r})')
-                        else:
-                            size_s = expr_em.int_expr(sz)
-                            w.line(f'self.{n} = BitArray({size_s})')
-                    else:
-                        if init is not None:
-                            w.line(f'self.{n} = {expr_em.int_expr(init)}')
-                        else:
-                            w.line(f'self.{n} = 0')
-
-        w.dedent()
-        w.line()
-
-
 def _emit_procedure(w, proc, program, var_infos, config,
                     demotable=set(), var_proc_map=None):
     """Emit a procedure as an async method."""
@@ -2517,11 +2498,6 @@ def _emit_procedure(w, proc, program, var_infos, config,
     w.line(f'async def _proc_{proc.name.lower()}(self):')
     w.indent()
     w.line(f'"""PROCEDURE {proc.name}"""')
-
-    # Initialize DATA blocks
-    for data_name in proc.uses:
-        if data_name in program.data_blocks:
-            w.line(f'self._init_data_{data_name.lower()}()')
 
     # Emit inline init for demoted DATA vars referenced in this procedure
     inlined = proc_data_vars & proc_demotable - const_names
