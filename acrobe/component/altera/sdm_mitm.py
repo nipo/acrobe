@@ -11,15 +11,16 @@ Or programmatically:
     interface = leaf._interface  # SdmMitm batcher
 """
 
-import logging
-import struct
+import sys
 
 from ...component import Component
 from ...db import NoMatch
 from ...engine import Batcher
 from ...protocol.jtag import CaptureIr, CaptureDr, Shift, Run, Reset, JtagInterface
 
-log = logging.getLogger(__name__)
+
+def _log(msg):
+    print(msg, file=sys.stderr)
 
 # IR codes for SDM JTAG FIFOs
 SDM_CMD_IR = 0x201   # Host → SDM command FIFO
@@ -132,12 +133,12 @@ class SdmMitm(Batcher):
         self._current_ir = ir_val
         if ir_val in (SDM_CMD_IR, SDM_RSP_IR):
             label = "SDM_CMD" if ir_val == SDM_CMD_IR else "SDM_RSP"
-            log.info(f"IR → {label} ({ir_val:#05x})")
+            _log(f"IR → {label} ({ir_val:#05x})")
             # Also log TDO if captured
             if shift_op.read_tdo and shift_op.tdo is not None:
                 tdo_bytes = bytes(shift_op.tdo.data)
                 tdo_val = int.from_bytes(tdo_bytes, 'little') & ((1 << self._ir_width) - 1)
-                log.info(f"  IR TDO = {tdo_val:#05x}")
+                _log(f"  IR TDO = {tdo_val:#05x}")
 
     def _decode_sdm_shift(self, shift_op):
         """Decode a DR shift on SDM_CMD or SDM_RSP instruction."""
@@ -149,7 +150,7 @@ class SdmMitm(Batcher):
         direction = "CMD" if is_cmd else "RSP"
 
         if bit_count % 34 != 0:
-            log.warning(f"  {direction} DR shift {bit_count} bits "
+            _log(f"  {direction} DR shift {bit_count} bits "
                         f"(not multiple of 34)")
 
         word_count = bit_count // 34
@@ -176,18 +177,18 @@ class SdmMitm(Batcher):
     def _extract_word(data, bit_offset):
         """Extract a 34-bit word from byte data at the given bit offset.
 
-        Returns (word_32, framing_2) where word_32 is bits [33:2]
-        and framing_2 is bits [1:0].
+        Returns (word_32, framing_2) where word_32 is bits [31:0]
+        and framing_2 is bits [33:32]. The framing/handshake bits
+        are at the MSB end (last bits shifted in JTAG).
         """
-        # Extract 34 bits starting at bit_offset (LSB first)
         val = 0
         for i in range(34):
             byte_idx = (bit_offset + i) >> 3
             bit_idx = (bit_offset + i) & 7
             if byte_idx < len(data) and data[byte_idx] & (1 << bit_idx):
                 val |= 1 << i
-        framing = val & 0x3
-        word = (val >> 2) & 0xFFFFFFFF
+        word = val & 0xFFFFFFFF
+        framing = (val >> 32) & 0x3
         return word, framing
 
     @staticmethod
@@ -211,7 +212,7 @@ class SdmMitm(Batcher):
                 name = SDM_OPCODES.get(opcode, f"UNK_{opcode:#05x}")
                 parts.append(f" ({name} id={id_tag} len={length})")
 
-        log.info(''.join(parts))
+        _log(''.join(parts))
 
 
 class SdmMitmComponent(Component):
