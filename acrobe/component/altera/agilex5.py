@@ -69,7 +69,7 @@ class Agilex5(Tap, JtagSramFpga):
 
     def _build_sdm(self) -> Sdm:
         """Build the SDM transport stack."""
-        return SdmJtag(self._interface)
+        return SdmJtag(self)
 
     async def child_spawn(self, name):
         if name == "sdm":

@@ -46,8 +46,7 @@ async def main():
     idcode = tap.idcode
     print(f"JTAG IDCODE: {idcode:#010x} ({tap.name})")
 
-    interface = leaf._interface
-    sdm = SdmJtag(interface)
+    sdm = SdmJtag(tap)
 
     # Sync
     print("Syncing with SDM...")
