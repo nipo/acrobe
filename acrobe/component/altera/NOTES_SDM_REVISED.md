@@ -98,8 +98,9 @@ to the shift order.
    to clear stale FIFO state.
 2. **Read flush response**: Shift RSP, expect idle.
 3. **SYNC command**: Send header (opcode=1, len=1, upper=0xF)
-   + nonce word. SDM echoes the nonce in response.
-4. Nonce is device-specific (from STAPL per part number).
+   + arbitrary nonce word. SDM echoes the nonce in response.
+4. Nonce value is arbitrary (verified: 0xDEADBEEF works).
+   STAPL uses device-specific constants but this is not required.
 
 ### Command/Response
 
@@ -132,7 +133,10 @@ and a 1-bit trailer.
 
 ## Device-specific Constants
 
-| Part               | IDCODE     | Sync Nonce   |
-|--------------------|------------|--------------|
-| A5EA013BB23B (DE25)| 0x4362C0DD | 0xAB92C300   |
-| A5ED065BB32AR0     | 0x4364F0DD | 0x7F38963E   |
+| Part               | IDCODE     |
+|--------------------|------------|
+| A5EA013BB23B (DE25)| 0x4362C0DD |
+| A5ED065BB32AR0     | 0x4364F0DD |
+
+Sync nonce is arbitrary (not device-specific). STAPL files
+contain per-part values but any value works (e.g. 0xDEADBEEF).

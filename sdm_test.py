@@ -46,19 +46,12 @@ async def main():
     print(f"JTAG IDCODE: {idcode:#010x} ({tap.name})")
 
     interface = leaf._interface
-
-    # Pick sync nonce based on IDCODE
-    nonce = tap._SYNC_NONCE
-    if nonce is None:
-        print(f"No sync nonce known for this part")
-        return
-
     sdm = SdmJtagTransport(interface)
 
     # Sync
     print("Syncing with SDM...")
     try:
-        echoed = await sdm.sync(nonce)
+        echoed = await sdm.sync()
         print(f"Sync OK, nonce echoed: {echoed:#010x}")
     except SdmError as e:
         print(f"Sync failed: {e}")

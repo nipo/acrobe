@@ -43,9 +43,6 @@ class Agilex5(Tap, JtagSramFpga):
     _STREAM_MAX_CHUNK = 524288     # J120 from STAPL
     _STREAM_STATUS_RETRIES = 6000
 
-    # Subclass must set sync nonce
-    _SYNC_NONCE = None
-    _SYNC_UPPER = 0xF
 
     def _build_sdm(self):
         """Build the SDM transport stack."""
@@ -64,7 +61,7 @@ class Agilex5(Tap, JtagSramFpga):
         sdm = self._build_sdm()
 
         # Sync
-        await sdm.sync(self._SYNC_NONCE, self._SYNC_UPPER)
+        await sdm.sync()
 
         # QSPI_OPEN
         error, _ = await sdm.command(0x32)
@@ -101,7 +98,7 @@ class Agilex5(Tap, JtagSramFpga):
         sdm = self._build_sdm()
 
         self.logger.trace("Synchronizing with SDM...")
-        await sdm.sync(self._SYNC_NONCE, self._SYNC_UPPER)
+        await sdm.sync()
 
         self.logger.trace("Requesting configuration...")
         # Config request: opcode 5, no args
@@ -253,12 +250,3 @@ class Agilex5E(Agilex5):
         name = _AGILEX5_PARTS.get(idcode & 0xfffffff, f"Agilex5-0x{idcode:08x}")
         super().__init__(interface, idcode, name=name, **kw)
 
-        # Device-specific sync nonce (from STAPL)
-        # Each Agilex 5 part has a unique nonce for the SYNC handshake
-        part = idcode & 0xfffffff
-        if part == 0x0362c0dd:
-            self._SYNC_NONCE = 0xAB92C300
-        elif part == 0x0364f0dd:
-            self._SYNC_NONCE = 0x7F38963E
-        else:
-            self._SYNC_NONCE = None

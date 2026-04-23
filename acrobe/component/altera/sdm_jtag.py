@@ -205,12 +205,13 @@ class SdmJtagTransport:
 
         return error_code, rsp[1:]
 
-    async def sync(self, nonce, upper=0xF):
+    async def sync(self, nonce=0xDEADBEEF):
         """Perform SDM sync handshake.
 
         Phase 1: Flush (single-word frame of zeros).
-        Phase 2: SYNC command with device-specific nonce.
-                 SDM echoes the nonce back on success.
+        Phase 2: SYNC command (opcode 1) with a nonce word.
+                 SDM echoes the nonce back to prove it's alive.
+                 The nonce value is arbitrary.
 
         Returns the echoed nonce, or raises on failure.
         """
@@ -226,7 +227,7 @@ class SdmJtagTransport:
 
         # Phase 2: SYNC command (opcode 1) with nonce
         error_code, data = await self.command(
-            opcode=1, args=[nonce], upper=upper, max_response=2)
+            opcode=1, args=[nonce], upper=0xF, max_response=2)
 
         if error_code is None:
             raise SdmError("SDM sync: no response")
