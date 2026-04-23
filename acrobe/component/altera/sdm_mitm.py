@@ -29,6 +29,7 @@ SDM_RSP_IR = 0x202   # SDM → Host response FIFO
 # Known SDM opcodes
 SDM_OPCODES = {
     0x000: "NOOP",
+    0x001: "SYNC",
     0x006: "CONFIG_STATUS",
     0x010: "GET_IDCODE",
     0x012: "GET_CHIPID",
@@ -38,6 +39,7 @@ SDM_OPCODES = {
     0x032: "QSPI_OPEN",
     0x033: "QSPI_CLOSE",
     0x034: "QSPI_SET_CS",
+    0x035: "QSPI_READ_DEVICE_REG",
     0x038: "QSPI_ERASE",
     0x039: "QSPI_WRITE",
     0x03A: "QSPI_READ",
