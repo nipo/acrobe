@@ -159,13 +159,19 @@ class SdmMitm(Batcher):
             bit_offset = wi * 34
 
             tdi_raw = self._extract_raw(tdi_data, bit_offset)
-            tdi_word, tdi_frame = self._split_word(tdi_raw)
-
             if tdo_data is not None:
                 tdo_raw = self._extract_raw(tdo_data, bit_offset)
-                tdo_word, tdo_frame = self._split_word(tdo_raw)
             else:
-                tdo_raw, tdo_word, tdo_frame = None, None, None
+                tdo_raw = None
+
+            # CMD: TDI is host→SDM (framing at MSB), TDO is SDM→host (framing at LSB)
+            # RSP: TDI is host→SDM (framing at MSB), TDO is SDM→host (framing at LSB)
+            # TDI always uses CMD format, TDO always uses RSP format
+            tdi_word, tdi_frame = self._split_cmd(tdi_raw)
+            if tdo_raw is not None:
+                tdo_word, tdo_frame = self._split_rsp(tdo_raw)
+            else:
+                tdo_word, tdo_frame = None, None
 
             self._log_sdm_word(direction, wi, word_count,
                                tdi_raw, tdi_word, tdi_frame,
@@ -185,12 +191,22 @@ class SdmMitm(Batcher):
         return val
 
     @staticmethod
-    def _split_word(raw_34):
-        """Split a 34-bit raw value into (word_32, framing_2).
+    def _split_cmd(raw_34):
+        """Split a CMD (host→SDM) 34-bit value.
 
-        Word is bits [31:0], framing is bits [33:32].
+        Framing at MSB [33:32] (last bits shifted in via TDI).
+        Word at [31:0].
         """
         return raw_34 & 0xFFFFFFFF, (raw_34 >> 32) & 0x3
+
+    @staticmethod
+    def _split_rsp(raw_34):
+        """Split a RSP (SDM→host) 34-bit value.
+
+        Framing at LSB [1:0] (first bits shifted out via TDO).
+        Word at [33:2].
+        """
+        return (raw_34 >> 2) & 0xFFFFFFFF, raw_34 & 0x3
 
     @staticmethod
     def _fmt_word(word, frame):
