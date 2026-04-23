@@ -158,60 +158,60 @@ class SdmMitm(Batcher):
         for wi in range(word_count):
             bit_offset = wi * 34
 
-            # Extract 34-bit TDI word
-            tdi_word, tdi_frame = self._extract_word(tdi_data, bit_offset)
+            tdi_raw = self._extract_raw(tdi_data, bit_offset)
+            tdi_word, tdi_frame = self._split_word(tdi_raw)
 
-            # Extract 34-bit TDO word
             if tdo_data is not None:
-                tdo_word, tdo_frame = self._extract_word(tdo_data, bit_offset)
+                tdo_raw = self._extract_raw(tdo_data, bit_offset)
+                tdo_word, tdo_frame = self._split_word(tdo_raw)
             else:
-                tdo_word, tdo_frame = None, None
+                tdo_raw, tdo_word, tdo_frame = None, None, None
 
             self._log_sdm_word(direction, wi, word_count,
-                               tdi_word, tdi_frame,
-                               tdo_word, tdo_frame)
+                               tdi_raw, tdi_word, tdi_frame,
+                               tdo_raw, tdo_word, tdo_frame)
 
         self._shift_count += 1
 
     @staticmethod
-    def _extract_word(data, bit_offset):
-        """Extract a 34-bit word from byte data at the given bit offset.
-
-        Returns (word_32, framing_2) where word_32 is bits [31:0]
-        and framing_2 is bits [33:32]. The framing/handshake bits
-        are at the MSB end (last bits shifted in JTAG).
-        """
+    def _extract_raw(data, bit_offset, bit_count=34):
+        """Extract raw bits from byte data at the given bit offset."""
         val = 0
-        for i in range(34):
+        for i in range(bit_count):
             byte_idx = (bit_offset + i) >> 3
             bit_idx = (bit_offset + i) & 7
             if byte_idx < len(data) and data[byte_idx] & (1 << bit_idx):
                 val |= 1 << i
-        word = val & 0xFFFFFFFF
-        framing = (val >> 32) & 0x3
-        return word, framing
+        return val
 
     @staticmethod
-    def _log_sdm_word(direction, index, total,
-                      tdi_word, tdi_frame, tdo_word, tdo_frame):
-        """Log one 34-bit SDM word."""
-        parts = [f"  {direction}[{index}/{total}]"]
+    def _split_word(raw_34):
+        """Split a 34-bit raw value into (word_32, framing_2).
 
-        parts.append(f" TDI={tdi_word:#010x}[{tdi_frame:02b}]")
-        hdr = _decode_sdm_header(tdi_word)
+        Word is bits [31:0], framing is bits [33:32].
+        """
+        return raw_34 & 0xFFFFFFFF, (raw_34 >> 32) & 0x3
+
+    @staticmethod
+    def _fmt_word(word, frame):
+        """Format a 32-bit word with framing and optional header decode."""
+        s = f'{word:#010x}[{frame:02b}]'
+        hdr = _decode_sdm_header(word)
         if hdr:
             opcode, length, id_tag, reserved = hdr
             name = SDM_OPCODES.get(opcode, f"UNK_{opcode:#05x}")
-            parts.append(f" ({name} id={id_tag} len={length})")
+            s += f' ({name} id={id_tag} len={length})'
+        return s
 
+    @staticmethod
+    def _log_sdm_word(direction, index, total,
+                      tdi_raw, tdi_word, tdi_frame,
+                      tdo_raw, tdo_word, tdo_frame):
+        """Log one 34-bit SDM word."""
+        parts = [f"  {direction}[{index}/{total}]"]
+        parts.append(f" TDI<{tdi_raw:#011x}> {SdmMitm._fmt_word(tdi_word, tdi_frame)}")
         if tdo_word is not None:
-            parts.append(f" TDO={tdo_word:#010x}[{tdo_frame:02b}]")
-            hdr = _decode_sdm_header(tdo_word)
-            if hdr:
-                opcode, length, id_tag, reserved = hdr
-                name = SDM_OPCODES.get(opcode, f"UNK_{opcode:#05x}")
-                parts.append(f" ({name} id={id_tag} len={length})")
-
+            parts.append(f" TDO<{tdo_raw:#011x}> {SdmMitm._fmt_word(tdo_word, tdo_frame)}")
         _log(''.join(parts))
 
 
