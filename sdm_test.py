@@ -29,32 +29,28 @@ async def main():
     leaf = await hw_root.child_summon(*parts)
     await leaf.start_tree()
 
-    # Get the raw JTAG interface
+    # Get the Agilex 5 TAP from the discovered chain
+    from acrobe.component.altera.agilex5 import Agilex5
+    tap = None
+    for child in leaf._children:
+        for sub in getattr(child, '_children', []):
+            if isinstance(sub, Agilex5):
+                tap = sub
+                break
+
+    if tap is None:
+        print("No Agilex 5 TAP found in chain")
+        return
+
+    idcode = tap.idcode
+    print(f"JTAG IDCODE: {idcode:#010x} ({tap.name})")
+
     interface = leaf._interface
 
-    # Detect device via JTAG IDCODE (reset TAP, read DR)
-    from acrobe.bitstring import BitString
-    from acrobe.protocol.jtag import CaptureIr, CaptureDr, Shift, Run
-
-    await interface.post(Run(5))  # Reset TAP
-    await interface.post(Run(1))  # Enter RTI
-    await interface.post(CaptureDr())
-    shift = Shift(BitString(0, 32), read_tdo=True)
-    result = await interface.post(shift)
-    await interface.post(Run(1))
-
-    idcode = int.from_bytes(bytes(result.tdo.data[:4]), 'little')
-    print(f"JTAG IDCODE: {idcode:#010x}")
-
     # Pick sync nonce based on IDCODE
-    part = idcode & 0x0FFFFFFF
-    nonces = {
-        0x0362c0dd: 0xAB92C300,  # DE25
-        0x0364f0dd: 0x7F38963E,  # AXE5
-    }
-    nonce = nonces.get(part)
+    nonce = tap._SYNC_NONCE
     if nonce is None:
-        print(f"Unknown part {part:#010x}, cannot sync")
+        print(f"No sync nonce known for this part")
         return
 
     sdm = SdmJtagTransport(interface)
