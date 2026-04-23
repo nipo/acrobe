@@ -13,7 +13,8 @@ import logging
 import sys
 
 from acrobe.adapter.model import HwRoot, UsbEnumerator
-from acrobe.component.altera.sdm_jtag import SdmJtagTransport, SdmError
+from acrobe.component.altera.sdm_jtag import SdmJtag
+from acrobe.component.altera.sdm import SdmError
 from acrobe import log
 
 
@@ -46,7 +47,7 @@ async def main():
     print(f"JTAG IDCODE: {idcode:#010x} ({tap.name})")
 
     interface = leaf._interface
-    sdm = SdmJtagTransport(interface)
+    sdm = SdmJtag(interface)
 
     # Sync
     print("Syncing with SDM...")
@@ -58,30 +59,35 @@ async def main():
         return
 
     # GET_IDCODE (opcode 0x10)
-    print("\nSending GET_IDCODE (opcode 0x10)...")
-    error, data = await sdm.command(0x10)
-    if error is None:
-        print("GET_IDCODE: no response")
-    elif error:
-        print(f"GET_IDCODE error: {error}")
-    elif data:
-        print(f"SDM IDCODE: {data[0]:#010x}")
-        if data[0] == idcode:
+    print("\nSending GET_IDCODE...")
+    try:
+        data = await sdm.command(0x10)
+        sdm_idcode = int.from_bytes(data[:4], 'little')
+        print(f"SDM IDCODE: {sdm_idcode:#010x}")
+        if sdm_idcode == idcode:
             print("  Matches JTAG IDCODE!")
-    else:
-        print("GET_IDCODE: empty response")
+    except SdmError as e:
+        print(f"GET_IDCODE failed: {e}")
+
+    # GET_CHIPID (opcode 0x12)
+    print("\nSending GET_CHIPID...")
+    try:
+        data = await sdm.command(0x12)
+        chipid = int.from_bytes(data[:8], 'little')
+        print(f"Chip ID: {chipid:#018x}")
+    except SdmError as e:
+        print(f"GET_CHIPID failed: {e}")
 
     # CONFIG_STATUS (opcode 0x04)
-    print("\nSending CONFIG_STATUS (opcode 0x04)...")
-    error, data = await sdm.command(0x04, max_response=8)
-    if error is None:
-        print("CONFIG_STATUS: no response")
-    elif error:
-        print(f"CONFIG_STATUS error: {error}")
-    else:
-        print(f"CONFIG_STATUS: {len(data)} words")
-        for i, w in enumerate(data):
-            print(f"  [{i}] {w:#010x}")
+    print("\nSending CONFIG_STATUS...")
+    try:
+        data = await sdm.command(0x04)
+        print(f"CONFIG_STATUS: {len(data)} bytes")
+        for i in range(0, len(data), 4):
+            w = int.from_bytes(data[i:i+4], 'little')
+            print(f"  [{i//4}] {w:#010x}")
+    except SdmError as e:
+        print(f"CONFIG_STATUS failed: {e}")
 
 
 asyncio.run(main())

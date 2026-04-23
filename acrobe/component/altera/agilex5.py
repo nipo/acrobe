@@ -1,16 +1,40 @@
 import asyncio
+import enum
+import struct
 
 from ...protocol.jtag import Tap, Dr, Instruction
 from ..fpga import JtagSramFpga
 from ...bitstring import BitString
-from .sdm_jtag import SdmJtagTransport, SdmError
+from .sdm import Sdm, SdmError
+from .sdm_jtag import SdmJtag
+
+
+class Agilex5SdmCommand(enum.IntEnum):
+    """Known SDM command opcodes for Agilex 5."""
+    NOOP = 0x000
+    SYNC = 0x001
+    CONFIG_STATUS = 0x004
+    CONFIG_REQUEST = 0x005
+    GET_IDCODE = 0x010
+    GET_CHIPID = 0x012
+    GET_USERCODE = 0x013
+    GET_VOLTAGE = 0x018
+    GET_TEMPERATURE = 0x019
+    QSPI_OPEN = 0x032
+    QSPI_CLOSE = 0x033
+    QSPI_SET_CS = 0x034
+    QSPI_READ_DEVICE_REG = 0x035
+    QSPI_ERASE = 0x038
+    QSPI_WRITE = 0x039
+    QSPI_READ = 0x03A
+    RSU_STATUS = 0x05B
 
 
 class Agilex5(Tap, JtagSramFpga):
     """Altera/Intel Agilex 5 FPGA with SDM.
 
-    All configuration goes through the SDM mailbox over JTAG.
-    See NOTES_SDM_REVISED.md for full protocol documentation.
+    All configuration goes through the SDM over JTAG.
+    See NOTES_SDM_REVISED.md for protocol documentation.
     """
 
     irlen = 10
@@ -20,16 +44,16 @@ class Agilex5(Tap, JtagSramFpga):
     DEVICE_ID = Dr(32)
     BYPASS_REG = Dr(1)
     USER_CODE = Dr(32)
-    CONFIG_STATUS = Dr(492)
+    CONFIG_STATUS_DR = Dr(492)
 
     # Core JTAG instructions
     CONFIG = Instruction(0x002, None)
-    CHECK_STATUS = Instruction(0x004, "CONFIG_STATUS")
+    CHECK_STATUS = Instruction(0x004, "CONFIG_STATUS_DR")
     IDCODE = Instruction(0x006, "DEVICE_ID")
     USERCODE = Instruction(0x007, "USER_CODE")
     BYPASS = Instruction(0x3FF, "BYPASS_REG")
 
-    # SDM Virtual JTAG instructions
+    # SDM JTAG instructions
     SDM_CMD = Instruction(0x201, None)
     SDM_RSP = Instruction(0x202, None)
     CONFIG_STATUS_VJ = Instruction(0x208, None)
@@ -40,18 +64,26 @@ class Agilex5(Tap, JtagSramFpga):
     _STREAM_HEADER = 0xA17E2A00_FFFFFFFF
     _STREAM_HEADER_BITS = 64
     _STREAM_INITIAL_CHUNK = 32768
-    _STREAM_MAX_CHUNK = 524288     # J120 from STAPL
+    _STREAM_MAX_CHUNK = 524288
     _STREAM_STATUS_RETRIES = 6000
 
-
-    def _build_sdm(self):
+    def _build_sdm(self) -> Sdm:
         """Build the SDM transport stack."""
-        return SdmJtagTransport(self._interface)
+        return SdmJtag(self._interface)
 
     async def child_spawn(self, name):
+        if name == "sdm":
+            return await self._spawn_sdm_client()
         if name == "spi":
             return await self._spawn_spi()
         return await super().child_spawn(name)
+
+    async def _spawn_sdm_client(self):
+        """Spawn an SDM client component for interactive use."""
+        sdm = self._build_sdm()
+        await sdm.sync()
+        client = AgilexSdmClient(sdm)
+        return client
 
     async def _spawn_spi(self):
         """Build SPI interface over SDM SPI passthrough."""
@@ -59,19 +91,13 @@ class Agilex5(Tap, JtagSramFpga):
         from .sdm_spi import SdmSpiAdapter
 
         sdm = self._build_sdm()
-
-        # Sync
         await sdm.sync()
 
         # QSPI_OPEN
-        error, _ = await sdm.command(0x32)
-        if error:
-            raise SdmError(f"QSPI_OPEN failed: error {error}")
+        await sdm.command(Agilex5SdmCommand.QSPI_OPEN)
 
         # Set CS0
-        error, _ = await sdm.command(0x34, args=[0])
-        if error:
-            raise SdmError(f"QSPI_SET_CS failed: error {error}")
+        await sdm.command(Agilex5SdmCommand.QSPI_SET_CS, b'\x00\x00\x00\x00')
 
         adapter = SdmSpiAdapter(sdm)
         interface = spi.Interface(adapter, name="spi")
@@ -101,10 +127,7 @@ class Agilex5(Tap, JtagSramFpga):
         await sdm.sync()
 
         self.logger.trace("Requesting configuration...")
-        # Config request: opcode 5, no args
-        error, _ = await sdm.command(0x05)
-        if error:
-            raise SdmError(f"Config request failed: error {error}")
+        await sdm.command(Agilex5SdmCommand.CONFIG_REQUEST)
 
         self.logger.trace("Streaming %d bits...", total_bits)
         with self.progress("config", len(blob), unit="B"):
@@ -113,15 +136,14 @@ class Agilex5(Tap, JtagSramFpga):
         self.logger.trace("Waiting for CONF_DONE...")
         for attempt in range(15):
             await asyncio.sleep(0.1)
-            error, status = await sdm.command(0x04, max_response=6)
-            if error:
-                self.logger.protocol("SDM status error: %d", error)
+            try:
+                status = await sdm.command(Agilex5SdmCommand.CONFIG_STATUS)
+                self.logger.protocol("SDM status: %s",
+                                     status.hex(' '))
+            except SdmError:
                 continue
-            self.logger.protocol("SDM status: %s",
-                                 [f'{w:#010x}' for w in status])
-            # TODO: proper CONF_DONE extraction from status response
 
-        raise SdmError("Configuration timeout: CONF_DONE not asserted")
+        raise SdmError(0, opcode=int(Agilex5SdmCommand.CONFIG_STATUS))
 
     async def erase(self):
         pass
@@ -136,7 +158,7 @@ class Agilex5(Tap, JtagSramFpga):
 
     async def _stream_status_check(self, request_data=False,
                                    start_config=False, enable=False):
-        """Check config status via IR 0x208 (CONFIG_STATUS_VJ)."""
+        """Check config status via IR 0x208."""
         dr_bits = 37
         tdi_val = 0
         if request_data:
@@ -188,19 +210,18 @@ class Agilex5(Tap, JtagSramFpga):
 
             if error:
                 raise SdmError(
-                    f"SDM error during streaming "
-                    f"(consumed={consumed}/{total_bits})")
+                    0,
+                    opcode=int(Agilex5SdmCommand.CONFIG_REQUEST))
 
             consumed = progress
-
             if consumed >= total_bits:
                 break
 
             status_retries -= 1
             if status_retries <= 0:
                 raise SdmError(
-                    f"SDM streaming timeout "
-                    f"(consumed={consumed}/{total_bits})")
+                    0,
+                    opcode=int(Agilex5SdmCommand.CONFIG_REQUEST))
 
             if done:
                 stalled = True
@@ -233,6 +254,76 @@ class Agilex5(Tap, JtagSramFpga):
 
 
 # ------------------------------------------------------------------
+# SDM client component
+# ------------------------------------------------------------------
+
+class AgilexSdmClient:
+    """High-level SDM command interface for Agilex devices.
+
+    Provides typed methods for each known SDM command.
+    Use via: await tap.child_summon("sdm")
+    """
+
+    def __init__(self, sdm: Sdm):
+        self._sdm = sdm
+
+    async def get_idcode(self) -> int:
+        """Read IDCODE via SDM."""
+        data = await self._sdm.command(Agilex5SdmCommand.GET_IDCODE)
+        return int.from_bytes(data[:4], 'little')
+
+    async def get_chipid(self) -> int:
+        """Read 64-bit unique chip ID."""
+        data = await self._sdm.command(Agilex5SdmCommand.GET_CHIPID)
+        return int.from_bytes(data[:8], 'little')
+
+    async def get_usercode(self) -> int:
+        """Read USERCODE."""
+        data = await self._sdm.command(Agilex5SdmCommand.GET_USERCODE)
+        return int.from_bytes(data[:4], 'little')
+
+    async def config_status(self) -> bytes:
+        """Read configuration status (6 words = 24 bytes)."""
+        return await self._sdm.command(Agilex5SdmCommand.CONFIG_STATUS)
+
+    async def qspi_open(self):
+        """Enable QSPI flash access."""
+        await self._sdm.command(Agilex5SdmCommand.QSPI_OPEN)
+
+    async def qspi_close(self):
+        """Disable QSPI flash access."""
+        await self._sdm.command(Agilex5SdmCommand.QSPI_CLOSE)
+
+    async def qspi_set_cs(self, cs: int):
+        """Select QSPI chip select line (0-3)."""
+        await self._sdm.command(
+            Agilex5SdmCommand.QSPI_SET_CS,
+            (cs << 28).to_bytes(4, 'little'))
+
+    async def qspi_read(self, address: int, word_count: int) -> bytes:
+        """Read from QSPI flash. Address must be word-aligned."""
+        arg = struct.pack('<II', address, word_count)
+        return await self._sdm.command(Agilex5SdmCommand.QSPI_READ, arg)
+
+    async def qspi_write(self, address: int, data: bytes):
+        """Write to QSPI flash. Address must be word-aligned."""
+        word_count = (len(data) + 3) // 4
+        arg = struct.pack('<II', address, word_count) + data
+        await self._sdm.command(Agilex5SdmCommand.QSPI_WRITE, arg)
+
+    async def qspi_erase(self, address: int, word_count: int):
+        """Erase QSPI flash region. Address must be word-aligned."""
+        arg = struct.pack('<II', address, word_count)
+        await self._sdm.command(Agilex5SdmCommand.QSPI_ERASE, arg)
+
+    async def qspi_read_device_reg(self, opcode: int, byte_count: int) -> bytes:
+        """Read a QSPI device register (e.g. JEDEC ID)."""
+        arg = struct.pack('<II', opcode, byte_count)
+        return await self._sdm.command(
+            Agilex5SdmCommand.QSPI_READ_DEVICE_REG, arg)
+
+
+# ------------------------------------------------------------------
 # Concrete parts
 # ------------------------------------------------------------------
 
@@ -247,6 +338,6 @@ class Agilex5E(Agilex5):
     """Agilex 5 E-series."""
 
     def __init__(self, interface, idcode, **kw):
-        name = _AGILEX5_PARTS.get(idcode & 0xfffffff, f"Agilex5-0x{idcode:08x}")
+        name = _AGILEX5_PARTS.get(
+            idcode & 0xfffffff, f"Agilex5-0x{idcode:08x}")
         super().__init__(interface, idcode, name=name, **kw)
-
