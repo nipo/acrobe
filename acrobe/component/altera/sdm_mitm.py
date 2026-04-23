@@ -217,15 +217,15 @@ class SdmMitm(Batcher):
         """
         return (raw_34 >> 2) & 0xFFFFFFFF, raw_34 & 0x3
 
-    # Framing enum (same for CMD and RSP)
-    _FRAME_LABELS = {0: ' ', 1: '>', 2: '.', 3: '*'}
-    # ' ' = idle/empty, '>' = valid (more follows),
-    # '.' = valid (last), '*' = valid (single-word frame)
+    # CMD framing [33:32]: 00=idle, 01=data(more), 10=data(last), 11=flush
+    _CMD_FRAME = {0: ' ', 1: '>', 2: '.', 3: '!'}
+    # RSP framing [1:0]:  00=idle, 01=data(more), 10=???,         11=data(last)
+    _RSP_FRAME = {0: ' ', 1: '>', 2: '?', 3: '.'}
 
     @staticmethod
     def _fmt_cmd_word(word, frame):
         """Format a CMD-side 32-bit word with framing."""
-        flag_s = SdmMitm._FRAME_LABELS.get(frame, '?')
+        flag_s = SdmMitm._CMD_FRAME.get(frame, '?')
         s = f'{word:#010x} {flag_s}'
         hdr = _decode_sdm_header(word)
         if hdr:
@@ -243,9 +243,9 @@ class SdmMitm(Batcher):
         Framing interpretation TBD — may differ from CMD side.
         Show raw bits for now.
         """
-        flag_s = SdmMitm._FRAME_LABELS.get(frame, '?')
+        flag_s = SdmMitm._RSP_FRAME.get(frame, '?')
         s = f'{word:#010x} {flag_s}'
-        if frame:  # any non-zero frame = likely valid
+        if frame & 1:  # 01 or 11 = valid data
             hdr = _decode_sdm_header(word)
             if hdr:
                 code, length, id_tag, upper = hdr
