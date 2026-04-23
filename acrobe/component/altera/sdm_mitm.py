@@ -203,15 +203,20 @@ class SdmMitm(Batcher):
     def _split_rsp(raw_34):
         """Split a RSP (SDM→host) 34-bit value.
 
-        Framing at LSB [1:0] (first bits shifted out via TDO).
-        Word at [33:2].
+        [0]    = VALID (response word is meaningful)
+        [1]    = ERROR (error condition)
+        [33:2] = 32-bit SDM response word
         """
         return (raw_34 >> 2) & 0xFFFFFFFF, raw_34 & 0x3
 
     @staticmethod
-    def _fmt_word(word, frame):
-        """Format a 32-bit word with framing and optional header decode."""
-        s = f'{word:#010x}[{frame:02b}]'
+    def _fmt_cmd_word(word, frame):
+        """Format a CMD-side 32-bit word with framing."""
+        flags = []
+        if frame & 1: flags.append('F')  # FIRST
+        if frame & 2: flags.append('L')  # LAST
+        flag_s = ''.join(flags) if flags else '-'
+        s = f'{word:#010x} {flag_s:>2}'
         hdr = _decode_sdm_header(word)
         if hdr:
             opcode, length, id_tag, reserved = hdr
@@ -220,14 +225,33 @@ class SdmMitm(Batcher):
         return s
 
     @staticmethod
+    def _fmt_rsp_word(word, frame):
+        """Format a RSP-side 32-bit word with VALID/ERROR flags."""
+        valid = frame & 1
+        error = (frame >> 1) & 1
+        flags = []
+        if valid: flags.append('V')
+        if error: flags.append('E')
+        flag_s = ''.join(flags) if flags else '-'
+        s = f'{word:#010x} {flag_s:>2}'
+        if valid:
+            hdr = _decode_sdm_header(word)
+            if hdr:
+                opcode, length, id_tag, reserved = hdr
+                name = SDM_OPCODES.get(opcode, f"UNK_{opcode:#05x}")
+                s += f' ({name} id={id_tag} len={length})'
+        return s
+
+    @staticmethod
     def _log_sdm_word(direction, index, total,
                       tdi_raw, tdi_word, tdi_frame,
                       tdo_raw, tdo_word, tdo_frame):
         """Log one 34-bit SDM word."""
         parts = [f"  {direction}[{index}/{total}]"]
-        parts.append(f" TDI<{tdi_raw:#011x}> {SdmMitm._fmt_word(tdi_word, tdi_frame)}")
+        # TDI is always CMD format (host→SDM), TDO is always RSP format (SDM→host)
+        parts.append(f" TDI {SdmMitm._fmt_cmd_word(tdi_word, tdi_frame)}")
         if tdo_word is not None:
-            parts.append(f" TDO<{tdo_raw:#011x}> {SdmMitm._fmt_word(tdo_word, tdo_frame)}")
+            parts.append(f" | TDO {SdmMitm._fmt_rsp_word(tdo_word, tdo_frame)}")
         _log(''.join(parts))
 
 
