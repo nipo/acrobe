@@ -47,20 +47,26 @@ SDM_OPCODES = {
 }
 
 
+SDM_ERRORS = {
+    0: "OK",
+}
+
+
 def _decode_sdm_header(word):
     """Decode a 32-bit SDM command/response header word.
 
-    Returns (opcode, length, id_tag) or None if not a valid header.
+    Returns (opcode_or_error, length, id_tag, upper) or None.
+    Field [10:0] is opcode in commands, error code in responses.
     """
-    opcode = word & 0x7FF
+    code = word & 0x7FF
     if word & 0x800:  # bit 11 must be 0
         return None
     length = (word >> 12) & 0x7FF
     if word & (1 << 23):  # bit 23 must be 0
         return None
     id_tag = (word >> 24) & 0xF
-    reserved = (word >> 28) & 0xF
-    return opcode, length, id_tag, reserved
+    upper = (word >> 28) & 0xF
+    return code, length, id_tag, upper
 
 
 def _format_sdm_word(word, framing):
@@ -221,9 +227,11 @@ class SdmMitm(Batcher):
         s = f'{word:#010x} {flag_s:>2}'
         hdr = _decode_sdm_header(word)
         if hdr:
-            opcode, length, id_tag, reserved = hdr
-            name = SDM_OPCODES.get(opcode, f"UNK_{opcode:#05x}")
+            code, length, id_tag, upper = hdr
+            name = SDM_OPCODES.get(code, f"op={code:#05x}")
             s += f' ({name} id={id_tag} len={length})'
+            if upper:
+                s += f' [{upper:#x}]'
         return s
 
     @staticmethod
@@ -239,9 +247,11 @@ class SdmMitm(Batcher):
         if valid:
             hdr = _decode_sdm_header(word)
             if hdr:
-                opcode, length, id_tag, reserved = hdr
-                name = SDM_OPCODES.get(opcode, f"UNK_{opcode:#05x}")
-                s += f' ({name} id={id_tag} len={length})'
+                code, length, id_tag, upper = hdr
+                err_name = SDM_ERRORS.get(code, f"err={code:#05x}")
+                s += f' ({err_name} id={id_tag} len={length})'
+                if upper:
+                    s += f' [{upper:#x}]'
         return s
 
     @staticmethod
