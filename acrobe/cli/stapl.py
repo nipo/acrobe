@@ -275,14 +275,16 @@ def dump(filename, no_crc):
 @click.option('--no-crc', is_flag=True, help="Skip CRC verification")
 @click.option('--include', 'includes', multiple=True,
               help='Include optional procedure (may repeat)')
-async def run(filename, root_path, action_name, no_crc, includes):
+@click.option('--sdm-mitm', is_flag=True,
+              help='Enable SDM JTAG MITM logging')
+async def run(filename, root_path, action_name, no_crc, includes, sdm_mitm):
     import logging
     from ..stapl import load, Interpreter, StaplExit
     from ..stapl.player import AcrobePlayer
     from ..adapter.model import HwRoot, UsbEnumerator
     from .. import log
 
-    log.setup(level=logging.INFO)
+    log.setup(level=logging.DEBUG if sdm_mitm else logging.INFO)
 
     with open(filename, 'r') as f:
         source = f.read()
@@ -308,6 +310,10 @@ async def run(filename, root_path, action_name, no_crc, includes):
         interface = leaf._interface
     else:
         interface = None
+
+    if sdm_mitm and interface is not None:
+        from ..component.altera.sdm_mitm import SdmMitm
+        interface = SdmMitm(interface)
 
     player = AcrobePlayer(interface)
     interp = Interpreter(prog)
