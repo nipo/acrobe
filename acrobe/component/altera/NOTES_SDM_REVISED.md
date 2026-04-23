@@ -1,100 +1,138 @@
-# SDM JTAG Transport — Revised Understanding
+# SDM JTAG Transport Protocol
 
-## JTAG Instructions
+## Overview
 
-| IR Code | Name | Direction | Purpose |
-|---------|------|-----------|---------|
-| 0x201   | SDM_CMD | Host → SDM | Command FIFO: push command/data words |
-| 0x202   | SDM_RSP | SDM → Host | Response FIFO: read response words |
+The SDM (Secure Device Manager) on Agilex 5 FPGAs communicates via
+two JTAG-accessible FIFOs:
 
-Previous naming (VIR/VDR) was misleading — these are not
-"Virtual IR/DR" in the SLD sense, but rather two unidirectional
-FIFOs accessed via DR shifts.
+| IR Code | Name    | Direction  | Purpose                    |
+|---------|---------|------------|----------------------------|
+| 0x201   | SDM_CMD | Host → SDM | Command FIFO: push words   |
+| 0x202   | SDM_RSP | SDM → Host | Response FIFO: read words  |
 
-## 34-bit DR Word Format
+Each DR scan shifts 34 bits. The 32-bit SDM word and 2-bit framing
+are packed differently depending on direction.
 
-Each DR shift is 34 bits. The 32-bit SDM word occupies bits [33:2].
-Bits [1:0] are transport framing — exact meaning TBD, candidates:
-- VALID: word contains meaningful data
-- READY: sender/receiver flow control
-- SOF/EOF: frame boundaries (possibly redundant with header length)
+## 34-bit DR Format
 
-### On SDM_CMD (0x201):
-- TDI[33:2]: 32-bit command/data word to SDM
-- TDI[1:0]: framing (FIRST/LAST of frame? or VALID?)
-- TDO[33:2]: likely ignored or echo
-- TDO[1:0]: possibly READY/credit from SDM
+### CMD (host → SDM, via TDI)
 
-### On SDM_RSP (0x202):
-- TDI[33:2]: possibly zeros, or READY/ACK to pop FIFO
-- TDI[1:0]: possibly READY signal to SDM
-- TDO[33:2]: 32-bit response word from SDM
-- TDO[1:0]: VALID? LAST?
-
-## SDM Command Word Format (32 bits)
+Framing bits at MSB [33:32] (last bits shifted in JTAG):
 
 ```
-[31:28]  Reserved (0)
-[27:24]  ID — transaction tag, echoed in response
+[31:0]  = 32-bit SDM command/data word
+[33:32] = framing enum:
+    00 = idle (no data for SDM)
+    01 = valid, more words follow
+    10 = valid, last word of frame
+    11 = single-word frame (used for flush/reset)
+```
+
+### RSP (SDM → host, via TDO)
+
+Framing bits at LSB [1:0] (first bits shifted out in JTAG):
+
+```
+[1:0]  = framing enum:
+    00 = idle (no response data)
+    01 = valid, more words follow
+    11 = valid, last word of frame
+    10 = reserved/unknown
+[33:2] = 32-bit SDM response word
+```
+
+The asymmetry is because JTAG shifts LSB first. Each direction
+puts its framing where the receiver sees it first/last relative
+to the shift order.
+
+## SDM Command Word Format (32-bit)
+
+```
+[31:28]  Upper nibble (0 normally, 0xF for SYNC command)
+[27:24]  ID tag — echoed in response, for matching
 [23]     0
 [22:12]  Length — number of argument words following this header
 [11]     0
 [10:0]   Command opcode
 ```
 
+## SDM Response Header Format (32-bit)
+
+```
+[31:28]  Upper nibble (echoed from command)
+[27:24]  ID tag (echoed from command)
+[23]     0
+[22:12]  Length — number of data words following this header
+[11]     0
+[10:0]   Error code (0 = OK)
+```
+
 ## Known Opcodes
 
-| Opcode | Name | Args | Response Words | Notes |
-|--------|------|------|----------------|-------|
-| 0x000  | NOOP | 0 | 0 | |
-| 0x006  | CONFIG_STATUS | 0 | 6 | |
-| 0x010  | GET_IDCODE | 0 | 1 | |
-| 0x012  | GET_CHIPID | 0 | 2 | |
-| 0x013  | GET_USERCODE | 0 | 1 | |
-| 0x018  | GET_VOLTAGE | 1 (bitmask) | N | |
-| 0x019  | GET_TEMPERATURE | 1 | N | |
-| 0x032  | QSPI_OPEN | 0 | 0 | |
-| 0x033  | QSPI_CLOSE | 0 | 0 | |
-| 0x034  | QSPI_SET_CS | 1 ([31:28]=CS#) | 0 | |
-| 0x038  | QSPI_ERASE | 2 (addr, count) | 0 | count in 32-bit words |
-| 0x039  | QSPI_WRITE | 2+N (addr, count, data...) | 0 | count in header AND as arg |
-| 0x03A  | QSPI_READ | 2 (addr, count) | count | |
-| 0x05B  | RSU_STATUS | 0 | 9 | |
+| Opcode | Name                | Args | Response Words | Notes |
+|--------|---------------------|------|----------------|-------|
+| 0x000  | NOOP                | 0    | 0              | |
+| 0x001  | SYNC                | 1    | 1              | Nonce echo, upper=0xF |
+| 0x004  | CONFIG_STATUS_ALT   | 0    | 6              | Agilex-specific? |
+| 0x005  | CONFIG_REQUEST      | 0    | 0              | Start configuration |
+| 0x006  | CONFIG_STATUS       | 0    | 6              | Standard |
+| 0x010  | GET_IDCODE          | 0    | 1              | Returns JTAG IDCODE |
+| 0x012  | GET_CHIPID          | 0    | 2              | |
+| 0x013  | GET_USERCODE        | 0    | 1              | |
+| 0x018  | GET_VOLTAGE         | 1    | N              | Arg: channel bitmask |
+| 0x019  | GET_TEMPERATURE     | 1    | N              | |
+| 0x032  | QSPI_OPEN           | 0    | 0              | Enable flash access |
+| 0x033  | QSPI_CLOSE          | 0    | 0              | Disable flash access |
+| 0x034  | QSPI_SET_CS         | 1    | 0              | [31:28]=CS line (0-3) |
+| 0x035  | QSPI_READ_DEVICE_REG| 2    | N              | Args: opcode, byte_count |
+| 0x038  | QSPI_ERASE          | 2    | 0              | Args: addr, word_count |
+| 0x039  | QSPI_WRITE          | 2+N  | 0              | Args: addr, count, data |
+| 0x03A  | QSPI_READ           | 2    | N              | Args: addr, word_count |
+| 0x05B  | RSU_STATUS          | 0    | 9              | |
 
-## Cross-reference with STAPL do_sync_and_program
+## Communication Sequence
 
-From the transpiled code, `do_sync_and_program` sends three SDM
-commands via `sdm_command` (J88 = VIR shift then VDR shift):
+### Sync Handshake
 
-### Command 1: Sync handshake
-- VIR words: 2, constant = `\x00\x00\x00\x00\x03\x00\x00\x00\x08\x00`
-  = 34-bit words: 0x000000000 | 0x003, 0x000000008 | 0x000
-  Decoding: first word [33:2] = 0x00000000, [1:0] = 3 (FIRST|LAST?)
-  Second word [33:2] = 0x00000002, [1:0] = 0
+1. **Flush**: Send zeros with SINGLE framing (11) then LAST (10)
+   to clear stale FIFO state.
+2. **Read flush response**: Shift RSP, expect idle.
+3. **SYNC command**: Send header (opcode=1, len=1, upper=0xF)
+   + nonce word. SDM echoes the nonce in response.
+4. Nonce is device-specific (from STAPL per part number).
 
-  But if [1:0] are framing and [33:2] is the SDM word:
-  Word 0: SDM = 0x00000000, frame = 0b11
-  Word 1: SDM = 0x00000002, frame = 0b00
+### Command/Response
 
-  SDM word 0x00000000 → opcode 0, length 0 = NOOP
-  SDM word 0x00000002 → opcode 2, length 0 = ??? (unknown opcode)
+1. Load IR = 0x201 (SDM_CMD)
+2. Shift idle word (framing 00) to flush
+3. Shift command header with framing 01 (more) or 10 (last if no args)
+4. Shift argument words with framing 01 (more) / 10 (last)
+5. Load IR = 0x202 (SDM_RSP)
+6. Shift zeros until TDO framing shows valid (01 or 11)
+7. Response header word has error code in [10:0], data count in [22:12]
+8. Continue reading until framing shows LAST (11) or expected count
 
-  This needs MITM capture to verify bit ordering.
+### Bitstream Configuration
 
-### Command 2: Config request (?)
-- VIR words: 2, constant has different pattern
-- VDR expected response checked with mask
+After SYNC + CONFIG_REQUEST, bitstream data is streamed via a
+separate DR path (IR 0x002, CONFIG instruction), not through
+the SDM_CMD/SDM_RSP FIFOs. The streaming uses a 37-bit status
+register at IR 0x208 for flow control:
 
-### Command 3: Another handshake
-- VIR words: 1
+```
+Status DR [36:0]:
+  [0]    = DONE (SDM busy/processing)
+  [1]    = ERROR
+  [31:2] = progress (words consumed × 32 = bits)
+  [36:32] = FIFO free slots
+```
 
-The exact decoding depends on bit ordering within the 34-bit word,
-which the MITM will reveal.
+Each data chunk is framed with a 64-bit header (0xA17E2A00_FFFFFFFF)
+and a 1-bit trailer.
 
-## Next Steps
+## Device-specific Constants
 
-1. Build MITM JTAG component to capture SDM_CMD/SDM_RSP traffic
-2. Run the STAPL interpreter with MITM to capture actual traffic
-3. Decode 34-bit words and determine framing bit semantics
-4. Map captured commands to known opcode table
-5. Verify response format matches expected structure
+| Part               | IDCODE     | Sync Nonce   |
+|--------------------|------------|--------------|
+| A5EA013BB23B (DE25)| 0x4362C0DD | 0xAB92C300   |
+| A5ED065BB32AR0     | 0x4364F0DD | 0x7F38963E   |

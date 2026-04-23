@@ -1,162 +1,244 @@
-"""SDM (Secure Device Manager) transport over JTAG Virtual IR/VDR.
+"""SDM (Secure Device Manager) JTAG transport.
 
-This module implements the physical transport layer for communicating
-with Altera/Intel SDM on Agilex devices via JTAG.
+Implements the physical transport layer for communicating with Altera
+SDM on Agilex devices via JTAG.
 
-The SDM exposes two virtual JTAG registers:
-  - VIR (IR 0x201): command channel (host → SDM)
-  - VDR (IR 0x202): data exchange channel (bidirectional)
+The SDM exposes two JTAG instructions:
+  - SDM_CMD (IR 0x201): command FIFO (host → SDM)
+  - SDM_RSP (IR 0x202): response FIFO (SDM → host)
 
-Both are single-word shift registers: each DR scan of 34 bits shifts
-one word in (TDI) and one word out (TDO).
+Each DR scan shifts 34 bits. The 34-bit format is asymmetric:
 
-34-bit word format (asymmetric by direction):
+  CMD direction (host → SDM, TDI, framing at MSB [33:32]):
+    [31:0]  = 32-bit command/data word
+    [33:32] = framing enum:
+        00 = idle (no data)
+        01 = valid, more words follow
+        10 = valid, last word of frame
+        11 = single-word frame (flush/reset)
 
-  VIR command words (host → SDM):
-    [33:2] = 32-bit command payload
-    [1]    = LAST (end of multi-word command / release)
-    [0]    = FIRST (start of command / write request)
+  RSP direction (SDM → host, TDO, framing at LSB [1:0]):
+    [33:2]  = 32-bit response word
+    [1:0]   = framing enum:
+        00 = idle (no data)
+        01 = valid, more words follow
+        11 = valid, last word of frame
+        10 = reserved/unknown
 
-    Encoding:
-      00 = read-only query (no new command for SDM)
-      01 = first word of write command (or single-word request)
-      10 = last word of multi-word command
-      11 = complete single-word write+close command
+SDM command word format (32-bit):
+    [31:28] = upper (family-specific, 0xF for SYNC)
+    [27:24] = ID tag (echoed in response)
+    [23]    = 0
+    [22:12] = length (argument words following header)
+    [11]    = 0
+    [10:0]  = opcode
 
-  VDR response words (SDM → host):
-    [33:2] = 32-bit response payload
-    [0]    = VALID (response data present)
-    [1]    = LAST (end of response packet)
+SDM response header format (32-bit):
+    [31:28] = upper
+    [27:24] = ID tag (echoed from command)
+    [23]    = 0
+    [22:12] = length (data words following header)
+    [11]    = 0
+    [10:0]  = error code (0 = OK)
 
-VIR has FIFO flow control: read VIR DR to get used-slot count in
-bits [11:0], then push command words when slots are free.
-
-VDR is a shift register: the SDM loads its response asynchronously.
-Each scan captures the current register content.
-
-See NOTES.md for full protocol documentation.
+See NOTES_SDM_REVISED.md for full protocol documentation.
 """
 
 from ...bitstring import BitString
+from ...protocol.jtag import CaptureIr, CaptureDr, Shift, Run
+
+
+# CMD framing values [33:32]
+CMD_IDLE = 0
+CMD_MORE = 1   # valid, more words follow
+CMD_LAST = 2   # valid, last word
+CMD_SINGLE = 3 # single-word frame (flush)
+
+# RSP framing values [1:0]
+RSP_IDLE = 0
+RSP_MORE = 1   # valid, more words follow
+RSP_LAST = 3   # valid, last word
 
 
 class SdmJtagTransport:
-    """34-bit word transport over JTAG VIR/VDR to the SDM."""
+    """SDM command/response transport over JTAG.
 
-    WORD_BITS = 34
-    WORD_MASK = (1 << 34) - 1
-    FIFO_DEPTH_BITS = 12
-    FIFO_DEPTH_MAX = 16
+    Uses the raw JTAG interface (CaptureIr/CaptureDr/Shift/Run ops)
+    directly, not through a Tap abstraction.
+    """
 
-    # Command modifier bits (VIR direction)
-    FIRST = 0x1
-    LAST = 0x2
+    SDM_CMD_IR = 0x201
+    SDM_RSP_IR = 0x202
 
-    def __init__(self, tap, vir_ir=0x201, vdr_ir=0x202):
-        self._tap = tap
-        self._vir_ir = vir_ir
-        self._vdr_ir = vdr_ir
+    def __init__(self, interface, ir_width=10):
+        self._iface = interface
+        self._ir_width = ir_width
 
-    @staticmethod
-    def pack_word(payload, first=False, last=False):
-        """Pack a 32-bit payload with modifier bits into a 34-bit word.
+    # ------------------------------------------------------------------
+    # Low-level JTAG helpers
+    # ------------------------------------------------------------------
 
-        For VIR commands: first=write/request, last=end/release.
-        For VDR sends: first/last set as needed for expected responses.
-        """
-        return ((payload & 0xFFFFFFFF) << 2) | (int(last) << 1) | int(first)
-
-    @staticmethod
-    def unpack_word(raw):
-        """Unpack a 34-bit word.
-
-        Returns (payload, valid_or_first, last).
-        For VDR responses: valid_or_first indicates response data present.
-        """
-        return (raw >> 2) & 0xFFFFFFFF, bool(raw & 1), bool(raw & 2)
-
-    async def _shift_word(self, ir, word):
-        """Shift one 34-bit word through the DR under the given IR value.
-
-        Returns the captured TDO (previous DR content).
-        """
+    async def _ir_load(self, ir_value):
+        """Load an IR value via JTAG."""
         tdi = BitString(
-            (word & self.WORD_MASK).to_bytes(5, 'little'),
-            self.WORD_BITS)
-        result = await self._tap.ir(ir, dr_length=self.WORD_BITS)(
-            tdi, read_tdo=True)
-        await self._tap.run(16)
-        return int(result) & self.WORD_MASK
+            ir_value.to_bytes((self._ir_width + 7) // 8, 'little'),
+            self._ir_width)
+        await self._iface.post(CaptureIr())
+        await self._iface.post(Shift(tdi, read_tdo=False))
+        await self._iface.post(Run(16))
 
-    async def vir_write(self, words, atomic=True):
-        """Write command words to VIR.
+    async def _dr_shift_34(self, raw_34):
+        """Shift a 34-bit DR value in, return 34-bit TDO value."""
+        tdi = BitString(raw_34.to_bytes(5, 'little'), 34)
+        await self._iface.post(CaptureDr())
+        shift = Shift(tdi, read_tdo=True)
+        result = await self._iface.post(shift)
+        await self._iface.post(Run(16))
+        tdo_bytes = bytes(result.tdo.data[:5])
+        return int.from_bytes(tdo_bytes, 'little') & ((1 << 34) - 1)
 
-        If atomic=True (default): packs all words into a single DR
-        scan of len(words) × 34 bits.  The SDM processes SPI commands
-        atomically and requires this mode.
+    # ------------------------------------------------------------------
+    # CMD packing / RSP unpacking
+    # ------------------------------------------------------------------
 
-        If atomic=False: shifts words one at a time (34-bit DR each).
-        This was the original STAPL j89 behavior and works for
-        sync/config commands.
+    @staticmethod
+    def pack_cmd(word, framing=CMD_IDLE):
+        """Pack a 32-bit word with CMD framing into a 34-bit value.
 
-        Polls VIR for FIFO space first.
+        CMD format: [31:0] = word, [33:32] = framing.
         """
-        ir = self._vir_ir
+        return (word & 0xFFFFFFFF) | (framing << 32)
+
+    @staticmethod
+    def unpack_rsp(raw_34):
+        """Unpack a 34-bit RSP value into (word, framing).
+
+        RSP format: [33:2] = word, [1:0] = framing.
+        """
+        return (raw_34 >> 2) & 0xFFFFFFFF, raw_34 & 0x3
+
+    # ------------------------------------------------------------------
+    # SDM command / response
+    # ------------------------------------------------------------------
+
+    async def send_cmd_frame(self, words):
+        """Send a command frame (list of 32-bit words) to SDM.
+
+        Applies correct framing: first word gets CMD_MORE (or CMD_LAST
+        if single word), middle words get CMD_MORE, last gets CMD_LAST.
+        """
+        await self._ir_load(self.SDM_CMD_IR)
+
+        # Flush: shift a zero word first to clear any stale state
+        await self._dr_shift_34(self.pack_cmd(0, CMD_IDLE))
+
         n = len(words)
+        for i, w in enumerate(words):
+            if n == 1:
+                framing = CMD_LAST
+            elif i < n - 1:
+                framing = CMD_MORE
+            else:
+                framing = CMD_LAST
+            await self._dr_shift_34(self.pack_cmd(w, framing))
 
-        # Set IR to VIR and settle
-        await self._tap.ir(ir)(read_tdo=False)
-        await self._tap.run(16)
+    async def recv_rsp_frame(self, max_words=32, timeout_shifts=64):
+        """Receive a response frame from SDM.
 
-        # Poll for FIFO free slots (single 34-bit read)
-        for _ in range(50):
-            raw = await self._shift_word(ir, 0)
-            used = raw & ((1 << self.FIFO_DEPTH_BITS) - 1)
-            if self.FIFO_DEPTH_MAX - used >= n:
+        Reads words until LAST framing is seen or max_words reached.
+        Returns list of 32-bit response words (excluding idle words).
+
+        timeout_shifts: max number of DR shifts before giving up
+        (includes idle words that don't count toward max_words).
+        """
+        await self._ir_load(self.SDM_RSP_IR)
+
+        words = []
+        for _ in range(timeout_shifts):
+            raw = await self._dr_shift_34(self.pack_cmd(0, CMD_IDLE))
+            word, framing = self.unpack_rsp(raw)
+
+            if framing == RSP_IDLE:
+                continue  # no data yet
+
+            words.append(word)
+
+            if framing == RSP_LAST or len(words) >= max_words:
                 break
-        else:
-            raise RuntimeError("SDM VIR FIFO not ready")
 
-        if atomic:
-            # Pack all words into one DR scan
-            total_bits = n * self.WORD_BITS
-            val = 0
-            for i, w in enumerate(words):
-                val |= (w & self.WORD_MASK) << (i * self.WORD_BITS)
-            data = val.to_bytes((total_bits + 7) // 8, 'little')
-            tdi = BitString(data, total_bits)
-            await self._tap.ir(ir, dr_length=total_bits)(tdi, read_tdo=False)
-            await self._tap.run(16)
-        else:
-            # Push words one at a time
-            for w in words:
-                await self._shift_word(ir, w)
+        return words
 
-    async def vdr_shift(self, word):
-        """Shift one 34-bit word through VDR.
+    async def command(self, opcode, args=None, id_tag=0, upper=0,
+                      max_response=32):
+        """Send an SDM command and return the response.
 
-        Returns (payload, valid, last).
+        Builds the command header, sends the frame, reads the response.
+
+        Returns (error_code, response_words) where response_words
+        does NOT include the header.
         """
-        raw = await self._shift_word(self._vdr_ir, word)
-        return self.unpack_word(raw)
+        # Build command header
+        header = (opcode & 0x7FF)
+        n_args = len(args) if args else 0
+        header |= (n_args & 0x7FF) << 12
+        header |= (id_tag & 0xF) << 24
+        header |= (upper & 0xF) << 28
 
-    async def vdr_begin(self):
-        """Set IR to VDR and settle. Call before vdr_shift() series."""
-        await self._tap.ir(self._vdr_ir)(read_tdo=False)
-        await self._tap.run(16)
+        # Build command frame
+        frame = [header]
+        if args:
+            frame.extend(args)
 
-    async def vdr_read(self, count):
-        """Read `count` response words from VDR.
+        await self.send_cmd_frame(frame)
 
-        Shifts zeros through VDR DR and captures the SDM's responses.
-        The SDM loads response data into the shift register; the host
-        always sends zeros.
+        # Read response
+        rsp = await self.recv_rsp_frame(max_words=max_response + 1)
 
-        Returns list of (payload, valid, last) tuples.
+        if not rsp:
+            return None, []
+
+        # Parse response header
+        rsp_header = rsp[0]
+        error_code = rsp_header & 0x7FF
+        rsp_length = (rsp_header >> 12) & 0x7FF
+        rsp_id = (rsp_header >> 24) & 0xF
+
+        return error_code, rsp[1:]
+
+    async def sync(self, nonce, upper=0xF):
+        """Perform SDM sync handshake.
+
+        Phase 1: Flush (single-word frame of zeros).
+        Phase 2: SYNC command with device-specific nonce.
+                 SDM echoes the nonce back on success.
+
+        Returns the echoed nonce, or raises on failure.
         """
-        await self.vdr_begin()
-        responses = []
-        for _ in range(count):
-            raw = await self._shift_word(self._vdr_ir, 0)
-            responses.append(self.unpack_word(raw))
-        return responses
+        # Phase 1: Flush
+        await self._ir_load(self.SDM_CMD_IR)
+        await self._dr_shift_34(self.pack_cmd(0, CMD_IDLE))
+        await self._dr_shift_34(self.pack_cmd(0, CMD_SINGLE))
+        await self._dr_shift_34(self.pack_cmd(0, CMD_LAST))
+
+        # Read flush response (should be idle/zero)
+        await self._ir_load(self.SDM_RSP_IR)
+        await self._dr_shift_34(self.pack_cmd(0, CMD_IDLE))
+
+        # Phase 2: SYNC command (opcode 1) with nonce
+        error_code, data = await self.command(
+            opcode=1, args=[nonce], upper=upper, max_response=2)
+
+        if error_code is None:
+            raise SdmError("SDM sync: no response")
+        if error_code != 0:
+            raise SdmError(f"SDM sync: error {error_code}")
+        if not data or data[0] != nonce:
+            raise SdmError(
+                f"SDM sync: nonce mismatch "
+                f"(sent {nonce:#010x}, got {data[0] if data else 'nothing'})")
+
+        return data[0]
+
+
+class SdmError(Exception):
+    """Raised when SDM communication fails."""
