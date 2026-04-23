@@ -275,16 +275,14 @@ def dump(filename, no_crc):
 @click.option('--no-crc', is_flag=True, help="Skip CRC verification")
 @click.option('--include', 'includes', multiple=True,
               help='Include optional procedure (may repeat)')
-@click.option('--sdm-mitm', is_flag=True,
-              help='Enable SDM JTAG MITM logging')
-async def run(filename, root_path, action_name, no_crc, includes, sdm_mitm):
+async def run(filename, root_path, action_name, no_crc, includes):
     import logging
     from ..stapl import load, Interpreter, StaplExit
     from ..stapl.player import AcrobePlayer
     from ..adapter.model import HwRoot, UsbEnumerator
     from .. import log
 
-    log.setup(level=logging.DEBUG if sdm_mitm else logging.INFO)
+    log.setup(level=logging.INFO)
 
     with open(filename, 'r') as f:
         source = f.read()
@@ -299,21 +297,16 @@ async def run(filename, root_path, action_name, no_crc, includes, sdm_mitm):
     hw_root.add_enumerator(UsbEnumerator())
 
     if root_path:
-        from ..protocol.jtag import JtagInterface
         parts = root_path.strip('/').split('/')
         leaf = await hw_root.child_summon(*parts)
-        if not isinstance(leaf, JtagInterface):
+        if not hasattr(leaf, '_interface'):
             click.echo(f"Error: {root_path} resolved to {type(leaf).__name__}, "
-                        "expected a JtagInterface (e.g. adapter/jtag)", err=True)
+                        "expected a JTAG interface component", err=True)
             raise SystemExit(1)
         await leaf.start_tree()
         interface = leaf._interface
     else:
         interface = None
-
-    if sdm_mitm and interface is not None:
-        from ..component.altera.sdm_mitm import SdmMitm
-        interface = SdmMitm(interface)
 
     player = AcrobePlayer(interface)
     interp = Interpreter(prog)

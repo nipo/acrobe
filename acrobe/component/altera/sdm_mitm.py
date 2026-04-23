@@ -3,19 +3,21 @@
 Wraps a real JTAG interface, forwarding all operations while
 intercepting and decoding SDM command/response FIFO traffic.
 
-Usage:
-    from acrobe.component.altera.sdm_mitm import SdmMitm
+Registered as a spawnable child of JtagInterface:
+    acrobe stapl run file.jam -r adapter/jtag/sdm-mitm -a CONFIGURE
 
-    mitm = SdmMitm(real_interface)
-    # Use mitm in place of real_interface
-    # SDM traffic is logged to stderr
+Or programmatically:
+    leaf = await hw_root.child_summon("adapter", "jtag", "sdm-mitm")
+    interface = leaf._interface  # SdmMitm batcher
 """
 
 import logging
 import struct
 
+from ...component import Component
+from ...db import NoMatch
 from ...engine import Batcher
-from ...protocol.jtag import CaptureIr, CaptureDr, Shift, Run, Reset
+from ...protocol.jtag import CaptureIr, CaptureDr, Shift, Run, Reset, JtagInterface
 
 log = logging.getLogger(__name__)
 
@@ -210,3 +212,32 @@ class SdmMitm(Batcher):
                 parts.append(f" ({name} id={id_tag} len={length})")
 
         log.info(''.join(parts))
+
+
+class SdmMitmComponent(Component):
+    """Component wrapper for SdmMitm.
+
+    Spawned as a child of JtagInterface, wraps the parent's raw
+    JTAG batcher with SDM protocol logging. Downstream code
+    accesses self._interface to get the MITM batcher.
+    """
+
+    def __init__(self, interface, name="sdm-mitm"):
+        super().__init__(name)
+        self._interface = SdmMitm(interface)
+
+    async def start(self):
+        pass
+
+
+# Register as a spawnable child of JtagInterface
+_orig_child_spawn = JtagInterface.__dict__.get("child_spawn")
+
+async def _jtag_child_spawn(self, name):
+    if name == "sdm-mitm":
+        return SdmMitmComponent(self._interface)
+    if _orig_child_spawn is not None:
+        return await _orig_child_spawn(self, name)
+    raise NoMatch("child", name)
+
+JtagInterface.child_spawn = _jtag_child_spawn
