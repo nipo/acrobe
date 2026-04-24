@@ -477,6 +477,7 @@ def _build_blocks(stmts, labels):
         if isinstance(stmt, GotoStmt):
             boundaries.add(i + 1)
             target = stmt.label
+            target = (target)
             if target in labels:
                 boundaries.add(labels[target])
         elif isinstance(stmt, IfStmt) and isinstance(stmt.then_stmt, GotoStmt):
@@ -2274,6 +2275,10 @@ class _StmtEmitter:
                 case BlockReturn():
                     w.line('_block = None')
             w.dedent()
+        w.line('case _:')
+        w.indent()
+        w.line('assert False, f"unknown block {_block}"')
+        w.dedent()
         w.dedent()
         w.dedent()
         self._in_dispatch = old_in_dispatch
@@ -2611,8 +2616,18 @@ def transpile(program: Program, config: TranspileConfig | None = None,
         config = TranspileConfig()
 
     # Normalize USES references to match DATA block key casing
+    # Normalize GOTO targets to match label declaration case
+    # (STAPL is case-insensitive)
     for proc in program.procedures.values():
         proc.uses = [u.upper() for u in proc.uses]
+        label_canon = {k.upper(): k for k in proc.labels}
+        for stmt in proc.statements:
+            if isinstance(stmt, GotoStmt) and stmt.label.upper() in label_canon:
+                stmt.label = label_canon[stmt.label.upper()]
+            elif (isinstance(stmt, IfStmt)
+                    and isinstance(stmt.then_stmt, GotoStmt)
+                    and stmt.then_stmt.label.upper() in label_canon):
+                stmt.then_stmt.label = label_canon[stmt.then_stmt.label.upper()]
 
     if config.rename_map:
         program = _apply_rename_map(program, config.rename_map)
