@@ -168,31 +168,62 @@ async def main():
 
     print(f"TAP: {tap.name} (IDCODE: {tap.idcode:#010x})")
 
-    # Pre-SDM init: read IDCODE and wait (as STAPL does)
-    print("Pre-init: IDCODE read + settle...")
-    idcode_val = int(await tap.IDCODE())
-    print(f"  IDCODE: {idcode_val:#010x}")
-    await tap.run(16)
-    await asyncio.sleep(0.2)  # let SDM boot
+    # TAP reset to ensure clean state (especially after reconfiguration)
+    # Post Reset directly to the underlying JTAG interface
+    print("TAP reset...")
+    from acrobe.protocol.jtag import Reset
+    await tap._interface.post(Reset())
+    await tap._interface.post(Run(1))  # → Run-Test/Idle
 
-    # SDM sync
+    # Pre-SDM init: STAPL loads IR 0x281 then does 200× WAIT IDLE
+    # with 512 TCK cycles + 512µs per iteration. This gives the SDM
+    # time to boot while actively clocking the JTAG interface.
+    print("Pre-init: active wait for SDM...")
+    await tap.ir(0x281, dr_length=32)(BitString(0, 32), read_tdo=False)
+    for _ in range(200):
+        await tap.run(512)
+        await asyncio.sleep(512e-6)
+    print("  Done")
+
+    # SDM sync with retry
     sdm = SdmJtag(tap)
     print("SDM sync...")
-    await sdm.sync()
-    print("  OK")
+    from acrobe.component.altera.sdm import SdmTimeoutError, SdmFramingError
+    for attempt in range(5):
+        try:
+            await sdm.sync()
+            print(f"  OK (attempt {attempt + 1})")
+            break
+        except (SdmTimeoutError, SdmFramingError) as e:
+            print(f"  Attempt {attempt + 1} failed: {e}")
+            await asyncio.sleep(0.1)
+    else:
+        print("  Sync failed after 5 attempts")
+        sys.exit(1)
 
-    # Config request — SDM takes time to respond, increase patience
+    # Config request — SDM takes time to respond
     print("Config request (opcode 0x05)...")
-    cid = sdm._id & 0xF
-    sdm._id += 1
-    header = (Agilex5SdmCommand.CONFIG_REQUEST & 0x7FF) | ((cid & 0xF) << 24)
-    await sdm._send_frame([header])
-    rsp = await sdm._recv_frame(max_silent=50)
-    if rsp:
-        err = rsp[0] & 0x7FF
-        if err:
-            raise SdmError(err, opcode=int(Agilex5SdmCommand.CONFIG_REQUEST))
-    print("  OK")
+    for attempt in range(5):
+        try:
+            cid = sdm._id & 0xF
+            sdm._id += 1
+            header = (Agilex5SdmCommand.CONFIG_REQUEST & 0x7FF) \
+                | ((cid & 0xF) << 24)
+            await sdm._send_frame([header])
+            rsp = await sdm._recv_frame(max_silent=50)
+            if rsp:
+                err = rsp[0] & 0x7FF
+                if err:
+                    raise SdmError(err,
+                                   opcode=int(Agilex5SdmCommand.CONFIG_REQUEST))
+            print(f"  OK (attempt {attempt + 1})")
+            break
+        except (SdmTimeoutError, SdmError) as e:
+            print(f"  Attempt {attempt + 1} failed: {e}")
+            await asyncio.sleep(0.1)
+    else:
+        print("  Config request failed after 5 attempts")
+        sys.exit(1)
 
     # Stream bitstream
     print(f"Streaming {len(bitstream)} bytes...")
