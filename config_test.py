@@ -157,10 +157,20 @@ async def main():
     hw_root = HwRoot()
     hw_root.add_enumerator(UsbEnumerator())
 
-    # Resolve path — append chain/0 to get to the TAP
+    # Resolve path to the TAP.
+    # Monkey-patch Agilex5.start() to skip is_configured() check
+    # which hangs when the FPGA is in a transitional state after
+    # a previous configuration.
+    _orig_start = Agilex5.start
+    async def _skip_status_start(self):
+        self.logger.note("IDCODE: 0x%08x (skipping status check)",
+                         self.idcode)
+    Agilex5.start = _skip_status_start
+
     parts = root_path.strip('/').split('/')
     tap = await hw_root.child_summon(*parts, 'chain', '0')
-    await tap.start_tree()
+
+    Agilex5.start = _orig_start  # restore
 
     if not isinstance(tap, Agilex5):
         print(f"Expected Agilex5 TAP, got {type(tap).__name__}")
@@ -168,37 +178,28 @@ async def main():
 
     print(f"TAP: {tap.name} (IDCODE: {tap.idcode:#010x})")
 
-    # TAP reset to ensure clean state (especially after reconfiguration)
-    # Post Reset directly to the underlying JTAG interface
-    print("TAP reset...")
-    from acrobe.protocol.jtag import Reset
-    await tap._interface.post(Reset())
-    await tap._interface.post(Run(1))  # → Run-Test/Idle
+    # Pre-SDM init: minimal — just IDCODE read and settle
+    print("Pre-init...")
+    idcode_val = int(await tap.IDCODE())
+    await tap.run(16)
+    print(f"  IDCODE: {idcode_val:#010x}")
 
-    # Pre-SDM init: STAPL loads IR 0x281 then does 200× WAIT IDLE
-    # with 512 TCK cycles + 512µs per iteration. This gives the SDM
-    # time to boot while actively clocking the JTAG interface.
-    print("Pre-init: active wait for SDM...")
-    await tap.ir(0x281, dr_length=32)(BitString(0, 32), read_tdo=False)
-    for _ in range(200):
-        await tap.run(512)
-        await asyncio.sleep(512e-6)
-    print("  Done")
-
-    # SDM sync with retry
+    # SDM sync with retry — full flush+sync each attempt
     sdm = SdmJtag(tap)
     print("SDM sync...")
     from acrobe.component.altera.sdm import SdmTimeoutError, SdmFramingError
-    for attempt in range(5):
+    for attempt in range(10):
         try:
             await sdm.sync()
             print(f"  OK (attempt {attempt + 1})")
             break
-        except (SdmTimeoutError, SdmFramingError) as e:
-            print(f"  Attempt {attempt + 1} failed: {e}")
-            await asyncio.sleep(0.1)
+        except (SdmTimeoutError, SdmFramingError, SdmError) as e:
+            print(f"  Attempt {attempt + 1}: {e}")
+            # Extra flush + settle between retries
+            await tap.run(512)
+            await asyncio.sleep(0.05)
     else:
-        print("  Sync failed after 5 attempts")
+        print("  Sync failed after 10 attempts")
         sys.exit(1)
 
     # Config request — SDM takes time to respond
