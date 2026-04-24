@@ -5,8 +5,6 @@ from ..model import Adapter, make_adapter_name
 from .transport import FtdiTransport
 from .mpsse import MpsseEngine
 from .jtag import JtagMpsse
-from ...protocol.jtag import JtagInterface
-
 
 class FtdiJtagAdapter(Adapter):
     """Generic single-channel FTDI MPSSE JTAG adapter.
@@ -25,12 +23,11 @@ class FtdiJtagAdapter(Adapter):
 
     supported_interfaces = ["jtag"]
 
-    def __init__(self, name, device, transport, engine, jtag):
+    def __init__(self, name, device, transport, engine):
         super().__init__(name)
         self._device = device
         self._transport = transport
         self._engine = engine
-        self._jtag = jtag
 
     @classmethod
     async def open(cls, descriptor):
@@ -45,7 +42,6 @@ class FtdiJtagAdapter(Adapter):
         transport = await FtdiTransport.from_device(
             device, interface_index=cls._channel)
         engine = MpsseEngine(transport, logger)
-        jtag = JtagMpsse(engine, logger)
 
         gpio_oe = cls._gpio_oe
         gpio_val = cls._gpio_val
@@ -53,19 +49,25 @@ class FtdiJtagAdapter(Adapter):
             gpio_oe |= cls._led.word_mask
             gpio_val = cls._led.off_bits(gpio_val)
 
-        await jtag.setup(gpio_oe=gpio_oe, gpio_val=gpio_val)
-
         if cls._led is not None:
             on_cmd, off_cmd = cls._led.bracket_bytes(gpio_val, gpio_oe)
             engine.set_bracket(on_cmd, off_cmd)
 
-        return cls(name, device, transport, engine, jtag)
+        return cls(name, device, transport, engine)
 
     async def child_spawn(self, name):
+        gpio_oe = self._gpio_oe
+        gpio_val = self._gpio_val
+        if self._led is not None:
+            gpio_oe |= self._led.word_mask
+            gpio_val = self._led.off_bits(gpio_val)
+
         if name.lower() == "jtag":
-            iface = JtagInterface(self._jtag, name="jtag")
-            iface.freq_cap("hardware", 30e6)
-            return iface
+            jtag = JtagMpsse(self._engine)
+            await jtag.setup(gpio_oe=gpio_oe, gpio_val=gpio_val)
+            jtag.freq_cap("hardware", 30e6)
+            return jtag
+
         raise NoMatch("interface", name)
 
     async def close(self):

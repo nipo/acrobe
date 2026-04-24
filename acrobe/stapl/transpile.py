@@ -3068,7 +3068,7 @@ def _emit_cli(w, program):
     w.line('raise SystemExit(1)')
     w.dedent()
     w.line('await leaf.start_tree()')
-    w.line('interface = leaf._interface')
+    w.line('interface = leaf')
     w.dedent()
     w.line("else:")
     w.indent()

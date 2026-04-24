@@ -382,23 +382,14 @@ class JtagInterface(Component, FreqCapper):
 
     Supports multiple chains (e.g. behind a mux) in the future.
     """
+    db = Db("Interface handler")
 
-    def __init__(self, interface, name="jtag"):
+    def __init__(self, name="jtag"):
         Component.__init__(self, name)
         FreqCapper.__init__(self)
-        self._interface = interface
-        self.child_add(Chain(interface))
 
-    async def start(self):
-        # Propagate tree-derived logger to non-Component batchers
-        # so their protocol-level logs appear under the component tree
-        self._interface.logger = self.logger
-        if hasattr(self._interface, '_engine'):
-            self._interface._engine.logger = self.logger
-
-    def freq_update(self, freq):
-        """Delegate frequency changes to the underlying JTAG adapter."""
-        return self._interface.freq_update(freq)
+    async def child_spawn(self, name):
+        return await self.db.acall(name, self)
 
     def option_set(self, opt):
         if opt.startswith("fmax="):
@@ -414,7 +405,7 @@ class OpenChain(Exception):
     """TDO line is stuck or disconnected."""
     pass
 
-
+@JtagInterface.db.register("chain")
 class Chain(Component):
     """JTAG Chain. Holds TAPs and manages chain geometry."""
 

@@ -278,8 +278,9 @@ def dump(filename, no_crc):
 async def run(filename, root_path, action_name, no_crc, includes):
     import logging
     from ..stapl import load, Interpreter, StaplExit
-    from ..stapl.player import AcrobePlayer
+    from ..stapl.player import JtagPlayer
     from ..adapter.model import HwRoot, UsbEnumerator
+    from ..protocol.jtag import JtagInterface
     from .. import log
 
     log.setup(level=logging.INFO)
@@ -299,16 +300,16 @@ async def run(filename, root_path, action_name, no_crc, includes):
     if root_path:
         parts = root_path.strip('/').split('/')
         leaf = await hw_root.child_summon(*parts)
-        if not hasattr(leaf, '_interface'):
-            click.echo(f"Error: {root_path} resolved to {type(leaf).__name__}, "
-                        "expected a JTAG interface component", err=True)
-            raise SystemExit(1)
         await leaf.start_tree()
-        interface = leaf._interface
+        if not isinstance(leaf, JtagInterface):
+            click.echo(f"Error: {root_path} resolved to {type(leaf).__name__}, "
+                        "expected a JtagInterface component", err=True)
+            raise SystemExit(1)
+        interface = leaf
     else:
         interface = None
 
-    player = AcrobePlayer(interface)
+    player = JtagPlayer(interface)
     interp = Interpreter(prog)
 
     include_set = {s.upper() for s in includes} if includes else None

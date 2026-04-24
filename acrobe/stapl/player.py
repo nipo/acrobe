@@ -10,7 +10,7 @@ from ..protocol.jtag import CaptureIr, CaptureDr, Shift, Run
 from .interpreter import StaplPlayer
 
 
-class AcrobePlayer(StaplPlayer):
+class JtagPlayer(StaplPlayer):
     """StaplPlayer that drives hardware via a raw JTAG interface.
 
     Takes a JTAG interface (JtagMpsse or similar Batcher) directly,

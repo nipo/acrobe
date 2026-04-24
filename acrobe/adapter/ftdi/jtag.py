@@ -13,7 +13,7 @@ from ...bitstring import BitString, BitStringBase
 from ...protocol import jtag
 
 
-class JtagMpsse(Batcher):
+class JtagMpsse(jtag.JtagInterface, Batcher):
     """JTAG interface using FTDI MPSSE.
 
     Translates JTAG protocol operations (CaptureDr, CaptureIr, Shift,
@@ -33,15 +33,15 @@ class JtagMpsse(Batcher):
     STATE_RTI = "rti"
     STATE_PAUSE = "pause"
 
-    def __init__(self, engine: MpsseEngine, logger):
-        super().__init__()
+    def __init__(self, engine: MpsseEngine):
+        jtag.JtagInterface.__init__(self)
+        Batcher.__init__(self)
         self._engine = engine
         self._state = self.STATE_UNKNOWN
         self._gpio_oe = 0
         self._gpio_val = 0
         self._clock_state = None
         self._read_pol = "+"
-        self.logger = logger
 
     def freq_update(self, freq):
         """Compute and apply clock divisor for the requested frequency.
