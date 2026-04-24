@@ -99,6 +99,9 @@ class Sdm(Component):
         """
         raise NotImplementedError
 
+    async def nop(self) -> None:
+        raise NotImplementedError
+
     async def sync(self, nonce=None):
         """Perform SDM sync handshake.
 
@@ -107,29 +110,7 @@ class Sdm(Component):
 
         Returns the echoed nonce.
         """
-        cid = self._id & 0xF
-        self._id += 1
-
-        if nonce is None:
-            nonce = 0xc696aa13
-
-        header = 0x001 | (1 << 12) | (cid << 24) | (0xF << 28)
-        rsp = await self.do_io([header, nonce])
-
-        if not rsp:
-            raise SdmTimeoutError("SDM sync: no response")
-
-        rsp_error = rsp[0] & 0x7FF
-        if rsp_error:
-            raise SdmError(rsp_error, opcode=1)
-
-        if len(rsp) < 2 or rsp[1] != nonce:
-            got = rsp[1] if len(rsp) >= 2 else None
-            raise SdmFramingError(
-                f"SDM sync: nonce mismatch "
-                f"(sent {nonce:#010x}, got {got!r})")
-
-        return rsp[1]
+        raise NotImplementedError
 
     async def command(self, opcode: int, argument: bytes = b'') -> bytes:
         """Send an SDM command with arbitrary arguments.

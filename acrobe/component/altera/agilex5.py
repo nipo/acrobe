@@ -53,7 +53,7 @@ class Agilex5(Tap, JtagSramFpga):
     """
 
     irlen = 10
-    max_freq = 12e6
+    max_freq = 30e6
 
     # DR descriptors
     DEVICE_ID = Dr(32)
@@ -110,7 +110,6 @@ class Agilex5(Tap, JtagSramFpga):
         from .sdm_spi import SdmSpiAdapter
 
         sdm = self._build_sdm()
-        await sdm.sync()
 
         # QSPI_OPEN
         await sdm.command(Agilex5SdmCommand.QSPI_OPEN)
@@ -140,35 +139,28 @@ class Agilex5(Tap, JtagSramFpga):
 
         blob = program[0].data
         total_bits = len(blob) * 8
-        sdm = self._build_sdm()
+        sdm = await self._spawn_sdm_client()
 
-        self.logger.trace("Synchronizing with SDM...")
-        from .sdm import SdmTimeoutError, SdmFramingError
-        for attempt in range(5):
+        for retry in range(2, -1, -1):
+            self.logger.trace("Requesting configuration...")
             try:
-                await sdm.sync()
-                break
-            except (SdmTimeoutError, SdmFramingError):
-                self.logger.trace("Sync attempt %d failed, retrying...",
-                                  attempt + 1)
-                await asyncio.sleep(0.05)
-        else:
-            raise SdmError(0, opcode=int(Agilex5SdmCommand.SYNC))
-
-        self.logger.trace("Requesting configuration...")
-        await sdm.command(Agilex5SdmCommand.CONFIG_REQUEST)
+                await sdm.config_request()
+            except SdmError:
+                if not retry:
+                    raise
+                await sdm._sdm.sync()
+                continue
 
         self.logger.trace("Streaming %d bits...", total_bits)
         with self.progress("config", len(blob), unit="B"):
             await self._stream_bitstream(blob, total_bits)
 
         self.logger.trace("Checking CONF_DONE...")
-        from .agilex5 import AgilexSdmClient
-        client = AgilexSdmClient(sdm)
+
         for attempt in range(15):
             await asyncio.sleep(0.1)
             try:
-                cs = await client.config_status()
+                cs = await sdm.config_status()
                 if cs.conf_done:
                     self.logger.note("Configuration complete")
                     # Clean up: deselect config interface
@@ -404,6 +396,10 @@ class AgilexSdmClient(Component):
         arg = struct.pack('<II', opcode, byte_count)
         return await self._sdm.command(
             Agilex5SdmCommand.QSPI_READ_DEVICE_REG, arg)
+
+    async def config_request(self) -> bytes:
+        """Read a QSPI device register (e.g. JEDEC ID)."""
+        return await self._sdm.command(Agilex5SdmCommand.CONFIG_REQUEST)
 
 
 # ------------------------------------------------------------------

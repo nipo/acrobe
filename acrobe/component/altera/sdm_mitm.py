@@ -70,10 +70,12 @@ class SdmMitm(JtagInterface, Batcher):
         Batcher.__init__(self)
         self._interface = interface
         self._ir_width = ir_width
-        self._current_ir = None  # last IR value loaded
+        self._current_ir = (1 << ir_width) - 1
         self._shifting = None
         self._tdi = BitString()
         self._tdo = BitString()
+        self._is_first_cmd = True
+        self._is_first_rsp = True
         
     async def flush_ops(self, batch):
         """Forward all operations, intercepting SDM traffic."""
@@ -82,26 +84,40 @@ class SdmMitm(JtagInterface, Batcher):
 
         for op, future in batch:
             if isinstance(op, CaptureIr):
+                if self._shifting:
+                    self._do_update()
                 self._shifting = "ir"
                 self._tdi = BitString()
                 self._tdo = BitString()
 
             elif isinstance(op, CaptureDr):
+                if self._shifting:
+                    self._do_update()
                 self._shifting = "dr"
                 self._tdi = BitString()
                 self._tdo = BitString()
 
             elif isinstance(op, Shift):
-                self._tdi.append(op.tdi.data)
+                self._tdi += op.tdi
 
                 if op.read_tdo and op.tdo is not None:
-                    self._tdo += op.tdo.data
+                    self._tdo += op.tdo
                 else:
                     self._tdo += BitString(0, len(op.tdi))
 
             elif isinstance(op, Run):
                 if self._shifting:
                     self._do_update()
+                if op.cycles > 1:
+                    if self._current_ir == SDM_CMD_IR:
+                        ir_name = "SDM <"
+                    elif self._current_ir == SDM_RSP_IR:
+                        ir_name = "SDM >"
+                    elif self._current_ir == 0x281:
+                        ir_name = "SDM *"
+                    else:
+                        ir_name = f"IR {self._current_ir:#05x}"
+                    _log(f" {ir_name} running {op.cycles} cycles")
 
         return ret
 
@@ -117,7 +133,7 @@ class SdmMitm(JtagInterface, Batcher):
                 tdi_word, tdi_frame = self._split_cmd(tdi)
                 tdo_word, tdo_frame = self._split_rsp(tdo)
 
-                _log(f" SDM_CMD {self._fmt_cmd_word(tdi_word, tdi_frame)}")
+                _log(f" SDM < {self._fmt_cmd_word(tdi_word, tdi_frame)}")
             elif self._current_ir == SDM_RSP_IR:
                 tdi = int(self._tdi)
                 tdo = int(self._tdo)
@@ -125,7 +141,7 @@ class SdmMitm(JtagInterface, Batcher):
                 tdi_word, tdi_frame = self._split_cmd(tdi)
                 tdo_word, tdo_frame = self._split_rsp(tdo)
 
-                _log(f" SDM_RSP {self._fmt_rsp_word(tdo_word, tdo_frame)}")
+                _log(f" SDM > {self._fmt_rsp_word(tdo_word, tdo_frame)}")
             elif self._current_ir == 0x208:
                 tdi = int(self._tdi)
                 tdo = int(self._tdo)
@@ -158,29 +174,34 @@ class SdmMitm(JtagInterface, Batcher):
         return (raw_34 >> 2) & 0xFFFFFFFF, raw_34 & 0x3
 
     # CMD framing [33:32]: 00=idle, 01=data(more), 10=data(last), 11=flush
-    _CMD_FRAME = {0: ' ', 1: '>', 2: '.', 3: '!'}
+    _CMD_FRAME = {0: '-', 1: 'M', 2: 'L', 3: 'S'}
     # RSP framing [1:0]:  00=idle, 01=data(more), 10=???,         11=data(last)
-    _RSP_FRAME = {0: ' ', 1: '>', 2: '?', 3: '.'}
+    _RSP_FRAME = {0: '-', 1: 'M', 2: '?', 3: 'L'}
 
-    @staticmethod
-    def _fmt_cmd_word(word, frame):
+    def _fmt_cmd_word(self, word, frame):
         """Format a CMD-side 32-bit word with framing."""
         flag_s = SdmMitm._CMD_FRAME.get(frame, '?')
         s = f'{word:#010x} {flag_s}'
-        hdr = _decode_sdm_header(word)
-        if hdr:
-            code, length, id_tag, upper = hdr
-            try:
-                name = Agilex5SdmCommand(code).name
-            except:
-                name = f"op={code:#05x}"
-            s += f' ({name} id={id_tag} len={length})'
-            if upper:
-                s += f' [{upper:#x}]'
+
+        if self._is_first_cmd:
+            if frame:
+                self._is_first_cmd = False
+            hdr = _decode_sdm_header(word)
+            if hdr:
+                code, length, id_tag, upper = hdr
+                try:
+                    name = Agilex5SdmCommand(code).name
+                except:
+                    name = f"op={code:#05x}"
+                s += f' ({name} id={id_tag} len={length})'
+                if upper:
+                    s += f' [{upper:#x}]'
+
+        if frame == 2 or frame == 3:
+            self._is_first_cmd = True
         return s
 
-    @staticmethod
-    def _fmt_rsp_word(word, frame):
+    def _fmt_rsp_word(self, word, frame):
         """Format a RSP-side 32-bit word with framing.
 
         Framing interpretation TBD — may differ from CMD side.
@@ -189,14 +210,19 @@ class SdmMitm(JtagInterface, Batcher):
         flag_s = SdmMitm._RSP_FRAME.get(frame, '?')
         s = f'{word:#010x} {flag_s}'
         if frame & 1:  # 01 or 11 = valid data
-            hdr = _decode_sdm_header(word)
-            if hdr:
-                code, length, id_tag, upper = hdr
-                try:
-                    err_name = SdmErrorCode(code).name
-                except:
-                    err_name = f"err={code:#05x}"
-                s += f' ({err_name} id={id_tag} len={length})'
-                if upper:
-                    s += f' [{upper:#x}]'
+            if self._is_first_rsp:
+                self._is_first_rsp = False
+
+                hdr = _decode_sdm_header(word)
+                if hdr:
+                    code, length, id_tag, upper = hdr
+                    try:
+                        err_name = SdmErrorCode(code).name
+                    except:
+                        err_name = f"err={code:#05x}"
+                    s += f' ({err_name} id={id_tag} len={length})'
+                    if upper:
+                        s += f' [{upper:#x}]'
+        if frame == 3:
+            self._is_first_rsp = True
         return s
