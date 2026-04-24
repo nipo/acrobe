@@ -365,7 +365,8 @@ class TestChildSummonStart:
 # --- JtagInterface ---
 
 class TestJtagInterface:
-    def test_creates_chain_child(self):
+    async def test_spawns_chain_child(self):
+        """Chain is spawned on demand via child_spawn, not auto-created."""
         from acrobe.engine import Batcher
 
         class MockJtag(Batcher):
@@ -374,30 +375,10 @@ class TestJtagInterface:
                     f.set_result(None)
 
         iface = JtagInterface(MockJtag(), name="jtag-pt")
-        assert len(iface.children) == 1
-        assert isinstance(iface.children[0], Chain)
-
-    def test_chain_name(self):
-        from acrobe.engine import Batcher
-
-        class MockJtag(Batcher):
-            async def flush_ops(self, batch):
-                for _, f in batch:
-                    f.set_result(None)
-
-        iface = JtagInterface(MockJtag(), name="jtag-pt")
-        assert iface.children[0].name == "chain"
-
-    def test_navigable_by_index(self):
-        from acrobe.engine import Batcher
-
-        class MockJtag(Batcher):
-            async def flush_ops(self, batch):
-                for _, f in batch:
-                    f.set_result(None)
-
-        iface = JtagInterface(MockJtag(), name="jtag-pt")
-        assert iface.child_lookup("0") is iface.children[0]
+        assert len(iface.children) == 0
+        chain = await iface.child_spawn("chain")
+        assert isinstance(chain, Chain)
+        assert chain.name == "chain"
 
 
 # --- start_tree idempotent ---

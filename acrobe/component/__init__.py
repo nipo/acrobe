@@ -211,14 +211,13 @@ class Component:
         child = self.child_lookup(bare_name)
         if child is None:
             child = await self._child_spawn_mro(bare_name)
-            if isinstance(child, Component) and child._parent is None:
+            if child._parent is None:
                 self._child_attach(child)
-        if isinstance(child, Component):
-            for opt in opts:
-                child.option_set(opt)
-            if not child._started:
-                await child.start()
-                child._started = True
+        for opt in opts:
+            child.option_set(opt)
+        if not child._started:
+            await child.start()
+            child._started = True
         if not rest:
             return child
         return await child.child_summon(*rest)
