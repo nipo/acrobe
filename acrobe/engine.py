@@ -46,6 +46,8 @@ class Batcher:
             try:
                 await self.flush_ops(batch)
             except Exception as exc:
+                import traceback
+                traceback.print_exc()
                 for _, future in batch:
                     if not future.done():
                         future.set_exception(exc)
