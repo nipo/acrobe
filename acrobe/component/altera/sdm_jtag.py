@@ -13,6 +13,8 @@ instructions. These must be defined on the Tap class as:
              00=idle, 01=more, 11=last
 """
 
+import time
+import asyncio
 from ...bitstring import BitString
 from .sdm import Sdm, SdmTimeoutError
 
@@ -25,6 +27,7 @@ CMD_SINGLE = 3
 # RSP framing values [1:0]
 RSP_IDLE = 0
 RSP_MORE = 1
+RSP_INVAL = 2
 RSP_LAST = 3
 
 # Max words per batch (limits how many shifts we post before awaiting)
@@ -101,7 +104,7 @@ class SdmJtag(Sdm):
         tap = self._tap
         words = []
         rsp_count = None
-        silent_streak = 0
+        silent_to_go = max_silent
         zero_tdi = self._cmd_tdi(0, CMD_IDLE)
 
         while True:
@@ -116,23 +119,18 @@ class SdmJtag(Sdm):
             futures = []
             for _ in range(to_rx):
                 futures.append(tap.SDM_RSP(zero_tdi, read_tdo=True))
-            # Await the last one to flush the batch
-            await futures[-1]
+
+            silent_to_go -= 1
 
             # Process results
             for f in futures:
-                raw = int(f.result()) & ((1 << 34) - 1)
+                raw = int(await f) & ((1 << 34) - 1)
                 word, framing = self._unpack_rsp(raw)
-
+                
                 if framing == RSP_IDLE:
-                    silent_streak += 1
-                    if silent_streak > max_silent:
-                        if not words:
-                            raise SdmTimeoutError("No response from SDM")
-                        return words
                     continue
 
-                silent_streak = 0
+                silent_to_go = max_silent
                 words.append(word)
 
                 if rsp_count is None:
@@ -141,19 +139,42 @@ class SdmJtag(Sdm):
                 if framing == RSP_LAST or len(words) >= rsp_count:
                     return words
 
+            if silent_to_go <= 0:
+                raise SdmTimeoutError("No response from SDM")
+
         return words
 
-    async def sync(self, nonce=0xDEADBEEF):
+    async def _flush(self):
+        while True:
+            self._tap.SDM_CMD(self._cmd_tdi(0, CMD_IDLE), read_tdo=False)
+            self._tap.SDM_CMD(self._cmd_tdi(0, CMD_SINGLE), read_tdo=False)
+            self._tap.SDM_CMD(self._cmd_tdi(0, CMD_LAST), read_tdo=False)
+
+            # Drain stale RSP data
+            while True:
+                rx = await self._tap.SDM_RSP(0, read_tdo=True)
+                word, framing = self._unpack_rsp(int(rx))
+                if framing in [RSP_MORE, RSP_LAST]:
+                    continue
+                if framing == RSP_INVAL:
+                    break
+                if framing == RSP_IDLE:
+                    return
+    
+    async def sync(self, nonce=None):
         """SDM sync with flush phase before the SYNC command."""
-        tap = self._tap
+
+        if hasattr(self._tap, 'SDM_WAKEUP'):
+            pre = time.time()
+            left = 200
+            await self._tap.SDM_WAKEUP(None)
+            while time.time() < pre + .1 and left > 0:
+                await self._tap.run(512)
+                left -= 1
+        await self._tap.IDCODE(0, read_tdo = True)
+                
 
         # Phase 1: Flush
-        tap.SDM_CMD(self._cmd_tdi(0, CMD_IDLE), read_tdo=False)
-        tap.SDM_CMD(self._cmd_tdi(0, CMD_SINGLE), read_tdo=False)
-        await tap.SDM_CMD(self._cmd_tdi(0, CMD_LAST), read_tdo=False)
-
-        # Drain stale RSP data
-        await tap.SDM_RSP(self._cmd_tdi(0, CMD_IDLE), read_tdo=False)
-
+        await self._flush()
         # Phase 2: SYNC via parent
         return await super().sync(nonce)

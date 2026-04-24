@@ -18,16 +18,53 @@ SDM response header (32-bit):
 """
 
 import enum
+from ...component import Component
 
+class SdmErrorCode(enum.IntEnum):
+    OK = 0	
+    INVALID_COMMAND = 1
+    UNKNOWN_COMMAND = 3
+    INVALID_COMMAND_PARAMETERS = 4
+    COMMAND_INVALID_ON_SOURCE = 6
+    CLIENT_ID_NO_MATCH = 8
+    INVALID_ADDRESS = 9
+    AUTHENTICATION_FAIL = 0xa
+    TIMEOUT = 0xb
+    HW_NOT_READY = 0xc
+    HW_ERROR = 0xd
+    QSPI_HW_ERROR = 0x80
+    QSPI_ALREADY_OPEN = 0x81
+    EFUSE_SYSTEM_FAILURE = 0x82
+    COMMAND_SPECIFIC_ERROR_3 = 0x83
+    COMMAND_SPECIFIC_ERROR_4 = 0x84
+    COMMAND_SPECIFIC_ERROR_5 = 0x85
+    COMMAND_SPECIFIC_ERROR_6 = 0x86
+    COMMAND_SPECIFIC_ERROR_7 = 0x87
+    COMMAND_SPECIFIC_ERROR_8 = 0x88
+    COMMAND_SPECIFIC_ERROR_9 = 0x89
+    COMMAND_SPECIFIC_ERROR_A = 0x8A
+    COMMAND_SPECIFIC_ERROR_B = 0x8B
+    COMMAND_SPECIFIC_ERROR_C = 0x8C
+    COMMAND_SPECIFIC_ERROR_D = 0x8D
+    COMMAND_SPECIFIC_ERROR_E = 0x8E
+    QSPI_OWNED_BY_SDM_IN_USER_MODE = 0x8F
+    NOT_CONFIGURED = 0x100
+    ALT_SDM_MBOX_RESP_DEVICE_BUSY = 0x1FF
+    ALT_SDM_MBOX_RESP_NO_VALID_RESP_AVAILABLE = 0x2FF
+    ALT_SDM_MBOX_RESP_ERROR = 0x3FF
 
 class SdmError(Exception):
     """SDM returned a non-zero error code."""
 
     def __init__(self, error_code, opcode=None):
+        try:
+            error_code = SdmErrorCode(error_code)
+        except:
+            pass
         self.error_code = error_code
         self.opcode = opcode
         op = f" for opcode {opcode:#05x}" if opcode is not None else ""
-        super().__init__(f"SDM error {error_code:#05x}{op}")
+        super().__init__(f"SDM error {error_code}{op}")
 
 
 class SdmFramingError(Exception):
@@ -38,14 +75,15 @@ class SdmTimeoutError(Exception):
     """No response from SDM."""
 
 
-class Sdm:
-    """ABC for SDM command/response transport.
+class Sdm(Component):
+    """Base for SDM command/response transport.
 
     Subclasses implement do_io() for the physical transport.
     This class provides the command serialization and response parsing.
     """
 
     def __init__(self):
+        super().__init__("sdm")
         self._id = 0
 
     async def do_io(self, cmd: list[int]) -> list[int]:
@@ -61,7 +99,7 @@ class Sdm:
         """
         raise NotImplementedError
 
-    async def sync(self, nonce=0xDEADBEEF):
+    async def sync(self, nonce=None):
         """Perform SDM sync handshake.
 
         Sends SYNC command (opcode 1) with an arbitrary nonce.
@@ -71,6 +109,9 @@ class Sdm:
         """
         cid = self._id & 0xF
         self._id += 1
+
+        if nonce is None:
+            nonce = 0xc696aa13
 
         header = 0x001 | (1 << 12) | (cid << 24) | (0xF << 28)
         rsp = await self.do_io([header, nonce])

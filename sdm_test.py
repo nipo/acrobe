@@ -21,7 +21,7 @@ from acrobe import log
 async def main():
     log.setup(level=logging.INFO)
 
-    root_path = sys.argv[1] if len(sys.argv) > 1 else "tei-/jtag"
+    root_path = sys.argv[1] if len(sys.argv) > 1 else "ub3-/jtag/0/0"
 
     hw_root = HwRoot()
     hw_root.add_enumerator(UsbEnumerator())
@@ -31,62 +31,22 @@ async def main():
     await leaf.start_tree()
 
     # Get the Agilex 5 TAP from the discovered chain
-    from acrobe.component.altera.agilex5 import Agilex5
-    tap = None
-    for child in leaf._children:
-        for sub in getattr(child, '_children', []):
-            if isinstance(sub, Agilex5):
-                tap = sub
-                break
+    tap = leaf
+    sdm = await tap.child_summon("sdm")
 
-    if tap is None:
-        print("No Agilex 5 TAP found in chain")
-        return
-
-    idcode = tap.idcode
-    print(f"JTAG IDCODE: {idcode:#010x} ({tap.name})")
-
-    sdm = SdmJtag(tap)
-
-    # Sync
-    print("Syncing with SDM...")
-    try:
-        echoed = await sdm.sync()
-        print(f"Sync OK, nonce echoed: {echoed:#010x}")
-    except SdmError as e:
-        print(f"Sync failed: {e}")
-        return
-
-    # GET_IDCODE (opcode 0x10)
     print("\nSending GET_IDCODE...")
-    try:
-        data = await sdm.command(0x10)
-        sdm_idcode = int.from_bytes(data[:4], 'little')
-        print(f"SDM IDCODE: {sdm_idcode:#010x}")
-        if sdm_idcode == idcode:
-            print("  Matches JTAG IDCODE!")
-    except SdmError as e:
-        print(f"GET_IDCODE failed: {e}")
+    sdm_idcode = await sdm.get_idcode()
+    print(f"SDM IDCODE: {sdm_idcode:#010x}")
+    if sdm_idcode == tap.idcode:
+        print("  Matches JTAG IDCODE!")
 
-    # GET_CHIPID (opcode 0x12)
     print("\nSending GET_CHIPID...")
-    try:
-        data = await sdm.command(0x12)
-        chipid = int.from_bytes(data[:8], 'little')
-        print(f"Chip ID: {chipid:#018x}")
-    except SdmError as e:
-        print(f"GET_CHIPID failed: {e}")
+    chipid = await sdm.get_chipid()
+    print(f"Chip ID: {chipid:#018x}")
 
-    # CONFIG_STATUS (opcode 0x04)
     print("\nSending CONFIG_STATUS...")
-    try:
-        data = await sdm.command(0x04)
-        print(f"CONFIG_STATUS: {len(data)} bytes")
-        for i in range(0, len(data), 4):
-            w = int.from_bytes(data[i:i+4], 'little')
-            print(f"  [{i//4}] {w:#010x}")
-    except SdmError as e:
-        print(f"CONFIG_STATUS failed: {e}")
+    cs = await sdm.config_status()
+    cs.dump_pretty(print)
 
-
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

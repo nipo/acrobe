@@ -5,6 +5,8 @@ import struct
 from ...protocol.jtag import Tap, Dr, Instruction
 from ..fpga import JtagSramFpga
 from ...bitstring import BitString
+from ...bitfield import *
+from ...component import Component
 from .sdm import Sdm, SdmError
 from .sdm_jtag import SdmJtag
 
@@ -15,19 +17,32 @@ class Agilex5SdmCommand(enum.IntEnum):
     SYNC = 0x001
     CONFIG_STATUS = 0x004
     CONFIG_REQUEST = 0x005
+
     GET_IDCODE = 0x010
     GET_CHIPID = 0x012
     GET_USERCODE = 0x013
     GET_VOLTAGE = 0x018
     GET_TEMPERATURE = 0x019
+    GET_CONFIGURATION_TIME = 0x065
+
+    READ_SEU_ERROR = 0x03c
+    STATUS_VR = 0x713
+
     QSPI_OPEN = 0x032
     QSPI_CLOSE = 0x033
     QSPI_SET_CS = 0x034
     QSPI_READ_DEVICE_REG = 0x035
+    QSPI_WRITE_DEVICE_REG = 0x036
+    QSPI_SEND_DEVICE_OP = 0x037
+    QSPI_READ_SHA = 0x06e
     QSPI_ERASE = 0x038
     QSPI_WRITE = 0x039
     QSPI_READ = 0x03A
+
+    RSU_GET_SPT = 0x05A
     RSU_STATUS = 0x05B
+    RSU_IMAGE_UPDATE = 0x5c
+    RSU_NOTIFY = 0x5d
 
 
 class Agilex5(Tap, JtagSramFpga):
@@ -54,9 +69,13 @@ class Agilex5(Tap, JtagSramFpga):
     BYPASS = Instruction(0x3FF, "BYPASS_REG")
 
     # SDM JTAG instructions
-    SDM_CMD = Instruction(0x201, None)
-    SDM_RSP = Instruction(0x202, None)
-    CONFIG_STATUS_VJ = Instruction(0x208, None)
+    SDM_IO = Dr(34)
+    SDM_CMD = Instruction(0x201, "SDM_IO")
+    SDM_RSP = Instruction(0x202, "SDM_IO")
+    SDM_WAKEUP = Instruction(0x281, None)
+
+    CONFIG_STATUS_REG = Dr(40)
+    CONFIG_STATUS_VJ = Instruction(0x208, "CONFIG_STATUS_REG")
 
     CONF_DONE_BIT = 13
 
@@ -257,7 +276,39 @@ class Agilex5(Tap, JtagSramFpga):
 # SDM client component
 # ------------------------------------------------------------------
 
-class AgilexSdmClient:
+class ConfigStatus(Bitfield):
+    # Word 0
+    state = BooleanField(0)
+    # Word 1
+    fw_version = Field(32+28, 4)
+    quartus_major = Field(32+16, 8)
+    quartus_minor = Field(32+8, 8)
+    quartus_update = Field(32, 8)
+    # Word 2
+    nSTATUS = BooleanField(64+31)
+    nCONFIG = BooleanField(64+30)
+    clk_src = MappingField(64+6, 2, [None, "Int", "Clk1", "SecurePll"])
+    vid_enabled = BooleanField(64+4)
+    msel = MappingField(64+0, 3, {
+        1: "AS-Fast",
+        3: "AS-Normal",
+        5: "AvSTx16",
+        6: "AvSTx8",
+        7: "JTAG",
+    })
+    # Word 3
+    hps_warmreset = BooleanField(96+5)
+    hps_coldreset = BooleanField(96+4)
+    seu_error = BooleanField(96+3)
+    cvp_done = BooleanField(96+2)
+    init_done = BooleanField(96+1)
+    conf_done = BooleanField(96+0)
+    # Word 4
+    error_location = Field(128, 32)
+    # Word 5
+    error_details = Field(160, 32)
+
+class AgilexSdmClient(Component):
     """High-level SDM command interface for Agilex devices.
 
     Provides typed methods for each known SDM command.
@@ -265,6 +316,7 @@ class AgilexSdmClient:
     """
 
     def __init__(self, sdm: Sdm):
+        super().__init__("agilex_sdm")
         self._sdm = sdm
 
     async def get_idcode(self) -> int:
@@ -284,7 +336,9 @@ class AgilexSdmClient:
 
     async def config_status(self) -> bytes:
         """Read configuration status (6 words = 24 bytes)."""
-        return await self._sdm.command(Agilex5SdmCommand.CONFIG_STATUS)
+        v = await self._sdm.command(Agilex5SdmCommand.CONFIG_STATUS)
+        v = int.from_bytes(v, "little")
+        return ConfigStatus(all = v)
 
     async def qspi_open(self):
         """Enable QSPI flash access."""
