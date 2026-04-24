@@ -367,14 +367,7 @@ class TestChildSummonStart:
 class TestJtagInterface:
     async def test_spawns_chain_child(self):
         """Chain is spawned on demand via child_spawn, not auto-created."""
-        from acrobe.engine import Batcher
-
-        class MockJtag(Batcher):
-            async def flush_ops(self, batch):
-                for _, f in batch:
-                    f.set_result(None)
-
-        iface = JtagInterface(MockJtag(), name="jtag-pt")
+        iface = JtagInterface(name="jtag-pt")
         assert len(iface.children) == 0
         chain = await iface.child_spawn("chain")
         assert isinstance(chain, Chain)

@@ -1568,29 +1568,33 @@ def _analyze_variables(program, config):
     written_in_procs = set()
     # For vars written only with constant values, track those values
     proc_write_values = {}  # name -> set of folded values (or None if non-const)
+
+    def _check_write(stmt):
+        """Check a statement (and nested IfStmt bodies) for variable writes."""
+        if isinstance(stmt, AssignStmt) and stmt.target in var_infos:
+            name = stmt.target
+            if stmt.index is None and stmt.high is None:
+                val = _try_const_fold(stmt.value)
+                if val is not None:
+                    proc_write_values.setdefault(name, set()).add(val)
+                    return
+            written_in_procs.add(name)
+        elif isinstance(stmt, IfStmt):
+            _check_write(stmt.then_stmt)
+        elif isinstance(stmt, ForStmt) and stmt.var in var_infos:
+            written_in_procs.add(stmt.var)
+        elif isinstance(stmt, PopStmt) and stmt.target in var_infos:
+            written_in_procs.add(stmt.target)
+        elif isinstance(stmt, (DrScanStmt, IrScanStmt)):
+            if stmt.capture is not None:
+                cap = stmt.capture
+                name = getattr(cap, 'name', None)
+                if name and name in var_infos:
+                    written_in_procs.add(name)
+
     for proc in program.procedures.values():
         for stmt in proc.statements:
-            if isinstance(stmt, AssignStmt) and stmt.target in var_infos:
-                name = stmt.target
-                if stmt.index is None and stmt.high is None:
-                    # Whole-variable assignment — try to fold
-                    val = _try_const_fold(stmt.value)
-                    if val is not None:
-                        proc_write_values.setdefault(name, set()).add(val)
-                        continue
-                # Indexed/subrange/non-constant assignment
-                written_in_procs.add(name)
-            elif isinstance(stmt, ForStmt) and stmt.var in var_infos:
-                written_in_procs.add(stmt.var)
-            elif isinstance(stmt, PopStmt) and stmt.target in var_infos:
-                written_in_procs.add(stmt.target)
-            # DRSCAN/IRSCAN CAPTURE writes to the capture array
-            elif isinstance(stmt, (DrScanStmt, IrScanStmt)):
-                if stmt.capture is not None:
-                    cap = stmt.capture
-                    name = getattr(cap, 'name', None)
-                    if name and name in var_infos:
-                        written_in_procs.add(name)
+            _check_write(stmt)
 
     for vi in var_infos.values():
         if (vi.scope == 'data' and vi.has_init
@@ -2110,7 +2114,7 @@ class _StmtEmitter:
     def __init__(self, w, expr_em, var_infos, proc_locals, program):
         self._w = w
         self._dead_vars = {n for n, vi in var_infos.items()
-                           if not vi.is_read or vi.is_const}
+                           if not vi.is_read}
         self._constants = {n: vi.const_value for n, vi in var_infos.items()
                            if vi.is_const and not vi.is_array}
         self._expr = expr_em
