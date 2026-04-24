@@ -32,15 +32,8 @@ async def main():
     hw_root = HwRoot()
     hw_root.add_enumerator(UsbEnumerator())
 
-    # Skip Agilex5.start() CHECK_STATUS — hangs on re-config
-    _orig_start = Agilex5.start
-    async def _skip_start(self):
-        self.logger.note("IDCODE: 0x%08x", self.idcode)
-    Agilex5.start = _skip_start
-
     parts = root_path.strip('/').split('/')
     tap = await hw_root.child_summon(*parts, 'chain', '0')
-    Agilex5.start = _orig_start
 
     assert isinstance(tap, Agilex5), f"Expected Agilex5, got {type(tap).__name__}"
 
@@ -52,5 +45,5 @@ async def main():
     await tap.load([Segment(bitstream)])
     print("Configuration successful!")
 
-
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
