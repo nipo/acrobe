@@ -78,29 +78,46 @@ async def config_data_shift(tap, data_bits, bit_count):
 
 
 async def stream_bitstream(tap, data: bytes):
-    """Stream bitstream data using CONFIG_DATA/CONFIG_STATUS protocol."""
+    """Stream bitstream data using CONFIG_DATA/CONFIG_STATUS protocol.
+
+    Matches STAPL j127/j125 flow control:
+    - First poll: request_data + start_config + enable (TDI=7)
+    - After DONE=1 stall: request_data (TDI=1)
+    - Normal: no flags (TDI=0)
+    - Chunk doubling on success, halving on stall
+    - Data position tracks SDM progress counter
+    """
     total_bits = len(data) * 8
     chunk_size = INITIAL_CHUNK
-    first = True
-    stalled = False
-    prev_done = False
+    j123 = True  # first-iteration flag (matches STAPL J123)
+    j123_active = True  # prevents chunk doubling until first send
+    j112 = False  # was-stalled flag (matches STAPL J112)
+    retries_left = 6000  # matches STAPL J115
 
     t0 = time.time()
     sent_count = 0
 
     while True:
-        # CONFIG_STATUS poll
-        request_data = first or (prev_done)
+        # Determine TDI flags (matching STAPL j125 setup)
+        if j123:
+            request_data = True
+            start_config = True
+            enable = True
+        else:
+            # request_data when SDM was stalled with no FIFO space
+            request_data = (j112 and True)  # simplified: always request after stall
+            start_config = False
+            enable = False
+
         done, error, progress, fifo_free = await config_status_shift(
             tap,
             request_data=request_data,
-            start_config=first,
-            enable=first,
+            start_config=start_config,
+            enable=enable,
         )
-        prev_done = done
 
-        if first:
-            first = False
+        if j123:
+            j123 = False
 
         if error:
             raise RuntimeError(
@@ -113,16 +130,23 @@ async def stream_bitstream(tap, data: bytes):
                   f"{sent_count} shifts")
             return
 
-        # Flow control
+        retries_left -= 1
+        if retries_left <= 0:
+            raise RuntimeError(
+                f"SDM streaming timeout (progress={progress}/{total_bits})")
+
+        # Flow control: if DONE, SDM is busy, don't send data
         if done:
-            stalled = True
+            j112 = True
             if chunk_size > INITIAL_CHUNK:
                 chunk_size //= 2
             continue
 
-        if stalled:
-            stalled = False
-        else:
+        # DONE=0: SDM ready for more data
+        if j112:
+            j112 = False
+        elif not j123_active:
+            # Only double chunk after first successful send
             chunk_size = min(chunk_size * 2, MAX_CHUNK)
 
         # Send data chunk from SDM's progress position
@@ -135,6 +159,14 @@ async def stream_bitstream(tap, data: bytes):
 
         await config_data_shift(tap, data_slice, n)
         sent_count += 1
+        retries_left = 6000  # reset timeout after successful send
+        j123_active = False  # allow chunk doubling after first send
+
+        pct = progress * 100 // total_bits
+        print(f"\r  {pct}% ({progress}/{total_bits}) chunk={n} shifts={sent_count}",
+              end='', flush=True)
+
+    print()  # newline after progress
 
 
 async def main():
@@ -178,9 +210,30 @@ async def main():
 
     print(f"TAP: {tap.name} (IDCODE: {tap.idcode:#010x})")
 
-    # Pre-SDM init: minimal — just IDCODE read and settle
+    # Pre-SDM init: replicate STAPL's l39 sequence
+    # IDCODE read, feature IR scans with waits, active SDM wait
     print("Pre-init...")
     idcode_val = int(await tap.IDCODE())
+    await tap.run(16)
+
+    # Feature IR scans (from STAPL l39 — may trigger config reset)
+    for ir_val, wait_us in [
+        (0x071, 10000),   # pulse_nconfig?
+        (0x332, 10000),   # config reset?
+        (0x044, 10000),   # SLD reset?
+    ]:
+        await tap.ir(ir_val, dr_length=10)(BitString(0, 10), read_tdo=False)
+        await tap.run(16)
+        await asyncio.sleep(wait_us / 1e6)
+
+    # IR 0x281 + active wait
+    await tap.ir(0x281, dr_length=10)(BitString(0, 10), read_tdo=False)
+    for _ in range(200):
+        await tap.run(512)
+        await asyncio.sleep(512e-6)
+
+    # Back to BYPASS
+    await tap.ir(0x3FF, dr_length=1)(BitString(0, 1), read_tdo=False)
     await tap.run(16)
     print(f"  IDCODE: {idcode_val:#010x}")
 
