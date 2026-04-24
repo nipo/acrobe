@@ -72,6 +72,26 @@ class Adapter(Component):
         pass
 
 
+class JtagAdapter(Adapter):
+    """Adapter that provides a JTAG interface.
+
+    Mixin for adapters that have a self._jtag batcher. Adds "jtag"
+    to child_spawn. Multi-protocol adapters can inherit this alongside
+    other mixins, or just override child_spawn directly.
+    """
+
+    _jtag_max_freq = None  # Override per adapter if needed
+
+    async def child_spawn(self, name):
+        if name.lower() == "jtag":
+            from ..protocol.jtag import JtagInterface
+            iface = JtagInterface(self._jtag, name="jtag")
+            if self._jtag_max_freq is not None:
+                iface.freq_cap("hardware", self._jtag_max_freq)
+            return iface
+        return await super().child_spawn(name)
+
+
 class UsbEnumerator:
     """Scans USB bus for known adapters. Not a Component — used as a
     spawning strategy by HwRoot."""
