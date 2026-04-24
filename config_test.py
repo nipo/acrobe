@@ -118,6 +118,8 @@ async def stream_bitstream(tap, data: bytes):
 
         if j123:
             j123 = False
+            print(f"  Initial status: done={done} error={error} "
+                  f"progress={progress} fifo={fifo_free}", flush=True)
 
         if error:
             raise RuntimeError(
@@ -210,31 +212,9 @@ async def main():
 
     print(f"TAP: {tap.name} (IDCODE: {tap.idcode:#010x})")
 
-    # Pre-SDM init: replicate STAPL's l39 sequence
-    # IDCODE read, feature IR scans with waits, active SDM wait
+    # Pre-SDM init
     print("Pre-init...")
     idcode_val = int(await tap.IDCODE())
-    await tap.run(16)
-
-    # Feature IR scans (from STAPL l39 — may trigger config reset)
-    for ir_val, wait_us in [
-        (0x071, 10000),   # pulse_nconfig?
-        (0x332, 10000),   # config reset?
-        (0x044, 10000),   # SLD reset?
-    ]:
-        await tap.ir(ir_val, dr_length=10)(BitString(0, 10), read_tdo=False)
-        await tap.run(16)
-        await asyncio.sleep(wait_us / 1e6)
-
-    # IR 0x281 + active wait
-    await tap.ir(0x281, dr_length=10)(BitString(0, 10), read_tdo=False)
-    for _ in range(200):
-        await tap.run(512)
-        await asyncio.sleep(512e-6)
-
-    # Back to BYPASS
-    await tap.ir(0x3FF, dr_length=1)(BitString(0, 1), read_tdo=False)
-    await tap.run(16)
     print(f"  IDCODE: {idcode_val:#010x}")
 
     # SDM sync with retry — full flush+sync each attempt
@@ -255,7 +235,7 @@ async def main():
         print("  Sync failed after 10 attempts")
         sys.exit(1)
 
-    # Config request — SDM takes time to respond
+    # Config request — SDM needs time to switch to config mode
     print("Config request (opcode 0x05)...")
     for attempt in range(5):
         try:
@@ -295,6 +275,9 @@ async def main():
             print(f"  Attempt {attempt + 1}:")
             cs.dump_pretty(lambda s: print(f"    {s}"))
             if cs.conf_done:
+                # Deselect config interface — load BYPASS
+                await tap.ir(0x3FF, dr_length=1)(BitString(0, 1), read_tdo=False)
+                await tap.run(16)
                 print("\n  CONF_DONE asserted — configuration successful!")
                 return
         except SdmError as e:
