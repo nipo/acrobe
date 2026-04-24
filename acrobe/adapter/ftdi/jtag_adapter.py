@@ -1,12 +1,14 @@
 import logging
 
-from ..model import JtagAdapter, make_adapter_name
+from ...db import NoMatch
+from ..model import Adapter, make_adapter_name
 from .transport import FtdiTransport
 from .mpsse import MpsseEngine
 from .jtag import JtagMpsse
+from ...protocol.jtag import JtagInterface
 
 
-class FtdiJtagAdapter(JtagAdapter):
+class FtdiJtagAdapter(Adapter):
     """Generic single-channel FTDI MPSSE JTAG adapter.
 
     Subclasses override class attributes to configure USB identity
@@ -20,7 +22,8 @@ class FtdiJtagAdapter(JtagAdapter):
     _gpio_oe = 0
     _gpio_val = 0
     _led = None  # Optional[ActivityLed]
-    _jtag_max_freq = 30e6  # FT2232H/FT4232H max JTAG clock
+
+    supported_interfaces = ["jtag"]
 
     def __init__(self, name, device, transport, engine, jtag):
         super().__init__(name)
@@ -57,6 +60,13 @@ class FtdiJtagAdapter(JtagAdapter):
             engine.set_bracket(on_cmd, off_cmd)
 
         return cls(name, device, transport, engine, jtag)
+
+    async def child_spawn(self, name):
+        if name.lower() == "jtag":
+            iface = JtagInterface(self._jtag, name="jtag")
+            iface.freq_cap("hardware", 30e6)
+            return iface
+        raise NoMatch("interface", name)
 
     async def close(self):
         await self._transport.close()

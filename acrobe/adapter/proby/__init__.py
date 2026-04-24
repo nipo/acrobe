@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path
 
 from ...db import NoMatch
-from ..model import JtagAdapter, AdapterInfo, adapter_db
+from ..model import Adapter, AdapterInfo, adapter_db
 from ..ftdi.transport import FtdiTransport
 from ..ftdi.mpsse import MpsseEngine
 from ..ftdi.jtag import JtagMpsse
@@ -18,7 +18,7 @@ _RESETN_PIN = 9
 
 
 @adapter_db.register(AdapterInfo("Proby", vid=0x10eb, pid=0x0026))
-class ProbyAdapter(JtagAdapter):
+class ProbyAdapter(Adapter):
     supported_interfaces = ["jtag", "jtag-pt"]
 
     def __init__(self, name, device, transport, engine, jtag):
@@ -84,7 +84,12 @@ class ProbyAdapter(JtagAdapter):
         return jtag
 
     async def child_spawn(self, name):
-        if name.lower() == "jtag-pt":
+        name_lower = name.lower()
+
+        if name_lower == "jtag":
+            return JtagInterface(self._jtag, name="jtag")
+
+        if name_lower == "jtag-pt":
             async with self._channel_a_lock:
                 await self._close_channel_a()
                 await self._reprogram("jtag_swd_raw")
@@ -92,7 +97,7 @@ class ProbyAdapter(JtagAdapter):
                     gpio_oe=0x0710, gpio_val=0x0310)
                 return JtagInterface(jtag, name="jtag-pt")
 
-        return await super().child_spawn(name)
+        raise NoMatch("interface", name)
 
     async def close(self):
         await self._close_channel_a()
