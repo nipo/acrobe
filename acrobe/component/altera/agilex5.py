@@ -143,7 +143,17 @@ class Agilex5(Tap, JtagSramFpga):
         sdm = self._build_sdm()
 
         self.logger.trace("Synchronizing with SDM...")
-        await sdm.sync()
+        from .sdm import SdmTimeoutError, SdmFramingError
+        for attempt in range(5):
+            try:
+                await sdm.sync()
+                break
+            except (SdmTimeoutError, SdmFramingError):
+                self.logger.trace("Sync attempt %d failed, retrying...",
+                                  attempt + 1)
+                await asyncio.sleep(0.05)
+        else:
+            raise SdmError(0, opcode=int(Agilex5SdmCommand.SYNC))
 
         self.logger.trace("Requesting configuration...")
         await sdm.command(Agilex5SdmCommand.CONFIG_REQUEST)
@@ -152,13 +162,20 @@ class Agilex5(Tap, JtagSramFpga):
         with self.progress("config", len(blob), unit="B"):
             await self._stream_bitstream(blob, total_bits)
 
-        self.logger.trace("Waiting for CONF_DONE...")
+        self.logger.trace("Checking CONF_DONE...")
+        from .agilex5 import AgilexSdmClient
+        client = AgilexSdmClient(sdm)
         for attempt in range(15):
             await asyncio.sleep(0.1)
             try:
-                status = await sdm.command(Agilex5SdmCommand.CONFIG_STATUS)
-                self.logger.protocol("SDM status: %s",
-                                     status.hex(' '))
+                cs = await client.config_status()
+                if cs.conf_done:
+                    self.logger.note("Configuration complete")
+                    # Clean up: deselect config interface
+                    await self.ir(0x3FF, dr_length=1)(
+                        BitString(0, 1), read_tdo=False)
+                    await self.run(16)
+                    return
             except SdmError:
                 continue
 
@@ -200,67 +217,80 @@ class Agilex5(Tap, JtagSramFpga):
         return done, error, progress_words * 32, fifo_free
 
     async def _stream_bitstream(self, data, total_bits):
-        """Stream bitstream data to SDM via IR 0x002 (CONFIG)."""
+        """Stream bitstream data to SDM via IR 0x002 (CONFIG).
+
+        Matches STAPL J127/J125 flow control:
+        1. First poll: request_data + start_config + enable (TDI=7)
+        2. Wait for done=True (SDM config engine ready)
+        3. Send data chunks, poll status between each
+        4. Chunk doubles on success, halves on stall
+        5. Data position tracks SDM progress counter (re-sends on stall)
+        """
         chunk_size = self._STREAM_INITIAL_CHUNK
-        consumed = 0
-        sent_bits = 0
-        first = True
-        stalled = False
-        prev_done = False
-        prev_fifo_free = 0
+        first = True       # J123: first-iteration flag
+        stalled = False     # J112: was-stalled flag
         status_retries = self._STREAM_STATUS_RETRIES
 
         header_bs = BitString(
             self._STREAM_HEADER.to_bytes(8, 'little'),
             self._STREAM_HEADER_BITS)
 
-        while consumed < total_bits:
-            request_data = first or (prev_done and prev_fifo_free == 0)
+        while True:
+            # CONFIG_STATUS poll
+            if first:
+                request_data = True
+                start_config = True
+                enable = True
+            else:
+                request_data = stalled
+                start_config = False
+                enable = False
+
             done, error, progress, fifo_free = await self._stream_status_check(
                 request_data=request_data,
-                start_config=first,
-                enable=first,
+                start_config=start_config,
+                enable=enable,
             )
-            prev_done = done
-            prev_fifo_free = fifo_free
 
             if first:
                 first = False
 
             if error:
-                raise SdmError(
-                    0,
-                    opcode=int(Agilex5SdmCommand.CONFIG_REQUEST))
+                raise SdmError(0, opcode=int(
+                    Agilex5SdmCommand.CONFIG_REQUEST))
 
-            consumed = progress
-            if consumed >= total_bits:
+            if progress >= total_bits:
                 break
 
             status_retries -= 1
             if status_retries <= 0:
-                raise SdmError(
-                    0,
-                    opcode=int(Agilex5SdmCommand.CONFIG_REQUEST))
+                raise SdmError(0, opcode=int(
+                    Agilex5SdmCommand.CONFIG_REQUEST))
 
+            # Flow control
             if done:
                 stalled = True
                 if chunk_size > self._STREAM_INITIAL_CHUNK:
                     chunk_size //= 2
                 continue
 
+            # SDM ready for data
             if stalled:
                 stalled = False
             else:
                 chunk_size = min(chunk_size * 2, self._STREAM_MAX_CHUNK)
 
-            remaining = total_bits - sent_bits
+            remaining = total_bits - progress
             if remaining <= 0:
                 continue
 
             n = min(chunk_size, remaining)
 
+            # Data is read from SDM's progress position, not our
+            # send position. On stall recovery, this re-sends data
+            # the SDM hasn't consumed yet.
             data_slice = BitString(
-                bytes(data[sent_bits // 8:(sent_bits + n + 7) // 8]), n)
+                bytes(data[progress // 8:(progress + n + 7) // 8]), n)
             trailer = BitString(0, 1)
             frame = header_bs + data_slice + trailer
 
@@ -268,7 +298,6 @@ class Agilex5(Tap, JtagSramFpga):
                 frame, read_tdo=False)
             await self.run(16)
 
-            sent_bits += n
             status_retries = self._STREAM_STATUS_RETRIES
 
 

@@ -144,34 +144,33 @@ class SdmJtag(Sdm):
 
         return words
 
-    async def _flush(self):
-        while True:
+    async def _flush(self, max_retries=10):
+        zero_tdi = self._cmd_tdi(0, CMD_IDLE)
+        for _ in range(max_retries):
             self._tap.SDM_CMD(self._cmd_tdi(0, CMD_IDLE), read_tdo=False)
             self._tap.SDM_CMD(self._cmd_tdi(0, CMD_SINGLE), read_tdo=False)
-            self._tap.SDM_CMD(self._cmd_tdi(0, CMD_LAST), read_tdo=False)
+            await self._tap.SDM_CMD(self._cmd_tdi(0, CMD_LAST), read_tdo=False)
 
             # Drain stale RSP data
-            while True:
-                rx = await self._tap.SDM_RSP(0, read_tdo=True)
+            for _ in range(50):
+                rx = await self._tap.SDM_RSP(zero_tdi, read_tdo=True)
                 word, framing = self._unpack_rsp(int(rx))
-                if framing in [RSP_MORE, RSP_LAST]:
+                if framing in (RSP_MORE, RSP_LAST):
                     continue
-                if framing == RSP_INVAL:
-                    break
                 if framing == RSP_IDLE:
                     return
+                # RSP_INVAL or unknown: retry flush
+                break
     
     async def sync(self, nonce=None):
         """SDM sync with flush phase before the SYNC command."""
 
         if hasattr(self._tap, 'SDM_WAKEUP'):
-            pre = time.time()
-            left = 200
             await self._tap.SDM_WAKEUP(None)
-            while time.time() < pre + .1 and left > 0:
+            for _ in range(200):
                 await self._tap.run(512)
-                left -= 1
-        await self._tap.IDCODE(0, read_tdo = True)
+                await asyncio.sleep(512e-6)
+        await self._tap.IDCODE(0, read_tdo=True)
                 
 
         # Phase 1: Flush
