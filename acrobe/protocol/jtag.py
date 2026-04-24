@@ -75,8 +75,9 @@ class _TapShift:
         self.read_tdo = read_tdo
 
     def __repr__(self):
-        return f"_TapShift(ir={self.ir_value:#x}, tdi={self.tdi!r}, read_tdo={self.read_tdo})"
-
+        if ir is not None:
+            ir = f"{self.ir_value:#x}"
+        return f"_TapShift(ir={ir}, tdi={self.tdi!r}, read_tdo={self.read_tdo})"
 
 class _TapRun:
     def __init__(self, cycles):
@@ -84,7 +85,6 @@ class _TapRun:
 
     def __repr__(self):
         return f"_TapRun(cycles={self.cycles})"
-
 
 class _TapIrStatus:
     def __repr__(self):
@@ -231,7 +231,6 @@ class Tap(Batcher, Component, InstructionRegistry):
         self.ir_post = 0
         self.dr_pre = 0
         self.dr_post = 0
-        self._current_ir = None
         self._interface = interface
 
         if name is None:
@@ -300,7 +299,7 @@ class Tap(Batcher, Component, InstructionRegistry):
         jtag_futures = []
         # Track which batch entries need TDO extraction
         tdo_info = []  # list of (batch_index, jtag_shift_future)
-
+        current_ir = None
         bypass_val = (1 << self.irlen) - 1
 
         for idx, (op, future) in enumerate(batch):
@@ -321,19 +320,19 @@ class Tap(Batcher, Component, InstructionRegistry):
                     jtag_futures.append(self._interface.post(
                         Shift(BitString(-1, self.ir_post), read_tdo=False)))
 
-                self._current_ir = bypass_val
+                current_ir = bypass_val
                 tdo_info.append((idx, data_future))
 
             elif isinstance(op, _TapShift):
                 # IR shift if IR changed
-                if op.ir_value != self._current_ir:
+                if op.ir_value is not None and op.ir_value != current_ir:
                     ir_data = (BitString(-1, self.ir_pre) +
                                BitString(op.ir_value, self.irlen) +
                                BitString(-1, self.ir_post))
                     jtag_futures.append(self._interface.post(CaptureIr()))
                     jtag_futures.append(self._interface.post(
                         Shift(ir_data, read_tdo=False)))
-                    self._current_ir = op.ir_value
+                    current_ir = op.ir_value
 
                 # DR shift
                 if op.tdi is not None:
