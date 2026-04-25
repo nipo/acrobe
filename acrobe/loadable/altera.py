@@ -61,6 +61,8 @@ _SOF_EMBEDDED = 0x24
 def parse_sof(filename):
     """Parse an Altera/Intel SOF file.
 
+    Handles both raw SOF and gzip-compressed SOF (Agilex).
+
     Returns a dict with:
         "tool": str — Quartus version
         "device": str — target device (e.g. "10CL025YU256C8G")
@@ -73,6 +75,11 @@ def parse_sof(filename):
     """
     with open(filename, "rb") as f:
         sof = f.read()
+
+    # Auto-detect gzip wrapper
+    if sof[:2] == b'\x1f\x8b':
+        import gzip
+        sof = gzip.decompress(sof)
 
     if sof[:4] != SOF_MAGIC:
         raise NoMatch("altera sof", filename)
