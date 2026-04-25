@@ -1,4 +1,5 @@
 import struct
+import enum
 
 from .model import Segment, Program
 from ..db import NoMatch
@@ -14,8 +15,7 @@ SOF_MAGIC = b"SOF\x00"
 # --- RBF loader ---
 
 @Program.ext_db.register("rbf")
-@Program.ext_db.register("bin")
-@Program.format_db.register("rbf", "altera")
+@Program.format_db.register("altera_rbf")
 def load_altera_rbf(filename, offset=0):
     with open(filename, "rb") as f:
         blob = f.read()
@@ -46,17 +46,17 @@ def load_altera_rbf(filename, offset=0):
 
 # --- SOF parser ---
 
-# SOF section tags
-_SOF_TOOL = 0x01
-_SOF_DEVICE = 0x02
-_SOF_DESIGN = 0x03
-_SOF_END = 0x08
-_SOF_CONFIG_DATA = 0x11
-_SOF_CONFIG_INFO = 0x12
-_SOF_METADATA = 0x13
-_SOF_CHECKSUM = 0x15
-_SOF_EMBEDDED = 0x24
-
+class SofSection(enum.IntEnum):
+    """SOF section tags"""
+    TOOL = 0x01
+    DEVICE = 0x02
+    DESIGN = 0x03
+    END = 0x08
+    CONFIG_DATA = 0x11
+    CONFIG_INFO = 0x12
+    METADATA = 0x13
+    CHECKSUM = 0x15
+    EMBEDDED = 0x24
 
 def parse_sof(filename):
     """Parse an Altera/Intel SOF file.
@@ -84,8 +84,7 @@ def parse_sof(filename):
     if sof[:4] != SOF_MAGIC:
         raise NoMatch("altera sof", filename)
 
-    version = struct.unpack_from("<I", sof, 4)[0]
-    section_count = struct.unpack_from("<I", sof, 8)[0]
+    version, section_count = struct.unpack_from("<II", sof, 4)
 
     result = {
         "version": version,
@@ -113,23 +112,23 @@ def parse_sof(filename):
 
         result["sections"].append((tag, flags, data))
 
-        if tag == _SOF_TOOL:
+        if tag == SofSection.TOOL:
             result["tool"] = data.rstrip(b"\x00").decode("ascii", errors="replace")
-        elif tag == _SOF_DEVICE:
+        elif tag == SofSection.DEVICE:
             result["device"] = data.rstrip(b"\x00").decode("ascii", errors="replace")
-        elif tag == _SOF_DESIGN:
+        elif tag == SofSection.DESIGN:
             result["design"] = data.rstrip(b"\x00").decode("ascii", errors="replace")
-        elif tag == _SOF_CONFIG_INFO:
+        elif tag == SofSection.CONFIG_INFO:
             result["config_info"] = data
-        elif tag == _SOF_CONFIG_DATA:
+        elif tag == SofSection.CONFIG_DATA:
             result["config_data"] = data
-        elif tag == _SOF_METADATA:
+        elif tag == SofSection.METADATA:
             # 16-byte section: 4 unknown + 4 unknown + 4 unknown + 4 usercode
             if length >= 16:
                 result["usercode"] = struct.unpack_from("<I", data, 12)[0]
-        elif tag == _SOF_CHECKSUM:
+        elif tag == SofSection.CHECKSUM:
             result["checksum"] = data
-        elif tag == _SOF_END:
+        elif tag == SofSection.END:
             break
 
     return result
