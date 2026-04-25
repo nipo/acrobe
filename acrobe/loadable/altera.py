@@ -135,6 +135,174 @@ def parse_sof(filename):
     return result
 
 
+POF_MAGIC = b"POF\x00"
+
+# POF section tags (same numbering as SOF)
+_POF_TOOL = 0x01
+_POF_FLASH = 0x02
+_POF_DESIGN = 0x03
+_POF_END = 0x08
+_POF_CONFIG_DATA = 0x11
+_POF_BOOT_INFO = 0x1a
+
+
+def _parse_pof_sections(pof):
+    """Parse POF/SOF tag-length-value sections."""
+    idx = 12  # skip magic(4) + version(4) + count(4)
+    sections = []
+    while idx + 6 <= len(pof):
+        tag = pof[idx]
+        flags = pof[idx + 1]
+        length = struct.unpack_from("<I", pof, idx + 2)[0]
+        data = pof[idx + 6:idx + 6 + length]
+        sections.append((tag, flags, data))
+        idx += 6 + length
+        if tag == _POF_END:
+            break
+    return sections
+
+
+def _parse_boot_info(data):
+    """Parse BOOT_INFO string into partition entries.
+
+    Format: "NAME ADDR SIZE;NAME ADDR SIZE;..."
+    Returns list of (name, address, size).
+    """
+    text = data.rstrip(b'\x00').decode('ascii', errors='replace')
+    partitions = []
+    for entry in text.split(';'):
+        tokens = entry.split()
+        if len(tokens) >= 3:
+            try:
+                name = tokens[0]
+                addr = int(tokens[1], 16)
+                size = int(tokens[2], 16)
+                partitions.append((name, addr, size))
+            except ValueError:
+                continue
+    return partitions
+
+
+_FF_GAP_THRESHOLD = 4096  # consecutive 0xFF bytes = end of RBF section
+
+
+def _find_rbf_end(data):
+    """Find where RBF data ends in a flash region.
+
+    RBF data is sparse (many zero bytes) but doesn't have
+    sustained runs of 0xFF longer than a few bytes. A run of
+    0xFF >= _FF_GAP_THRESHOLD indicates erased flash padding
+    after the RBF data.
+    """
+    ff_run = 0
+    for i in range(len(data)):
+        if data[i] == 0xFF:
+            ff_run += 1
+            if ff_run >= _FF_GAP_THRESHOLD:
+                return i - _FF_GAP_THRESHOLD + 1
+        else:
+            ff_run = 0
+    return len(data)
+
+
+def _extract_pof_bitstream(config_data, partitions):
+    """Extract RBF bitstream from POF flash image.
+
+    The flash image contains bitswapped RBF data split across
+    partitions listed in BOOT_INFO. Each partition's RBF data
+    starts at offset +12 (first partition has a header, others
+    have 0xFF padding). Data runs until a sustained 0xFF gap.
+
+    The extracted chunks are concatenated and bitswapped to
+    produce the equivalent of an RBF file.
+    """
+    parts = sorted(partitions, key=lambda p: p[1])
+
+    chunks = []
+    for i, (name, addr, size) in enumerate(parts):
+        if i + 1 < len(parts):
+            region_end = min(addr + size, parts[i + 1][1])
+        else:
+            region_end = min(addr + size, len(config_data))
+
+        # RBF data starts at +12 in each partition
+        data_start = addr + 12
+        if data_start >= region_end:
+            continue
+
+        region = config_data[data_start:region_end]
+        rbf_end = _find_rbf_end(region)
+        chunk = region[:rbf_end]
+
+        if chunk:
+            chunks.append(chunk)
+
+    if not chunks:
+        return None
+
+    return bitswap8(b''.join(chunks))
+
+
+@Program.ext_db.register("pof")
+@Program.format_db.register("pof")
+def load_altera_pof(filename, offset=0):
+    """Load an Altera POF file.
+
+    Extracts the RBF bitstream from the flash image, bitswaps it
+    to JTAG bit order, and returns it as a loadable program.
+    Equivalent to loading the corresponding RBF file.
+    """
+    with open(filename, "rb") as f:
+        pof = f.read()
+
+    if pof[:4] != POF_MAGIC:
+        raise NoMatch("altera pof", filename)
+
+    sections = _parse_pof_sections(pof)
+
+    config_data = None
+    boot_info = None
+    tool = None
+    device = None
+    design = None
+
+    for tag, flags, data in sections:
+        if tag == _POF_CONFIG_DATA:
+            config_data = data
+        elif tag == _POF_BOOT_INFO:
+            boot_info = _parse_boot_info(data)
+        elif tag == _POF_TOOL:
+            tool = data.rstrip(b'\x00').decode('ascii', errors='replace')
+        elif tag == _POF_FLASH:
+            device = data.rstrip(b'\x00').decode('ascii', errors='replace')
+        elif tag == _POF_DESIGN:
+            design = data.rstrip(b'\x00').decode('ascii', errors='replace')
+
+    if config_data is None:
+        raise ValueError(f"POF file {filename} has no CONFIG_DATA section")
+
+    if boot_info is None:
+        # No partition table — treat entire config_data as bitstream
+        # Skip 12-byte header, bitswap
+        blob = bitswap8(config_data[12:])
+    else:
+        blob = _extract_pof_bitstream(config_data, boot_info)
+        if blob is None:
+            raise ValueError(f"POF file {filename}: no data in partitions")
+
+    program = Program(filename)
+    program.info["format"] = "altera_pof"
+    if tool:
+        program.info["tool"] = tool
+    if device:
+        program.info["flash"] = device
+    if design:
+        program.info["design"] = design
+
+    program.append(Segment(offset, blob, filename))
+    return program
+
+
 @Program.ext_db.register("sof")
 @Program.format_db.register("sof")
 def load_altera_sof(filename, offset=0):
