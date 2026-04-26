@@ -1,4 +1,4 @@
-"""Node — the unified tree base class.
+"""Node — the unified tree base class plus byte-access mixins.
 
 A `Node` is one element in acrobe's hierarchical model. The same class
 covers hardware components (adapters, JTAG TAPs, regions, ...) and
@@ -6,7 +6,15 @@ file/format containers (POF, ZIP, ELF, ...). Composition naturally
 mixes both: e.g. a flash region (Node) can have a POF (Node) child
 that exposes its partitions (Nodes) as RBF (Nodes).
 
-See `docs/vfs-design.md` for the full design.
+A Node MAY additionally implement one or more of the byte-access
+mixins:
+
+- `Readable`   — the node exposes one contiguous blob of bytes.
+- `Writable`   — the node accepts in-place writes (passthrough only).
+- `Addressable`— the node carries address metadata for target loading.
+
+Mixins are independent; a Node opts in to whichever apply. See
+`docs/vfs-design.md` for the full design.
 """
 
 import asyncio
@@ -15,6 +23,80 @@ from contextlib import contextmanager
 
 from .db import NoMatch
 from .log import get_progress
+
+
+class Readable:
+    """A node exposing one contiguous blob of bytes.
+
+    The contract:
+
+    - `size` is sync, populated during start(). Async size queries on
+      every range check would hurt readability for nothing.
+    - `read(offset, size)` is async: this is where actual IO happens
+      (file handle, USB transfer, JTAG cycles, ...).
+    - `read` follows POSIX-pread semantics: returns at most `size`
+      bytes; may return fewer at end of node. ValueError if
+      offset < 0 or offset > self.size.
+    """
+
+    @property
+    def size(self) -> int:
+        """Total bytes addressable. Set during start()."""
+        raise NotImplementedError
+
+    async def read(self, offset: int, size: int) -> bytes:
+        """Read up to `size` bytes from `offset`.
+
+        Returns at most `size` bytes; may return fewer at end of node.
+        Raises ValueError if offset < 0 or offset > self.size.
+        """
+        raise NotImplementedError
+
+
+class Writable(Readable):
+    """A node accepting in-place writes.
+
+    Available only when every container in the chain is passthrough —
+    byte offsets in the child map directly to bytes in the parent's
+    storage. Containers that transform bytes (compression, CRC,
+    rewriting headers) MUST NOT implement Writable; they finalise
+    in stop() if at all.
+    """
+
+    async def write(self, offset: int, data: bytes) -> None:
+        """Write `data` at `offset`.
+
+        Must satisfy offset + len(data) <= self.size; raises
+        ValueError otherwise. Finalisation (CRC, recompression)
+        happens in stop(), not on each write.
+        """
+        raise NotImplementedError
+
+
+class Addressable:
+    """A node carrying address metadata for target loading.
+
+    `load_address` is the canonical address — where this content
+    should be placed in target memory. Use cases:
+
+    - Flash region: flash address.
+    - ihex region: record address.
+    - ELF segment: LMA.
+
+    `addresses` exposes named aliases. Default contains just
+    `{'load': load_address}`; subclasses may expose more (e.g. ELF
+    sections add 'vma', 'lma', 'file_offset').
+    """
+
+    @property
+    def load_address(self) -> int:
+        """Canonical address for loading into target memory."""
+        raise NotImplementedError
+
+    @property
+    def addresses(self) -> dict:
+        """Named address aliases. Default exposes just 'load'."""
+        return {"load": self.load_address}
 
 
 class Node:
