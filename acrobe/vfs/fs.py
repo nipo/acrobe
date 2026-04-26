@@ -1,0 +1,106 @@
+"""File-system root Node and file-leaf Node.
+
+`FsRoot` resolves children by file path on the local filesystem.
+`FileNode` is the leaf type — opens the file lazily during start(),
+exposes its bytes as a `Readable`.
+
+These are the entry points for any VFS walk that begins on a real
+file on disk. Once the leaf is open, format detection and
+reinterpretation happen on top (see `acrobe.vfs` Step 5).
+"""
+
+import os
+
+from ..db import NoMatch
+from ..node import Node, Readable
+
+
+class FileNode(Node, Readable):
+    """A file leaf. Bytes are read from a file on disk.
+
+    Lazily opens the file in start(); closes it in stop().
+    Reads are async via run_in_executor — Python's `os.pread`
+    is blocking, but we use it under the hood and run it in a
+    thread to keep the Node IO contract async.
+    """
+
+    def __init__(self, name: str, path: str):
+        super().__init__(name)
+        self._path = path
+        self._fd = None
+        self._size = 0
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    async def start(self):
+        # Open file and stat for size. os.open is blocking but
+        # cheap; not worth offloading.
+        self._fd = os.open(self._path, os.O_RDONLY)
+        self._size = os.fstat(self._fd).st_size
+
+    async def stop(self):
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+
+    async def read(self, offset: int, size: int) -> bytes:
+        if offset < 0 or offset > self._size:
+            raise ValueError(
+                f"offset {offset} out of range [0, {self._size}]")
+        if self._fd is None:
+            raise RuntimeError(f"{self.fqdn}: file not open (call start())")
+        # os.pread is sync; run in default executor for async contract
+        import asyncio
+        loop = asyncio.get_running_loop()
+        # Clamp size to remaining bytes (POSIX-pread semantics).
+        avail = self._size - offset
+        n = min(size, avail)
+        if n <= 0:
+            return b""
+        return await loop.run_in_executor(
+            None, os.pread, self._fd, n, offset)
+
+    @property
+    def metadata(self) -> dict:
+        return {"path": self._path, "size": self._size}
+
+
+class FsRoot(Node):
+    """Root Node anchoring children at filesystem paths.
+
+    `child_summon("file.bin")` looks up "file.bin" relative to the
+    root's directory (or absolute, if the name is absolute). The
+    spawned child is a `FileNode` whose `start()` opens the file.
+
+    Subdirectories are not auto-walked; if a user wants nested
+    paths, they pass them as separate child_summon parts:
+    `root.child_summon("subdir", "file.bin")` — though for typical
+    VFS use, you'd just root the FsRoot at the directory you want.
+    """
+
+    def __init__(self, base_dir: str = "."):
+        super().__init__(name=os.path.abspath(base_dir))
+        self._base_dir = os.path.abspath(base_dir)
+
+    @property
+    def base_dir(self) -> str:
+        return self._base_dir
+
+    async def child_spawn(self, name: str) -> Node:
+        # Resolve the path. Allow absolute names; otherwise
+        # relative to base_dir.
+        if os.path.isabs(name):
+            path = name
+        else:
+            path = os.path.join(self._base_dir, name)
+        if os.path.isdir(path):
+            return FsRoot(path)
+        if os.path.isfile(path):
+            return FileNode(name, path)
+        raise NoMatch("file", name)
