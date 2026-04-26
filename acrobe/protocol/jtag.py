@@ -390,12 +390,12 @@ class JtagInterface(Node, FreqCapper):
     async def child_spawn(self, name):
         return await self.db.acall(name, self)
 
-    def option_set(self, opt):
-        if opt.startswith("fmax="):
+    def option_set(self, key, value):
+        if key == "fmax":
             from ..util.pretty import sci_parse
-            self.freq_cap("user", sci_parse(opt[5:]))
+            self.freq_cap("user", sci_parse(value))
             return
-        super().option_set(opt)
+        super().option_set(key, value)
 
 
 # Chain
