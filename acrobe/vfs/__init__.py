@@ -199,3 +199,4 @@ class AsNode(Node):
 
 
 from .fs import FsRoot, FileNode  # noqa: F401, E402
+from . import stapl  # noqa: F401, E402  registers STAPL parser
