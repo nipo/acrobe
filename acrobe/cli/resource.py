@@ -121,7 +121,7 @@ async def ls(path, long_format, recursive, depth):
 @click.argument("path")
 async def info(path):
     node = await _summon(path)
-    click.echo(f"Path:     {node.fqdn}")
+    click.echo(f"Path:     {node.path}")
     click.echo(f"Class:    {type(node).__name__}")
     click.echo(f"Mixins:   {_mixin_tag(node)}")
     if isinstance(node, Readable):
@@ -209,5 +209,5 @@ async def tree(path, depth):
                 ext = "    " if last else "│   "
                 _walk(c, prefix + ext, current_depth + 1)
 
-    click.echo(node.fqdn)
+    click.echo(node.path)
     _walk(node)

@@ -283,6 +283,11 @@ class Node:
 
     @property
     def fqdn(self) -> str:
+        """Dotted name of this node from the root.
+
+        This is the *logger* name — Python's logging hierarchy
+        relies on '.' for parent/child relationships and prefix
+        filters. Use `path` for display in CLI / messages."""
         parts = []
         node = self
         while node is not None:
@@ -290,6 +295,18 @@ class Node:
             node = node._parent
         parts.reverse()
         return ".".join(parts)
+
+    @property
+    def path(self) -> str:
+        """Slash-separated path from the root, matching the
+        VFS path syntax (`a/b/c`). Suitable for display."""
+        parts = []
+        node = self
+        while node is not None:
+            parts.append(node._name)
+            node = node._parent
+        parts.reverse()
+        return "/".join(parts)
 
     @property
     def logger(self) -> logging.Logger:
