@@ -242,19 +242,45 @@ class TestRbf:
         assert out == bitswap8(body)
 
     @pytest.mark.asyncio
-    async def test_rbf_no_sync_passthrough(self, tmp_path):
-        # Bytes without any classic sync word: parser passes through
-        # (Agilex/SDM-style RBFs don't carry the legacy sync). Caller
-        # asserted "this is RBF" by file extension or as(type=...).
+    async def test_rbf_no_sync_raises(self, tmp_path):
+        # Bytes without any recognised sync: parsing must fail.
         body = b"\xab" * 1024
-        path = tmp_path / "modern.rbf"
+        path = tmp_path / "bad.rbf"
         path.write_bytes(body)
         root = FsRoot(str(tmp_path))
         await root.start_tree()
-        view = await root.child_summon("modern.rbf", "bitstream")
-        assert view.size == len(body)
-        assert (await view.read(0, view.size)) == body
+        with pytest.raises(Exception):
+            await root.child_summon("bad.rbf")
+
+    @pytest.mark.asyncio
+    async def test_rbf_agilex_sync(self, tmp_path):
+        # Agilex/SDM RBF: starts with 0x95482962, no swap needed.
+        from acrobe.component.altera.formats import RBF_SYNC_AGILEX
+        body = RBF_SYNC_AGILEX + b"\x00" * 100
+        path = tmp_path / "agilex.rbf"
+        path.write_bytes(body)
+        root = FsRoot(str(tmp_path))
+        await root.start_tree()
+        view = await root.child_summon("agilex.rbf", "bitstream")
         assert view._swapped is False
+        assert (await view.read(0, 4)) == RBF_SYNC_AGILEX
+
+    @pytest.mark.asyncio
+    async def test_rbf_agilex_sync_swapped(self, tmp_path):
+        # Bytes with the bit-swapped Agilex sync — parser detects
+        # and swaps on read so the canonical sync surfaces.
+        from acrobe.component.altera.formats import (
+            RBF_SYNC_AGILEX, RBF_SYNC_AGILEX_SWAPPED,
+        )
+        body = RBF_SYNC_AGILEX_SWAPPED + b"\xff" * 100
+        path = tmp_path / "agilex-sw.rbf"
+        path.write_bytes(body)
+        root = FsRoot(str(tmp_path))
+        await root.start_tree()
+        view = await root.child_summon("agilex-sw.rbf", "bitstream")
+        assert view._swapped is True
+        out = await view.read(0, 4)
+        assert out == RBF_SYNC_AGILEX
 
     @pytest.mark.asyncio
     async def test_rbf_explicit_swap_override(self, tmp_path):
