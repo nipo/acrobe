@@ -1,5 +1,4 @@
 import os
-import struct
 import tempfile
 import pytest
 from acrobe.loadable import Segment, Program
@@ -7,7 +6,6 @@ from acrobe.loadable import Segment, Program
 # Ensure format parsers are registered
 import acrobe.loadable.bin
 import acrobe.loadable.ihex
-import acrobe.loadable.elf
 
 
 class TestSegment:
@@ -195,87 +193,5 @@ class TestIHexFormat:
             os.unlink(fname)
 
 
-class TestElfFormat:
-    def _make_elf32_le(self, segments, entry=0):
-        """Build a minimal ELF32 little-endian binary in memory."""
-        endian = "<"
-        ei_class = 1  # 32-bit
-        ei_data = 1   # little-endian
-
-        e_phnum = len(segments)
-        e_phoff = 52  # right after ELF header
-        e_phentsize = 32
-
-        # ELF header (16 ident + 36 rest = 52 bytes)
-        ident = b"\x7fELF" + bytes([ei_class, ei_data, 1, 0]) + b"\x00" * 8
-        ehdr_rest = struct.pack(endian + "HHIIIIIHHHHHH",
-            2,              # e_type: ET_EXEC
-            0,              # e_machine
-            1,              # e_version
-            entry,          # e_entry
-            e_phoff,        # e_phoff
-            0,              # e_shoff
-            0,              # e_flags
-            52,             # e_ehsize
-            e_phentsize,    # e_phentsize
-            e_phnum,        # e_phnum
-            0,              # e_shentsize
-            0,              # e_shnum
-            0,              # e_shstrndx
-        )
-
-        data_offset = 52 + e_phentsize * e_phnum
-        phdrs = b""
-        seg_data = b""
-
-        for addr, blob in segments:
-            phdr = struct.pack(endian + "IIIIIIII",
-                1,                     # p_type: PT_LOAD
-                data_offset,           # p_offset
-                addr,                  # p_vaddr
-                addr,                  # p_paddr
-                len(blob),             # p_filesz
-                len(blob),             # p_memsz
-                5,                     # p_flags: PF_R | PF_X
-                0,                     # p_align
-            )
-            phdrs += phdr
-            seg_data += blob
-            data_offset += len(blob)
-
-        return ident + ehdr_rest + phdrs + seg_data
-
-    def test_load_elf32(self):
-        elf_data = self._make_elf32_le(
-            [(0x08000000, b"\xaa\xbb\xcc\xdd")],
-            entry=0x08000000,
-        )
-
-        with tempfile.NamedTemporaryFile(suffix=".elf", delete=False) as f:
-            f.write(elf_data)
-            fname = f.name
-
-        try:
-            p = Program.from_file(fname)
-            assert len(p) == 1
-            assert p[0].address == 0x08000000
-            assert bytes(p[0].data) == b"\xaa\xbb\xcc\xdd"
-            assert p.info["entry"] == 0x08000000
-        finally:
-            os.unlink(fname)
-
-    def test_multiple_segments(self):
-        elf_data = self._make_elf32_le([
-            (0x1000, b"\x01\x02"),
-            (0x2000, b"\x03\x04"),
-        ])
-
-        with tempfile.NamedTemporaryFile(suffix=".elf", delete=False) as f:
-            f.write(elf_data)
-            fname = f.name
-
-        try:
-            p = Program.from_file(fname)
-            assert len(p) == 2
-        finally:
-            os.unlink(fname)
+# ELF parsing has migrated from acrobe.loadable.elf to the VFS in
+# acrobe.vfs.elf. See tests/test_vfs_elf.py for the new tests.

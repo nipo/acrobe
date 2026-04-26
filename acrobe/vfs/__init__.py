@@ -154,6 +154,12 @@ async def populate_format(target, format_name, source):
 
     target._metadata.update(parser.metadata)
 
+    # The parser instance is kept accessible on `target` for code
+    # that wants typed methods (e.g. Elf.symbol_at). Methods that
+    # walk children must use parser._target (set here) — parser's
+    # own ._children was emptied by the transplant.
+    parser._target = target
+
     if not hasattr(target, "_format_parsers"):
         target._format_parsers = []
     target._format_parsers.append(parser)
@@ -215,3 +221,4 @@ from .fs import FsRoot, FileNode  # noqa: F401, E402
 from . import stapl  # noqa: F401, E402  registers STAPL parser
 from . import zip as _zip  # noqa: F401, E402  registers ZIP parser
 from . import tar  # noqa: F401, E402  registers tar parser
+from . import elf  # noqa: F401, E402  registers ELF parser
