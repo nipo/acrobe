@@ -301,7 +301,23 @@ the byte-data-Node mould; add when a use case appears.
 **Removed.** `acrobe/loadable/ihex.py`, `acrobe/loadable/bin.py`,
 `acrobe/loadable/literals.py`.
 
-### Step 12 — Dissolve `Program` / `Segment`
+### Step 12 — Soft dissolution: VFS-backed Program (full removal deferred)
+
+**Status as implemented**: soft dissolution. Program/Segment
+remain as in-memory aggregator classes; `Program.from_file` is
+rewired to walk the VFS (parsing happens entirely in
+`acrobe.vfs.*`). Existing callers (Target.write/read/verify, FPGA
+load() methods) continue to work unchanged. A new
+`acrobe/program_view.py` provides `from_node` which builds a
+Program from a started VFS subtree by collecting every
+Readable+Addressable descendant.
+
+Hard dissolution (full removal of Program/Segment, conversion of
+target.write to take a Node subtree directly) is deferred — it
+touches every FPGA load() method and the CLI; see open
+decisions for the migration sketch.
+
+### Step 12 (full) — Hard dissolution (deferred)
 
 **Scope.** Remove `acrobe/loadable/model.py`'s `Program` and
 `Segment` classes. Methods migrate as follows:

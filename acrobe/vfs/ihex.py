@@ -41,34 +41,6 @@ class IhexRegion(Node, Readable, Addressable):
         return self._address
 
 
-class IhexMerged(Node, Readable, Addressable):
-    """Single contiguous [min_addr .. max_addr] view of the parsed
-    regions, gaps filled with 0xFF. Exposed as the `data` child of
-    an Ihex node."""
-
-    def __init__(self, name, address, data: bytes):
-        super().__init__(name)
-        self._address = address
-        self._data = data
-
-    @property
-    def size(self) -> int:
-        return len(self._data)
-
-    @property
-    def load_address(self) -> int:
-        return self._address
-
-    async def read(self, offset, size):
-        if offset < 0 or offset > len(self._data):
-            raise ValueError(f"offset {offset} out of range")
-        avail = len(self._data) - offset
-        n = min(size, avail)
-        if n <= 0:
-            return b""
-        return self._data[offset:offset + n]
-
-
 @register_format("ihex",
                  exts=["hex", "ihex"],
                  mimes=["application/x-ihex"])
@@ -91,21 +63,20 @@ class Ihex(FormatNode):
         if not regions:
             raise NoMatch("ihex", "no data records")
 
-        # region/N pre-populated children
+        # region/N pre-populated children — one Addressable leaf per
+        # contiguous parsed region. We deliberately do NOT add a
+        # merged "data" view child: program_view walks every
+        # Readable+Addressable descendant, and a merged view at the
+        # same parent would double-count bytes during loading.
+        # Callers that want a merged view can build it from the
+        # regions (see acrobe.program_view).
         region_container = Node("region")
         for i, (addr, data) in enumerate(regions):
             region_container._child_attach(IhexRegion(str(i), addr, data))
         self._child_attach(region_container)
 
-        # Merged view
         min_addr = min(a for a, _ in regions)
         max_end = max(a + len(d) for a, d in regions)
-        merged = bytearray([self.GAP_FILL] * (max_end - min_addr))
-        for addr, data in regions:
-            off = addr - min_addr
-            merged[off:off + len(data)] = data
-        self._child_attach(IhexMerged("data", min_addr, bytes(merged)))
-
         if entry is not None:
             self._metadata["entry"] = entry
         self._metadata["region_count"] = len(regions)

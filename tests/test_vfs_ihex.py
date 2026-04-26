@@ -3,7 +3,7 @@
 import pytest
 
 from acrobe.vfs import FsRoot
-from acrobe.vfs.ihex import Ihex, IhexRegion, IhexMerged
+from acrobe.vfs.ihex import Ihex, IhexRegion
 
 
 def _build_ihex_records(*records):
@@ -33,12 +33,11 @@ class TestIhexAutoDetect:
         path.write_text(text)
         root = FsRoot(str(tmp_path))
         await root.start_tree()
-        # Merged view exposed as `data` child
-        merged = await root.child_summon("a.hex", "data")
-        assert isinstance(merged, IhexMerged)
-        assert merged.load_address == 0
-        assert merged.size == 4
-        assert (await merged.read(0, 4)) == b"\xDE\xAD\xBE\xEF"
+        r0 = await root.child_summon("a.hex", "region", "0")
+        assert isinstance(r0, IhexRegion)
+        assert r0.load_address == 0
+        assert r0.size == 4
+        assert (await r0.read(0, 4)) == b"\xDE\xAD\xBE\xEF"
 
     @pytest.mark.asyncio
     async def test_region_children(self, tmp_path):
@@ -62,7 +61,8 @@ class TestIhexAutoDetect:
         assert (await r1.read(0, r1.size)) == b"\x03\x04"
 
     @pytest.mark.asyncio
-    async def test_merged_view_fills_gaps_with_ff(self, tmp_path):
+    async def test_two_regions_no_merge(self, tmp_path):
+        # When records are non-contiguous, two regions are exposed.
         text = _build_ihex_records(
             (0x04, 0, b"\x00\x00"),
             (0x00, 0x00, b"\xAA"),
@@ -73,15 +73,14 @@ class TestIhexAutoDetect:
         path.write_text(text)
         root = FsRoot(str(tmp_path))
         await root.start_tree()
-        merged = await root.child_summon("gaps.hex", "data")
-        assert merged.size == 5  # min=0, max=5
-        data = await merged.read(0, merged.size)
-        # 0xAA at 0; 0xFF fill; 0xBB at 4
-        assert data[0] == 0xAA
-        assert data[1] == 0xFF
-        assert data[2] == 0xFF
-        assert data[3] == 0xFF
-        assert data[4] == 0xBB
+        regs = (await root.child_summon("gaps.hex", "region")).children
+        assert len(regs) == 2
+        r0 = await root.child_summon("gaps.hex", "region", "0")
+        r1 = await root.child_summon("gaps.hex", "region", "1")
+        assert r0.load_address == 0
+        assert (await r0.read(0, r0.size)) == b"\xAA"
+        assert r1.load_address == 4
+        assert (await r1.read(0, r1.size)) == b"\xBB"
 
     @pytest.mark.asyncio
     async def test_metadata(self, tmp_path):
@@ -125,6 +124,7 @@ class TestIhexAs:
         path.write_text(text)
         root = FsRoot(str(tmp_path))
         await root.start_tree()
-        merged = await root.child_summon("blob", "as(type=ihex)", "data")
-        assert merged.size == 1
-        assert (await merged.read(0, 1)) == b"\xAB"
+        r0 = await root.child_summon(
+            "blob", "as(type=ihex)", "region", "0")
+        assert r0.size == 1
+        assert (await r0.read(0, 1)) == b"\xAB"

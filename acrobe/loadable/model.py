@@ -221,47 +221,33 @@ class Program:
 
     @classmethod
     def from_file(cls, filename, offset=0):
-        # Parse suffixes from the right: data:format:+offset
-        # e.g. "file.bin:+100", "file.bin:format", "deadbeef:literal:+0x100"
-        parts = filename
-        fmt = None
+        """Load a file via the VFS layer and aggregate its
+        Readable+Addressable leaves into a Program.
 
-        # Strip :+offset suffixes (may be multiple)
-        while ":+" in parts:
-            idx = parts.rindex(":+")
-            offset += int(parts[idx + 2:], 16)
-            parts = parts[:idx]
+        The file is walked via FsRoot/FileNode; format auto-detection
+        runs in the VFS (POF/SOF/RBF, ELF, ihex, ZIP, ...). All
+        addressable descendants become Segments.
 
-        # Strip :format suffix — try rightmost colon as format
-        while ":" in parts and not os.path.exists(parts):
-            idx = parts.rindex(":", 2)
-            candidate_fmt = parts[idx + 1:]
-            candidate_data = parts[:idx]
-            try:
-                cls.format_db.get(candidate_fmt)
-                fmt = candidate_fmt
-                parts = candidate_data
-                break
-            except NoMatch:
-                break
+        For format/offset overrides, prefer the VFS path syntax
+        directly (e.g. `as(type=ihex)`); the old `:format` and
+        `:+offset` suffixes are not supported here.
+        """
+        import asyncio
+        return asyncio.run(cls._load_via_vfs(filename, offset))
 
-        filename = parts
-
-        if fmt is not None:
-            return cls.format_db.call(fmt, filename, offset=offset)
-
-        # Try compound extension first (e.g. "fs.gz"), then single
-        basename = os.path.basename(filename)
-        dot = basename.find(".")
-        if dot >= 0:
-            compound_ext = basename[dot + 1:]
-            try:
-                return cls.ext_db.call(compound_ext, filename, offset=offset)
-            except NoMatch:
-                pass
-        _, ext = os.path.splitext(filename)
-        ext = ext.lstrip(".")
-        return cls.ext_db.call(ext, filename, offset=offset)
+    @classmethod
+    async def _load_via_vfs(cls, filename, offset):
+        from .. import vfs as _vfs
+        from ..vfs.fs import FileNode
+        from .. import program_view
+        # Trigger registration of vendor format parsers.
+        import acrobe.component  # noqa: F401
+        leaf = FileNode(os.path.basename(filename), filename)
+        await leaf.start()
+        try:
+            return await program_view.from_node(leaf, offset=offset)
+        finally:
+            await leaf.stop()
 
     @classmethod
     def from_files(cls, filenames):
