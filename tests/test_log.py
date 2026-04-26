@@ -13,7 +13,7 @@ from acrobe.log import (
     set_progress, get_progress,
     setup,
 )
-from acrobe.component import Component
+from acrobe.node import Node
 
 
 # --- Fixtures ---
@@ -229,13 +229,13 @@ class TestTextProgress:
         assert "done" in stream.getvalue()
 
 
-class TestComponentProgress:
+class TestNodeProgress:
     def test_component_progress_delegates(self):
         logger, stream = _capture_logger("root.child")
         set_progress(TextProgress())
 
-        root = Component("root")
-        child = Component("child")
+        root = Node("root")
+        child = Node("child")
         root.child_add(child)
 
         with child.progress("flashing", total=10, unit="pages") as p:
@@ -251,7 +251,7 @@ class TestComponentProgress:
     def test_component_progress_null_default(self):
         """Default NullProgress doesn't crash."""
         set_progress(NullProgress())
-        c = Component("test")
+        c = Node("test")
         with c.progress("op", total=5) as p:
             p.advance(5)
 

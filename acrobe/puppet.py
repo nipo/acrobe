@@ -8,7 +8,7 @@ import asyncio
 import struct
 
 from .allocator import Allocator
-from .component import Component
+from .node import Node
 from .component.arm.cortex import CpuState, CortexReg
 
 
@@ -74,7 +74,7 @@ class PuppetStub:
             self.zone = None
 
 
-class Puppet(Component):
+class Puppet(Node):
     """Execute code on the target CPU.
 
     Uses a trampoline instruction sequence to call arbitrary functions.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from ..engine import Batcher
-from ..component import Component
+from ..node import Node
 
 
 class AddressNack(Exception):
@@ -59,12 +59,12 @@ class WriteRead:
 
 # --- I2C Interface ---
 
-class Interface(Batcher, Component):
+class Interface(Batcher, Node):
     """I2C bus. Forwards Read/Write/WriteRead to adapter."""
 
     def __init__(self, adapter, name="i2c"):
         Batcher.__init__(self)
-        Component.__init__(self, name)
+        Node.__init__(self, name)
         self._adapter = adapter
 
     async def flush_ops(self, batch):
@@ -82,7 +82,7 @@ class Interface(Batcher, Component):
 
 # --- I2C Slave ---
 
-class Slave(Batcher, Component):
+class Slave(Batcher, Node):
     """I2C slave device at a fixed address.
 
     Translates read/write/write_read calls into I2C operations
@@ -93,7 +93,7 @@ class Slave(Batcher, Component):
         if name is None:
             name = f"i2c[0x{addr:02x}]"
         Batcher.__init__(self)
-        Component.__init__(self, name)
+        Node.__init__(self, name)
         self._interface = interface
         self.addr = addr
 

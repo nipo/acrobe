@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from enum import IntEnum
 
-from ...component import Component
+from ...node import Node
 from .ap import MemAp
 
 
@@ -104,7 +104,7 @@ class CortexReg(IntEnum):
     CFBP = 20
 
 
-class Cortex(Component):
+class Cortex(Node):
     """Cortex-M debug interface.
 
     Reads/writes CPU state through the SCS registers in the MEM-AP.

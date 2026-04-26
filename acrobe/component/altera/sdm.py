@@ -18,7 +18,7 @@ SDM response header (32-bit):
 """
 
 import enum
-from ...component import Component
+from ...node import Node
 
 class SdmErrorCode(enum.IntEnum):
     OK = 0	
@@ -75,7 +75,7 @@ class SdmTimeoutError(Exception):
     """No response from SDM."""
 
 
-class Sdm(Component):
+class Sdm(Node):
     """Base for SDM command/response transport.
 
     Subclasses implement do_io() for the physical transport.

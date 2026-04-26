@@ -3,7 +3,7 @@ import inspect
 import math
 
 from ..engine import Batcher
-from ..component import Component
+from ..node import Node
 from ..freq_capper import FreqCapper
 from ..bitstring import BitString, BitStringBase
 from ..db import Db, NoMatch
@@ -218,7 +218,7 @@ def _idcode_eq(key, lookup):
     return (key & 0x0FFFFFFF) == (lookup & 0x0FFFFFFF)
 
 
-class Tap(Batcher, Component, InstructionRegistry):
+class Tap(Batcher, Node, InstructionRegistry):
     irlen = None
     max_freq = None
     db = Db("TAP idcode", eq_func=_idcode_eq)
@@ -237,7 +237,7 @@ class Tap(Batcher, Component, InstructionRegistry):
             name = f"TAP[0x{int(idcode):08x}]" if isinstance(idcode, int) else "TAP"
 
         Batcher.__init__(self)
-        Component.__init__(self, name)
+        Node.__init__(self, name)
         self._init_instructions()
 
     def position_set(self, ir_pre, dr_pre, ir_post=None, dr_post=None):
@@ -376,7 +376,7 @@ class Tap(Batcher, Component, InstructionRegistry):
 
 # JTAG Interface
 
-class JtagInterface(Component, FreqCapper):
+class JtagInterface(Node, FreqCapper):
     """JTAG master interface. Holds a single Chain as child.
 
     Supports multiple chains (e.g. behind a mux) in the future.
@@ -384,7 +384,7 @@ class JtagInterface(Component, FreqCapper):
     db = Db("Interface handler")
 
     def __init__(self, name="jtag"):
-        Component.__init__(self, name)
+        Node.__init__(self, name)
         FreqCapper.__init__(self)
 
     async def child_spawn(self, name):
@@ -405,7 +405,7 @@ class OpenChain(Exception):
     pass
 
 @JtagInterface.db.register("chain")
-class Chain(Component):
+class Chain(Node):
     """JTAG Chain. Holds TAPs and manages chain geometry."""
 
     def __init__(self, interface, name="chain"):

@@ -1,5 +1,5 @@
 import pytest
-from acrobe.component import Component
+from acrobe.node import Node
 from acrobe.component.fpga import SramFpga, JtagSramFpga
 from acrobe.db import Db, NoMatch
 from acrobe.protocol.jtag import JtagInterface, Chain
@@ -79,16 +79,16 @@ class TestAcall:
 class TestChildSpawnMro:
     @pytest.mark.asyncio
     async def test_base_raises_nomatch(self):
-        c = Component("root")
+        c = Node("root")
         with pytest.raises(NoMatch):
             await c._child_spawn_mro("anything")
 
     @pytest.mark.asyncio
     async def test_single_override(self):
-        class Parent(Component):
+        class Parent(Node):
             async def child_spawn(self, name):
                 if name == "x":
-                    return Component("x")
+                    return Node("x")
                 raise NoMatch("child", name)
 
         p = Parent("p")
@@ -98,16 +98,16 @@ class TestChildSpawnMro:
     @pytest.mark.asyncio
     async def test_mro_fallback(self):
         """Second class in MRO handles name that first doesn't."""
-        class Base(Component):
+        class Base(Node):
             async def child_spawn(self, name):
                 if name == "base":
-                    return Component("from-base")
+                    return Node("from-base")
                 raise NoMatch("child", name)
 
         class Sub(Base):
             async def child_spawn(self, name):
                 if name == "sub":
-                    return Component("from-sub")
+                    return Node("from-sub")
                 raise NoMatch("child", name)
 
         s = Sub("s")
@@ -120,7 +120,7 @@ class TestChildSpawnMro:
 
     @pytest.mark.asyncio
     async def test_mro_all_miss(self):
-        class Base(Component):
+        class Base(Node):
             async def child_spawn(self, name):
                 raise NoMatch("child", name)
 
@@ -135,10 +135,10 @@ class TestChildSpawnMro:
     @pytest.mark.asyncio
     async def test_child_summon_uses_mro(self):
         """child_summon dispatches through MRO walking."""
-        class Base(Component):
+        class Base(Node):
             async def child_spawn(self, name):
                 if name == "x":
-                    return Component("x")
+                    return Node("x")
                 raise NoMatch("child", name)
 
         b = Base("b")
@@ -152,10 +152,10 @@ class TestChildSpawnMro:
         class Mixin:
             pass
 
-        class Base(Component):
+        class Base(Node):
             async def child_spawn(self, name):
                 if name == "x":
-                    return Component("x")
+                    return Node("x")
                 raise NoMatch("child", name)
 
         class Sub(Mixin, Base):
@@ -205,10 +205,10 @@ class TestSramFpgaApplicationDb:
 
         @FpgaBase.application_db.register("app")
         def _make_app(fpga):
-            return Component("test-app")
+            return Node("test-app")
 
         fpga = FpgaChild.__new__(FpgaChild)
-        Component.__init__(fpga, "test-fpga")
+        Node.__init__(fpga, "test-fpga")
         child = await fpga._child_spawn_mro("app")
         assert child.name == "test-app"
 
@@ -223,14 +223,14 @@ class TestSramFpgaApplicationDb:
 
         @FpgaBase.application_db.register("app")
         def _make_base(fpga):
-            return Component("from-base")
+            return Node("from-base")
 
         @FpgaChild.application_db.register("app")
         def _make_child(fpga):
-            return Component("from-child")
+            return Node("from-child")
 
         fpga = FpgaChild.__new__(FpgaChild)
-        Component.__init__(fpga, "test-fpga")
+        Node.__init__(fpga, "test-fpga")
         child = await fpga._child_spawn_mro("app")
         assert child.name == "from-child"
 
@@ -240,7 +240,7 @@ class TestSramFpgaApplicationDb:
             pass
 
         fpga = FpgaX.__new__(FpgaX)
-        Component.__init__(fpga, "test-fpga")
+        Node.__init__(fpga, "test-fpga")
         with pytest.raises(NoMatch):
             await fpga._child_spawn_mro("nonexistent")
 
@@ -279,10 +279,10 @@ class TestChildSummonStart:
     @pytest.mark.asyncio
     async def test_spawned_child_started(self):
         """child_summon starts spawned components."""
-        class Parent(Component):
+        class Parent(Node):
             async def child_spawn(self, name):
                 if name == "x":
-                    return Component("x")
+                    return Node("x")
                 raise NoMatch("child", name)
 
         p = Parent("p")
@@ -294,11 +294,11 @@ class TestChildSummonStart:
         """child_summon starts existing children when navigating through."""
         started = []
 
-        class Tracked(Component):
+        class Tracked(Node):
             async def start(self):
                 started.append(self.name)
 
-        root = Component("root")
+        root = Node("root")
         child = Tracked("child")
         grandchild = Tracked("grandchild")
         root.child_add(child)
@@ -314,11 +314,11 @@ class TestChildSummonStart:
         """child_summon starts even the leaf component."""
         started = []
 
-        class Tracked(Component):
+        class Tracked(Node):
             async def start(self):
                 started.append(self.name)
 
-        root = Component("root")
+        root = Node("root")
         child = Tracked("child")
         root.child_add(child)
 
@@ -331,12 +331,12 @@ class TestChildSummonStart:
         """child_summon doesn't re-start already started components."""
         start_count = 0
 
-        class Tracked(Component):
+        class Tracked(Node):
             async def start(self):
                 nonlocal start_count
                 start_count += 1
 
-        root = Component("root")
+        root = Node("root")
         child = Tracked("child")
         root.child_add(child)
 
@@ -350,11 +350,11 @@ class TestChildSummonStart:
     @pytest.mark.asyncio
     async def test_start_populates_children(self):
         """A component's start() can populate children, which are then navigable."""
-        class Discoverer(Component):
+        class Discoverer(Node):
             async def start(self):
-                self.child_add(Component("discovered"))
+                self.child_add(Node("discovered"))
 
-        root = Component("root")
+        root = Node("root")
         disc = Discoverer("disc")
         root.child_add(disc)
 
@@ -382,7 +382,7 @@ class TestStartTreeIdempotent:
         """start_tree doesn't re-call start() on already-started components."""
         start_count = 0
 
-        class Tracked(Component):
+        class Tracked(Node):
             async def start(self):
                 nonlocal start_count
                 start_count += 1

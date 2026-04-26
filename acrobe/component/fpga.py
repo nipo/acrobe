@@ -1,9 +1,9 @@
-from . import Component
+from ..node import Node
 from ..db import Db, NoMatch
 from ..loadable import Program
 
 
-class SramFpga(Component):
+class SramFpga(Node):
     """Abstract base for SRAM-based (volatile) FPGAs."""
 
     application_db = Db("SramFpga application")

@@ -1,5 +1,5 @@
 from ..db import NoMatch
-from ..component import Component
+from ..node import Node
 from ..protocol.jtag import JtagInterface
 from .ftdi.transport import FtdiTransport
 from .ftdi.jtag_bitbang import JtagBitbang
@@ -11,7 +11,7 @@ def _make_icepizero(adapter):
     return IcePiZero("icepizero", adapter)
 
 
-class IcePiZero(Component):
+class IcePiZero(Node):
     """iCEPi-zero board: ECP5 FPGA via JTAG through FT231XQ bitbang.
 
     Pin mapping (D0-D7): TX, RX, RTS, TDO(3), DTR, TCK(5), TMS(6), TDI(7).

@@ -1,5 +1,5 @@
 from ..db import Db, NoMatch
-from ..component import Component
+from ..node import Node
 
 
 class AdapterInfo:
@@ -47,7 +47,7 @@ def make_adapter_name(info, serial):
     return info.name.lower()
 
 
-class Adapter(Component):
+class Adapter(Node):
     """Base adapter. Subclasses override open() and child_spawn()."""
 
     supported_interfaces = []
@@ -74,7 +74,7 @@ class Adapter(Component):
 
 
 class UsbEnumerator:
-    """Scans USB bus for known adapters. Not a Component — used as a
+    """Scans USB bus for known adapters. Not a Node — used as a
     spawning strategy by HwRoot."""
 
     def __init__(self):
@@ -154,7 +154,7 @@ class UsbEnumerator:
         return results
 
 
-class HwRoot(Component):
+class HwRoot(Node):
     """Root of the hardware component tree.
 
     Delegates child_spawn to registered enumerators (strategies).

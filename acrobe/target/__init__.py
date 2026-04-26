@@ -5,13 +5,13 @@ that can be programmed. It dispatches program segments to the appropriate
 child Region, orchestrating erase/write/verify operations.
 """
 
-from ..component import Component
+from ..node import Node
 from .memory import Region, Flash
 
 from ..loadable import Program, Segment
 
 
-class Target(Component):
+class Target(Node):
     """Base target class.
 
     Subclasses represent specific SoCs or board configurations.
@@ -161,7 +161,7 @@ class _Explorer:
         self.precedence = precedence
 
 
-class Field(Component):
+class Field(Node):
     """Target discovery: walks component tree, matches explorers to components.
 
     Creates Target children for each discovered component.

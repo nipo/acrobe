@@ -6,7 +6,7 @@ from ...protocol.jtag import Tap, Dr, Instruction
 from ..fpga import JtagSramFpga
 from ...bitstring import BitString
 from ...bitfield import *
-from ...component import Component
+from ...node import Node
 from .sdm import Sdm, SdmError
 from .sdm_jtag import SdmJtag
 
@@ -329,7 +329,7 @@ class ConfigStatus(Bitfield):
     # Word 5
     error_details = Field(160, 32)
 
-class AgilexSdmClient(Component):
+class AgilexSdmClient(Node):
     """High-level SDM command interface for Agilex devices.
 
     Provides typed methods for each known SDM command.

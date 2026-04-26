@@ -21,7 +21,7 @@ async def repl():
     from ptpython.repl import embed
 
     from ..root import root, roots
-    from ..component import Component
+    from ..node import Node
     from ..adapter.model import HwRoot, UsbEnumerator, Adapter
     from ..target import Target, Field
     from ..target.memory import Region, Flash, Ram
@@ -37,7 +37,7 @@ async def repl():
         locals={
             "root": root,
             "roots": roots,
-            "Component": Component,
+            "Node": Node,
             "HwRoot": HwRoot,
             "UsbEnumerator": UsbEnumerator,
             "Adapter": Adapter,

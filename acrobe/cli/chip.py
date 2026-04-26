@@ -10,7 +10,7 @@ import asyncclick as click
 from . import base
 from ..adapter.model import HwRoot, UsbEnumerator
 from ..target import Target, Field
-from ..component import Component
+from ..node import Node
 
 
 @base.cli.group(help="Chip programming")
@@ -27,7 +27,7 @@ async def chip(ctx, root_paths, target_sel):
     for path in root_paths:
         parts = path.strip("/").split("/")
         leaf = await hw_root.child_summon(*parts)
-        if isinstance(leaf, Component):
+        if isinstance(leaf, Node):
             await leaf.start_tree()
         roots.append(leaf)
 

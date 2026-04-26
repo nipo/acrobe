@@ -5,7 +5,7 @@ from enum import IntEnum
 
 from ..bitstring import BitString
 from ..engine import Batcher
-from ..component import Component
+from ..node import Node
 
 
 class Ack(IntEnum):
@@ -108,12 +108,12 @@ class LineReset:
 
 # --- SWD Interface ---
 
-class Interface(Batcher, Component):
+class Interface(Batcher, Node):
     """SWD wire interface. Forwards Read/Write/Run/Wakeup to adapter."""
 
     def __init__(self, adapter, name="swd"):
         Batcher.__init__(self)
-        Component.__init__(self, name)
+        Node.__init__(self, name)
         self._adapter = adapter
 
     async def flush_ops(self, batch):

@@ -9,7 +9,7 @@ class FreqCapper:
     The effective frequency is the minimum of all active constraints.
     Subclasses override freq_update() to apply the frequency to hardware.
 
-    Expects the target class to provide self.logger (e.g. Component).
+    Expects the target class to provide self.logger (e.g. Node).
     """
 
     def __init__(self):

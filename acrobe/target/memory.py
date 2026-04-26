@@ -9,10 +9,10 @@ Region types:
   Eeprom   — byte-writable non-volatile, no explicit erase needed
 """
 
-from ..component import Component
+from ..node import Node
 
 
-class Region(Component):
+class Region(Node):
     """Contiguous memory region.
 
     Subclasses must implement read() and write().

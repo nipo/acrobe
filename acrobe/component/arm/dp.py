@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 
 from ...engine import Batcher
-from ...component import Component
+from ...node import Node
 from ...protocol import swd
 
 
@@ -83,7 +83,7 @@ class DpAccessFailure(Exception):
 
 # --- SWD Debug Port ---
 
-class SwDp(Batcher, Component):
+class SwDp(Batcher, Node):
     """SWD Debug Port.
 
     Translates AP/DP commands into SWD Read/Write operations,
@@ -106,7 +106,7 @@ class SwDp(Batcher, Component):
 
     def __init__(self, interface, name: str = "dp"):
         Batcher.__init__(self)
-        Component.__init__(self, name)
+        Node.__init__(self, name)
         self._interface = interface
         self._select = None  # tracked SELECT register value
 

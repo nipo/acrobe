@@ -2,12 +2,12 @@ import asyncclick as click
 
 from . import base
 from ..adapter.model import HwRoot, UsbEnumerator, make_adapter_name
-from ..component import Component
+from ..node import Node
 
 
 def component_dump(comp, prefix=""):
     click.echo(f"{prefix}{comp}")
-    if isinstance(comp, Component):
+    if isinstance(comp, Node):
         for c in comp.children:
             component_dump(c, prefix + "  ")
 
@@ -54,14 +54,14 @@ async def enumerate(root_path):
 
     # Start the leaf's subtree so children are populated
     # (e.g. Chain.start() discovers TAPs)
-    if isinstance(leaf, Component):
+    if isinstance(leaf, Node):
         await leaf.start_tree()
 
-    click.echo("Component tree:")
+    click.echo("Node tree:")
     component_dump(leaf, "  ")
 
     # If leaf is a raw JTAG interface (Batcher but not Component), discover chain
-    if hasattr(leaf, 'post') and not isinstance(leaf, Component):
+    if hasattr(leaf, 'post') and not isinstance(leaf, Node):
         chain = Chain(leaf)
         click.echo("\nDiscovering JTAG chain...")
         await chain.discover()

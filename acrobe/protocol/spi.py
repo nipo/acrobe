@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from ..engine import Batcher
-from ..component import Component
+from ..node import Node
 from ..bitstring import BitStringBase
 from ..db import Db, NoMatch
 
@@ -49,12 +49,12 @@ class Shift:
 
 # --- SPI Interface ---
 
-class Interface(Batcher, Component):
+class Interface(Batcher, Node):
     """SPI bus. Forwards Cs/Shift ops to adapter."""
 
     def __init__(self, adapter, name="spi"):
         Batcher.__init__(self)
-        Component.__init__(self, name)
+        Node.__init__(self, name)
         self._adapter = adapter
 
     async def flush_ops(self, batch):
@@ -72,7 +72,7 @@ class Interface(Batcher, Component):
 
 # --- SPI Target ---
 
-class Target(Batcher, Component):
+class Target(Batcher, Node):
     """SPI target device with CS management.
 
     Usage:
@@ -83,7 +83,7 @@ class Target(Batcher, Component):
 
     def __init__(self, interface, cs, mode: int = 0, name: str = "spi"):
         Batcher.__init__(self)
-        Component.__init__(self, name)
+        Node.__init__(self, name)
         self._interface = interface
         self.cs = cs
         self.mode = mode

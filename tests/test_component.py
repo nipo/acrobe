@@ -1,59 +1,59 @@
 import asyncio
 import pytest
-from acrobe.component import Component
+from acrobe.node import Node
 
 
 class TestBasicTree:
     def test_name(self):
-        c = Component("root")
+        c = Node("root")
         assert c.name == "root"
 
     def test_fqdn_root(self):
-        c = Component("root")
+        c = Node("root")
         assert c.fqdn == "root"
 
     def test_fqdn_nested(self):
-        root = Component("root")
-        child = Component("child")
+        root = Node("root")
+        child = Node("child")
         root.child_add(child)
         assert child.fqdn == "root.child"
 
     def test_child_add(self):
-        root = Component("root")
-        child = Component("child")
+        root = Node("root")
+        child = Node("child")
         root.child_add(child)
         assert child in root.children
         assert child.parent is root
 
     @pytest.mark.asyncio
     async def test_child_remove(self):
-        root = Component("root")
-        child = Component("child")
+        root = Node("root")
+        child = Node("child")
         root.child_add(child)
         await root.child_remove(child)
         assert child not in root.children
         assert child.parent is None
 
     def test_add_already_parented_raises(self):
-        root = Component("root")
-        other = Component("other")
-        child = Component("child")
+        root = Node("root")
+        other = Node("other")
+        child = Node("child")
         root.child_add(child)
         with pytest.raises(AssertionError):
             other.child_add(child)
 
     @pytest.mark.asyncio
     async def test_remove_wrong_parent_raises(self):
-        root = Component("root")
-        other = Component("other")
-        child = Component("child")
+        root = Node("root")
+        other = Node("other")
+        child = Node("child")
         root.child_add(child)
         with pytest.raises(AssertionError):
             await other.child_remove(child)
 
     def test_children_returns_copy(self):
-        root = Component("root")
-        child = Component("child")
+        root = Node("root")
+        child = Node("child")
         root.child_add(child)
         children = root.children
         children.clear()
@@ -62,10 +62,10 @@ class TestBasicTree:
 
 class TestTreeSearch:
     def setup_method(self):
-        self.root = Component("root")
-        self.a = Component("a")
-        self.b = Component("b")
-        self.a1 = Component("a1")
+        self.root = Node("root")
+        self.a = Node("a")
+        self.b = Node("b")
+        self.a1 = Node("a1")
         self.root.child_add(self.a)
         self.root.child_add(self.b)
         self.a.child_add(self.a1)
@@ -81,37 +81,37 @@ class TestTreeSearch:
         assert self.root in found
 
     def test_children_of_class(self):
-        class SpecialComponent(Component):
+        class SpecialNode(Node):
             pass
 
-        root = Component("root")
-        special = SpecialComponent("special")
-        normal = Component("normal")
+        root = Node("root")
+        special = SpecialNode("special")
+        normal = Node("normal")
         root.child_add(special)
         root.child_add(normal)
 
-        found = root.children_of_class(SpecialComponent)
+        found = root.children_of_class(SpecialNode)
         assert special in found
         assert normal not in found
 
     def test_parent_of_class(self):
-        class Adapter(Component):
+        class Adapter(Node):
             pass
 
         adapter = Adapter("adapter")
-        child = Component("child")
-        grandchild = Component("grandchild")
+        child = Node("child")
+        grandchild = Node("grandchild")
         adapter.child_add(child)
         child.child_add(grandchild)
 
         assert grandchild.parent_of_class(Adapter) is adapter
 
     def test_parent_of_class_not_found(self):
-        root = Component("root")
-        child = Component("child")
+        root = Node("root")
+        child = Node("child")
         root.child_add(child)
 
-        class Missing(Component):
+        class Missing(Node):
             pass
 
         with pytest.raises(LookupError):
@@ -122,24 +122,24 @@ class TestChildrenChanged:
     def test_called_on_add(self):
         calls = []
 
-        class Tracking(Component):
+        class Tracking(Node):
             def children_changed(self):
                 calls.append("changed")
 
         root = Tracking("root")
-        root.child_add(Component("child"))
+        root.child_add(Node("child"))
         assert len(calls) == 1
 
     @pytest.mark.asyncio
     async def test_called_on_remove(self):
         calls = []
 
-        class Tracking(Component):
+        class Tracking(Node):
             def children_changed(self):
                 calls.append("changed")
 
         root = Tracking("root")
-        child = Component("child")
+        child = Node("child")
         root.child_add(child)
         calls.clear()
         await root.child_remove(child)
@@ -151,7 +151,7 @@ class TestAsyncLifecycle:
     async def test_start_tree(self):
         order = []
 
-        class Tracked(Component):
+        class Tracked(Node):
             async def start(self):
                 order.append(self.name)
 
@@ -172,7 +172,7 @@ class TestAsyncLifecycle:
     async def test_stop_tree(self):
         order = []
 
-        class Tracked(Component):
+        class Tracked(Node):
             async def stop(self):
                 order.append(self.name)
 
@@ -191,9 +191,9 @@ class TestAsyncLifecycle:
     async def test_start_adds_children(self):
         """start() may add children during discovery; they should be started too."""
 
-        class Discoverer(Component):
+        class Discoverer(Node):
             async def start(self):
-                self.child_add(Component("discovered"))
+                self.child_add(Node("discovered"))
 
         root = Discoverer("root")
         await root.start_tree()
@@ -205,9 +205,9 @@ class TestAsyncLifecycle:
 
     @pytest.mark.asyncio
     async def test_partial_teardown(self):
-        root = Component("root")
-        a = Component("a")
-        b = Component("b")
+        root = Node("root")
+        a = Node("a")
+        b = Node("b")
         root.child_add(a)
         root.child_add(b)
 
@@ -223,7 +223,7 @@ class TestAsyncLifecycle:
         """Adding a child to a started parent schedules start_tree."""
         order = []
 
-        class Tracked(Component):
+        class Tracked(Node):
             async def start(self):
                 order.append(self.name)
 
@@ -246,7 +246,7 @@ class TestAsyncLifecycle:
         """Removing a child stops its entire subtree."""
         order = []
 
-        class Tracked(Component):
+        class Tracked(Node):
             async def stop(self):
                 order.append(self.name)
 

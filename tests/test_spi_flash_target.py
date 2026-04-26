@@ -1,7 +1,7 @@
 """Tests for SPI flash target and Field discovery."""
 
 import pytest
-from acrobe.component import Component
+from acrobe.node import Node
 from acrobe.component.spi_flash import SpiFlash
 from acrobe.target import Target, Field
 from acrobe.target.memory import Flash
@@ -166,7 +166,7 @@ class TestSpiFlashRegistration:
 class TestField:
     def _make_tree(self):
         """Build a component tree with a FakeSpiFlash child."""
-        root = Component("root")
+        root = Node("root")
         flash = FakeSpiFlash(size=0x10000)
         flash._name = "test-flash"
         root._child_attach(flash)
@@ -192,7 +192,7 @@ class TestField:
 
     @pytest.mark.asyncio
     async def test_discover_empty_tree(self):
-        root = Component("empty")
+        root = Node("empty")
         field = Field()
         await field.discover(root)
         assert len(field.children_of_class(Target)) == 0
@@ -208,12 +208,12 @@ class TestField:
 
     @pytest.mark.asyncio
     async def test_unhandled_components(self):
-        """Components not matching any explorer end up in unhandled."""
-        root = Component("root")
-        child = Component("orphan")
+        """Nodes not matching any explorer end up in unhandled."""
+        root = Node("root")
+        child = Node("orphan")
         root._child_attach(child)
         field = Field()
         await field.discover(root)
-        # Component base class is not registered for any explorer,
+        # Node base class is not registered for any explorer,
         # so nothing should be in unhandled (only interest types are tracked)
         assert isinstance(field.unhandled, set)

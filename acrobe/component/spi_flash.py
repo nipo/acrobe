@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import struct
 
-from ..component import Component
+from ..node import Node
 from ..protocol.spi import Shift
 from ..util.pretty import base2
 
@@ -31,7 +31,7 @@ _JEDEC_MANUFACTURERS = {
 }
 
 
-class SpiFlash(Component):
+class SpiFlash(Node):
     """SPI NOR flash device.
 
     Communicates through an SPI Target (handles CS management).

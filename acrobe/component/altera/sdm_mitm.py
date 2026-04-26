@@ -13,7 +13,7 @@ Or programmatically:
 
 import sys
 
-from ...component import Component
+from ...node import Node
 from ...db import NoMatch
 from ...engine import Batcher
 from ...protocol.jtag import CaptureIr, CaptureDr, Shift, Run, Reset, JtagInterface

@@ -1,6 +1,6 @@
 """ARM Access Port (AP) and MEM-AP.
 
-AP is a Component that reads/writes AP registers through the DP.
+AP is a Node that reads/writes AP registers through the DP.
 MemAp is a Batcher that translates memory read/write operations
 into AP register operations with CSW/TAR/DRW state tracking.
 """
@@ -11,14 +11,14 @@ import asyncio
 import struct
 
 from ...engine import Batcher
-from ...component import Component
+from ...node import Node
 from ...db import Db, NoMatch
 from .dp import ApRead, ApWrite
 
 
 # --- AP base ---
 
-class Ap(Component):
+class Ap(Node):
     """Access Port. Routes register reads/writes through the parent DP."""
 
     IDR = 0xfc

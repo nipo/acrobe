@@ -2662,7 +2662,7 @@ def transpile(program: Program, config: TranspileConfig | None = None,
     w.line()
     w.line('from acrobe.adapter.model import HwRoot, UsbEnumerator')
     w.line('from acrobe.bitstring import BitString')
-    w.line('from acrobe.component import Component')
+    w.line('from acrobe.node import Node')
     w.line('from acrobe.stapl.interpreter import BitArray')
     w.line()
     w.line()
