@@ -44,10 +44,8 @@ class FileNode(Node, Readable):
         self._fd = os.open(self._path, os.O_RDONLY)
         self._size = os.fstat(self._fd).st_size
         # Auto-detect format and populate children if recognised.
-        from . import auto_detect, populate_format
-        fmt = await auto_detect(self._name, self)
-        if fmt is not None:
-            await populate_format(self, fmt, self)
+        from . import auto_populate
+        await auto_populate(self, self, self._name)
 
     async def stop(self):
         if self._fd is not None:

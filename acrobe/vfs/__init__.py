@@ -118,6 +118,19 @@ async def auto_detect(name, source):
     return fmt
 
 
+async def auto_populate(target, source, name):
+    """Run auto-detection on `source` (a Readable). If a format
+    matches, populate `target`'s children via the format parser.
+    No-op if no format matches.
+
+    Usage from a Readable Node's start():
+        await auto_populate(self, self, self.name)
+    """
+    fmt = await auto_detect(name, source)
+    if fmt is not None:
+        await populate_format(target, fmt, source)
+
+
 async def populate_format(target, format_name, source):
     """Apply a format to `target`: instantiate the parser, run its
     start(), then transplant its children to `target` and merge
@@ -200,3 +213,5 @@ class AsNode(Node):
 
 from .fs import FsRoot, FileNode  # noqa: F401, E402
 from . import stapl  # noqa: F401, E402  registers STAPL parser
+from . import zip as _zip  # noqa: F401, E402  registers ZIP parser
+from . import tar  # noqa: F401, E402  registers tar parser

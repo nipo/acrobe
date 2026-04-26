@@ -96,7 +96,7 @@ class TestRegistryDetection:
 
     def test_detect_by_mime(self):
         assert detect_by_mime("application/x-stub") == "stubfmt"
-        assert detect_by_mime("application/zip") is None
+        assert detect_by_mime("application/x-totally-fake") is None
 
 
 class TestAutoDetect:
