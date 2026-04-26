@@ -128,6 +128,32 @@ class TestKvListDirect:
             _parse_kv_list("k=hello world")
 
 
+class TestChildLookupExactBeforeSubstring:
+    """Exact match must beat substring when names share a prefix
+    (e.g. STAPL vars J2, J23, J24)."""
+
+    def test_exact_match_wins(self):
+        parent = Node("p")
+        for n in ["J2", "J23", "J24", "J25"]:
+            parent._child_attach(Node(n))
+        # "J2" must resolve to the exact node, not raise ambiguity.
+        assert parent.child_lookup("J2").name == "J2"
+        assert parent.child_lookup("J23").name == "J23"
+
+    def test_substring_still_works_when_unique(self):
+        parent = Node("p")
+        parent._child_attach(Node("longname"))
+        parent._child_attach(Node("other"))
+        assert parent.child_lookup("long").name == "longname"
+
+    def test_substring_ambiguity_returns_none(self):
+        parent = Node("p")
+        parent._child_attach(Node("foo"))
+        parent._child_attach(Node("foobar"))
+        # Substring "fo" matches both, no exact match → None.
+        assert parent.child_lookup("fo") is None
+
+
 class TestChildSummonOptions:
     """Integration: child_summon parses options and applies them
     via option_set."""

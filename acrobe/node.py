@@ -374,8 +374,14 @@ class Node:
     def child_lookup(self, name):
         """Find existing pre-populated child by name.
 
-        Supports ".." for parent, "*" for single child, int index,
-        and case-insensitive substring match (unique match only).
+        Lookup order:
+        1. ".." → parent.
+        2. "*"  → the only child (if exactly one).
+        3. Integer index into children.
+        4. Exact-name match (case sensitive).
+        5. Case-insensitive substring match (unique match only —
+           returns None on ambiguity).
+
         Returns None if not found.
         """
         if name == "..":
@@ -388,7 +394,13 @@ class Node:
             return self._children[int(name)]
         except (ValueError, IndexError):
             pass
-        matches = [c for c in self._children if name.lower() in c._name.lower()]
+        # Exact match wins over substring (avoids false ambiguity when
+        # names share a prefix, e.g. STAPL vars J2, J23, J24).
+        for c in self._children:
+            if c._name == name:
+                return c
+        matches = [c for c in self._children
+                   if name.lower() in c._name.lower()]
         if len(matches) == 1:
             return matches[0]
         return None
