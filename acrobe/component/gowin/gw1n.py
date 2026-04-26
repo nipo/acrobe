@@ -215,15 +215,26 @@ class GowinFpga(Tap, JtagSramFpga):
 @GowinFpga.application_db.register("spi")
 async def _gowin_spi(tap):
     from pathlib import Path
-    from ...loadable import Program
+    from ...loadable import Program, Segment
     from ...db import NoMatch as _NoMatch
+    from ...vfs.fs import FileNode
     from ..jtag_spi_bridge import jtag_spi_bridge
+    from . import formats  # noqa: F401  ensure .fs.gz parser registered
 
     idcode_masked = tap.idcode & 0x0FFFFFFF
     fw_path = Path(__file__).parent / "fw" / f"0x{idcode_masked:08x}_jtag_spi.fs.gz"
     if not fw_path.exists():
         raise _NoMatch("spi firmware", f"0x{idcode_masked:08x}")
-    await tap.load(Program.from_file(str(fw_path)))
+    leaf = FileNode(fw_path.name, str(fw_path))
+    await leaf.start()
+    try:
+        view = await leaf.child_summon("bitstream")
+        bitstream = await view.read(0, view.size)
+    finally:
+        await leaf.stop()
+    program = Program()
+    program.append(Segment(0, bitstream, str(fw_path)))
+    await tap.load(program)
     return jtag_spi_bridge(tap, base_freq=30e6)
 
 

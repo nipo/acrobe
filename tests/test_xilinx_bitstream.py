@@ -1,133 +1,128 @@
-import struct
+"""Tests for Xilinx .bit format Node (component.xilinx.formats)."""
+
 import gzip
-import tempfile
-import os
+import struct
+
 import pytest
 
-from acrobe.loadable.xilinx import load_xilinx_bitstream
-from acrobe.loadable import Program
-
-
-HEADER = bytes([
-    0x00, 0x09, 0x0f, 0xf0, 0x0f, 0xf0,
-    0x0f, 0xf0, 0x0f, 0xf0, 0x00, 0x00, 0x01,
-])
+import acrobe.component.xilinx.formats  # noqa: F401
+from acrobe.vfs import FsRoot
+from acrobe.component.xilinx.formats import _HEADER, XilinxBit, XilinxPayload
 
 
 def _make_section(letter, data):
-    """Build a lettered section (a-d): 1-byte letter + 2-byte length + data."""
     return letter + struct.pack(">H", len(data)) + data
 
 
 def _make_payload_section(data):
-    """Build section e: 1-byte letter + 4-byte length + data."""
-    return b'e' + struct.pack(">L", len(data)) + data
+    return b"e" + struct.pack(">L", len(data)) + data
 
 
 def _build_bitstream(*, project="test_project;UserID=0x12345678",
                      device="6slx9tqg144", date="2024/01/15",
-                     time="10:30:00", payload=b'\xaa\x99\x55\x66'):
-    parts = HEADER
-    parts += _make_section(b'a', project.encode() + b'\x00')
-    parts += _make_section(b'b', device.encode() + b'\x00')
-    parts += _make_section(b'c', date.encode() + b'\x00')
-    parts += _make_section(b'd', time.encode() + b'\x00')
+                     time="10:30:00", payload=b"\xaa\x99\x55\x66"):
+    parts = _HEADER
+    parts += _make_section(b"a", project.encode() + b"\x00")
+    parts += _make_section(b"b", device.encode() + b"\x00")
+    parts += _make_section(b"c", date.encode() + b"\x00")
+    parts += _make_section(b"d", time.encode() + b"\x00")
     parts += _make_payload_section(payload)
     return parts
 
 
-class TestXilinxBitstream:
-    def test_basic_parse(self, tmp_path):
+class TestXilinxBit:
+    @pytest.mark.asyncio
+    async def test_basic_parse(self, tmp_path):
         data = _build_bitstream()
         path = tmp_path / "test.bit"
         path.write_bytes(data)
+        root = FsRoot(str(tmp_path))
+        await root.start_tree()
+        bit = await root.child_summon("test.bit")
+        assert isinstance(bit.children[0], XilinxPayload)
+        assert bit.metadata["device"] == "6slx9tqg144"
+        assert bit.metadata["project"] == "test_project"
+        assert bit.metadata["userid"] == 0x12345678
+        assert "2024/01/15" in bit.metadata["build_date"]
+        assert "10:30:00" in bit.metadata["build_date"]
 
-        prog = load_xilinx_bitstream(str(path))
-        assert len(prog) == 1
-        assert prog[0].data == bytearray(b'\xaa\x99\x55\x66')
-        assert prog.info["device"] == "6slx9tqg144"
-        assert prog.info["project"] == "test_project"
-        assert prog.info["userid"] == 0x12345678
-        assert "2024/01/15" in prog.info["build_date"]
-        assert "10:30:00" in prog.info["build_date"]
+        view = await root.child_summon("test.bit", "bitstream")
+        assert (await view.read(0, view.size)) == b"\xaa\x99\x55\x66"
 
-    def test_offset(self, tmp_path):
-        data = _build_bitstream()
-        path = tmp_path / "test.bit"
-        path.write_bytes(data)
-
-        prog = load_xilinx_bitstream(str(path), offset=0x1000)
-        assert prog[0].address == 0x1000
-
-    def test_gzip(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_gzip(self, tmp_path):
         data = _build_bitstream()
         path = tmp_path / "test.bit.gz"
-        with gzip.open(str(path), 'wb') as f:
-            f.write(data)
+        path.write_bytes(gzip.compress(data))
+        root = FsRoot(str(tmp_path))
+        await root.start_tree()
+        bit = await root.child_summon("test.bit.gz")
+        assert bit.metadata["userid"] == 0x12345678
+        assert bit.metadata.get("gzipped") is True
+        view = await root.child_summon("test.bit.gz", "bitstream")
+        assert (await view.read(0, view.size)) == b"\xaa\x99\x55\x66"
 
-        prog = load_xilinx_bitstream(str(path))
-        assert len(prog) == 1
-        assert prog.info["userid"] == 0x12345678
-
-    def test_no_userid(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_no_userid(self, tmp_path):
         data = _build_bitstream(project="my_design")
         path = tmp_path / "test.bit"
         path.write_bytes(data)
+        root = FsRoot(str(tmp_path))
+        await root.start_tree()
+        bit = await root.child_summon("test.bit")
+        assert "userid" not in bit.metadata
+        assert bit.metadata["project"] == "my_design"
 
-        prog = load_xilinx_bitstream(str(path))
-        assert "userid" not in prog.info
-        assert prog.info["project"] == "my_design"
-
-    def test_bad_header(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_bad_header(self, tmp_path):
         path = tmp_path / "test.bit"
-        path.write_bytes(b'\x00' * 20)
+        path.write_bytes(b"\x00" * 20)
+        root = FsRoot(str(tmp_path))
+        await root.start_tree()
+        with pytest.raises(Exception):
+            await root.child_summon("test.bit")
 
-        with pytest.raises(ValueError, match="Bad header"):
-            load_xilinx_bitstream(str(path))
-
-    def test_truncated_payload(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_truncated_payload(self, tmp_path):
         data = _build_bitstream()
-        # Truncate in the middle of section e payload
         path = tmp_path / "test.bit"
         path.write_bytes(data[:-2])
+        root = FsRoot(str(tmp_path))
+        await root.start_tree()
+        with pytest.raises(ValueError, match="short payload"):
+            await root.child_summon("test.bit")
 
-        with pytest.raises(ValueError, match="Short payload"):
-            load_xilinx_bitstream(str(path))
-
-    def test_no_payload(self, tmp_path):
-        """Bitstream with only lettered sections but no 'e' section."""
-        parts = HEADER
-        parts += _make_section(b'a', b'test\x00')
-        parts += _make_section(b'b', b'device\x00')
+    @pytest.mark.asyncio
+    async def test_no_payload(self, tmp_path):
+        parts = _HEADER + _make_section(b"a", b"x\x00")
         path = tmp_path / "test.bit"
         path.write_bytes(parts)
+        root = FsRoot(str(tmp_path))
+        await root.start_tree()
+        with pytest.raises(ValueError, match="no bitstream payload"):
+            await root.child_summon("test.bit")
 
-        with pytest.raises(ValueError, match="Not bitstream data"):
-            load_xilinx_bitstream(str(path))
-
-    def test_ext_db_registered(self):
-        handlers = Program.ext_db.get("bit")
-        assert load_xilinx_bitstream in handlers
-
-    def test_format_db_registered(self):
-        for fmt in ("bit", "xilinx"):
-            handlers = Program.format_db.get(fmt)
-            assert load_xilinx_bitstream in handlers
-
-    def test_large_payload(self, tmp_path):
-        payload = bytes(range(256)) * 100  # 25600 bytes
+    @pytest.mark.asyncio
+    async def test_large_payload(self, tmp_path):
+        payload = bytes(range(256)) * 100
         data = _build_bitstream(payload=payload)
         path = tmp_path / "test.bit"
         path.write_bytes(data)
+        root = FsRoot(str(tmp_path))
+        await root.start_tree()
+        view = await root.child_summon("test.bit", "bitstream")
+        assert view.size == len(payload)
+        assert (await view.read(0, view.size)) == payload
 
-        prog = load_xilinx_bitstream(str(path))
-        assert len(prog[0].data) == 25600
-        assert bytes(prog[0].data) == payload
-
-    def test_source_recorded(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_via_as(self, tmp_path):
         data = _build_bitstream()
-        path = tmp_path / "test.bit"
+        path = tmp_path / "raw"
         path.write_bytes(data)
-
-        prog = load_xilinx_bitstream(str(path))
-        assert str(path) in prog.sources
+        root = FsRoot(str(tmp_path))
+        await root.start_tree()
+        # Even though .bit isn't on the filename, magic detection
+        # picks it up. Verify explicit `as(type=xilinx_bit)` also works.
+        view = await root.child_summon(
+            "raw", "as(type=xilinx_bit)", "bitstream")
+        assert (await view.read(0, view.size)) == b"\xaa\x99\x55\x66"

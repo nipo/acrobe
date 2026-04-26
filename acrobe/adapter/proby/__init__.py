@@ -7,7 +7,9 @@ from ..ftdi.transport import FtdiTransport
 from ..ftdi.mpsse import MpsseEngine
 from ..ftdi.jtag import JtagMpsse
 from ...protocol.jtag import Chain, JtagInterface
-from ...loadable.xilinx import load_xilinx_bitstream
+from ...loadable import Program, Segment
+from ...vfs.fs import FileNode
+import acrobe.component.xilinx.formats  # noqa: F401
 
 
 # Proby internal JTAG chain is on Channel B (interface index 1)
@@ -59,7 +61,15 @@ class ProbyAdapter(Adapter):
             return
 
         fw_path = Path(__file__).parent / "fw" / f"{mode}.bit.gz"
-        program = load_xilinx_bitstream(str(fw_path))
+        leaf = FileNode(fw_path.name, str(fw_path))
+        await leaf.start()
+        try:
+            view = await leaf.child_summon("bitstream")
+            bitstream = await view.read(0, view.size)
+        finally:
+            await leaf.stop()
+        program = Program()
+        program.append(Segment(0, bitstream, str(fw_path)))
 
         chain = Chain(self._jtag)
         await chain.discover()
