@@ -259,6 +259,7 @@ class Node:
         self._parent = None
         self._children = []
         self._started = False
+        self._metadata = {}
 
     def __str__(self):
         return self._name
@@ -302,13 +303,11 @@ class Node:
     def metadata(self) -> dict:
         """Free-form metadata for inspection (e.g. by
         `acrobe resource info`). Format-specific subclasses
-        populate this in start().
-
-        Typed attributes on subclasses (e.g. ElfSection.flags,
-        Pof.tool) are the canonical access for code; this dict
-        is for introspection.
+        populate self._metadata in start(); subclasses with typed
+        attributes (e.g. ElfSection.flags, Pof.tool) usually mirror
+        them into this dict.
         """
-        return {}
+        return self._metadata
 
     def _child_attach(self, child: "Node"):
         """Attach child without auto-start. Used by child_summon."""
@@ -403,7 +402,14 @@ class Node:
 
         Each class in the hierarchy can define its own child_spawn
         with its own Db. NoMatch causes fallback to the next class.
+
+        The reserved name `as` is handled here, before the MRO walk.
+        Any Readable Node accepts an `as` child for format
+        reinterpretation (see docs/vfs-design.md D3).
         """
+        if name == "as":
+            from .vfs import AsNode
+            return AsNode("as")
         for cls in type(self).__mro__:
             try:
                 method = cls.__dict__["child_spawn"]

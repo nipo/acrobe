@@ -12,7 +12,190 @@ Vendor-specific format parsers (Altera POF, Xilinx bitstreams, etc.)
 live in `acrobe.component.<vendor>` next to the related hardware
 code.
 
-See `docs/vfs-design.md`.
+See `docs/vfs-design.md` (D3, D9).
 """
 
-from .fs import FsRoot, FileNode  # noqa: F401
+from ..db import Db, NoMatch
+from ..node import Node, Readable
+
+
+# format_db: format name → Node class.
+# The class must accept (name: str, source: Readable) in its
+# constructor and populate self._children in start().
+format_db = Db("format")
+
+# ext_db: extension (lowercase, no dot) → format name string.
+# Compound extensions (e.g. "tar.gz") are checked before single.
+ext_db = Db("file_ext")
+
+# mime_db: mime type → format name string.
+mime_db = Db("mime")
+
+# Magic-byte detectors: list of fn(head: bytes) -> str | None
+# Each detector inspects the head of a Readable and returns a
+# format_db key on match, or None to defer.
+_magic_detectors = []
+
+
+def register_format(format_name, *, exts=(), mimes=()):
+    """Decorator: register a format parser class.
+
+    The decorated class must be a Node subclass whose constructor
+    accepts (name: str, source: Readable). Its start() should
+    populate self._children with structural children.
+
+    Optional `exts` / `mimes` register the format for auto-detection.
+    """
+    def decorator(cls):
+        format_db.register(format_name)(cls)
+        for ext in exts:
+            ext_db.register(ext.lower())(format_name)
+        for mime in mimes:
+            mime_db.register(mime.lower())(format_name)
+        return cls
+    return decorator
+
+
+def register_magic(fn):
+    """Decorator: register a magic-byte detector.
+
+    fn(head: bytes) -> str | None
+    Returns a format_db key on match, or None to defer to the next
+    detector.
+    """
+    _magic_detectors.append(fn)
+    return fn
+
+
+def detect_by_extension(name):
+    """Resolve a filename to a format name via ext_db.
+
+    Tries compound extensions first (file.tar.gz → tar.gz),
+    then progressively shorter ones, ending with the simple
+    extension. Returns None if no match.
+    """
+    if "." not in name:
+        return None
+    parts = name.lower().split(".")
+    # Try compound extensions, longest first
+    for i in range(1, len(parts)):
+        ext = ".".join(parts[i:])
+        try:
+            return ext_db.get(ext, allow_default=False)[0]
+        except NoMatch:
+            continue
+    return None
+
+
+def detect_by_mime(mime):
+    """Resolve a mime type to a format name via mime_db."""
+    try:
+        return mime_db.get(mime.lower(), allow_default=False)[0]
+    except NoMatch:
+        return None
+
+
+async def detect_by_magic(source):
+    """Try registered magic-byte detectors against the head of
+    `source`. Returns the first match, or None."""
+    if source.size == 0:
+        return None
+    head = await source.read(0, min(source.size, 4096))
+    for fn in _magic_detectors:
+        result = fn(head)
+        if result is not None:
+            return result
+    return None
+
+
+async def auto_detect(name, source):
+    """Detect the format of `source` (a Readable). Tries extension
+    on `name` first, then magic. Returns format_db key, or None."""
+    fmt = detect_by_extension(name)
+    if fmt is not None:
+        return fmt
+    fmt = await detect_by_magic(source)
+    return fmt
+
+
+async def populate_format(target, format_name, source):
+    """Apply a format to `target`: instantiate the parser, run its
+    start(), then transplant its children to `target` and merge
+    metadata.
+
+    Per design D9: parser children attach directly to `target`,
+    NOT under a wrapper. The parser instance itself is kept
+    accessible as `target._format_parsers` (a list — successive
+    detections append).
+    """
+    cls = format_db.get(format_name, allow_default=False)[0]
+    parser = cls(name=format_name, source=source)
+    await parser.start()
+    parser._started = True
+
+    for child in list(parser._children):
+        parser._children.remove(child)
+        child._parent = target
+        target._children.append(child)
+    target.children_changed()
+
+    target._metadata.update(parser.metadata)
+
+    if not hasattr(target, "_format_parsers"):
+        target._format_parsers = []
+    target._format_parsers.append(parser)
+
+
+class FormatNode(Node):
+    """Base class for format parser Nodes.
+
+    Constructed with (name, source: Readable). `source` is the byte
+    stream to parse. Subclasses override start() to parse `source`
+    and populate self._children.
+    """
+
+    def __init__(self, name, source):
+        super().__init__(name)
+        self._source = source
+
+    @property
+    def source(self):
+        return self._source
+
+
+class AsNode(Node):
+    """Reserved child of any Readable Node. Reinterprets the parent's
+    bytes as a specified format.
+
+    Reached via path syntax `parent/as(type=zip)/...` or
+    `parent/as(mime-type=application/zip)/...`. start() looks up
+    the format and populates self with the format's children
+    (parser's children are transplanted to self, per D9).
+    """
+
+    def __init__(self, name="as"):
+        super().__init__(name)
+        self._format_name = None
+
+    def option_set(self, key, value):
+        if key == "type":
+            self._format_name = value
+        elif key == "mime-type":
+            fmt = detect_by_mime(value)
+            if fmt is None:
+                raise ValueError(f"Unknown mime type: {value}")
+            self._format_name = fmt
+        else:
+            super().option_set(key, value)
+
+    async def start(self):
+        if self._format_name is None:
+            raise ValueError(
+                f"{self.fqdn}: as() requires type= or mime-type= option")
+        if not isinstance(self._parent, Readable):
+            raise TypeError(
+                f"{self.fqdn}: as() parent must be Readable")
+        await populate_format(self, self._format_name, self._parent)
+
+
+from .fs import FsRoot, FileNode  # noqa: F401, E402

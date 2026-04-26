@@ -43,6 +43,11 @@ class FileNode(Node, Readable):
         # cheap; not worth offloading.
         self._fd = os.open(self._path, os.O_RDONLY)
         self._size = os.fstat(self._fd).st_size
+        # Auto-detect format and populate children if recognised.
+        from . import auto_detect, populate_format
+        fmt = await auto_detect(self._name, self)
+        if fmt is not None:
+            await populate_format(self, fmt, self)
 
     async def stop(self):
         if self._fd is not None:
@@ -68,7 +73,9 @@ class FileNode(Node, Readable):
 
     @property
     def metadata(self) -> dict:
-        return {"path": self._path, "size": self._size}
+        # Merge our intrinsic file metadata with anything populated
+        # by an auto-detected format.
+        return {"path": self._path, "size": self._size, **self._metadata}
 
 
 class FsRoot(Node):
