@@ -3,7 +3,7 @@
 import pytest
 
 from acrobe.vfs import FsRoot
-from acrobe.vfs.bin import Bin, BinView
+from acrobe.vfs.bin import Bin, _BinReadView
 
 
 class TestBinAs:
@@ -15,7 +15,7 @@ class TestBinAs:
         await root.start_tree()
         view = await root.child_summon(
             "data.raw", "as(type=bin)", "data")
-        assert isinstance(view, BinView)
+        assert isinstance(view, _BinReadView)
         assert view.load_address == 0
         assert view.size == 4
         assert (await view.read(0, 4)) == b"\x01\x02\x03\x04"
