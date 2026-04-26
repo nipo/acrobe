@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import struct
 
-from ..node import Node
+from ..node import Node, Readable, Writable, Addressable
 from ..protocol.spi import Shift
 from ..util.pretty import base2
 
@@ -31,10 +31,20 @@ _JEDEC_MANUFACTURERS = {
 }
 
 
-class SpiFlash(Node):
+class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
     """SPI NOR flash device.
 
     Communicates through an SPI Target (handles CS management).
+
+    Implements Readable + Writable + Addressable so that VFS
+    walks can compose file containers on top of live flash
+    contents (e.g. flash/as(type=pof)/partition/0/as(type=altera_rbf)).
+    `load_address` is 0 (flash address space starts at 0); `size`
+    is `total_size` (set by detect()).
+
+    Writable.write() programs data at the given offset; the caller
+    is responsible for erasing the affected sectors first
+    (Writable's contract is in-place passthrough).
     """
 
     # Standard SPI flash commands
@@ -65,6 +75,31 @@ class SpiFlash(Node):
         self.total_size = 0
         self.page_size = 256
         self.sector_info = []  # list of (size, erase_cmd)
+
+    # --- Readable / Addressable contract ---
+
+    @property
+    def size(self) -> int:
+        return self.total_size
+
+    @property
+    def load_address(self) -> int:
+        return 0
+
+    # --- Writable contract ---
+
+    async def write(self, offset: int, data: bytes) -> None:
+        """Writable interface: program `data` at `offset`.
+
+        The caller is responsible for ensuring the relevant
+        sectors were erased; Writable's in-place semantics do not
+        imply erase-and-write.
+        """
+        if offset < 0 or offset + len(data) > self.total_size:
+            raise ValueError(
+                f"write [{offset}, {offset + len(data)}) out of "
+                f"flash range [0, {self.total_size})")
+        await self.program(offset, data)
 
     async def _command(self, cmd: bytes, addr: bytes = b"",
                        wdata: bytes = b"", rsize: int = 0,
