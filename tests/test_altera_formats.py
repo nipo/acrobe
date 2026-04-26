@@ -242,14 +242,32 @@ class TestRbf:
         assert out == bitswap8(body)
 
     @pytest.mark.asyncio
-    async def test_rbf_no_sync_raises(self, tmp_path):
-        body = b"\xab" * 1024  # no sync anywhere in head
-        path = tmp_path / "bad.rbf"
+    async def test_rbf_no_sync_passthrough(self, tmp_path):
+        # Bytes without any classic sync word: parser passes through
+        # (Agilex/SDM-style RBFs don't carry the legacy sync). Caller
+        # asserted "this is RBF" by file extension or as(type=...).
+        body = b"\xab" * 1024
+        path = tmp_path / "modern.rbf"
         path.write_bytes(body)
         root = FsRoot(str(tmp_path))
         await root.start_tree()
-        with pytest.raises(Exception):
-            await root.child_summon("bad.rbf")
+        view = await root.child_summon("modern.rbf", "bitstream")
+        assert view.size == len(body)
+        assert (await view.read(0, view.size)) == body
+        assert view._swapped is False
+
+    @pytest.mark.asyncio
+    async def test_rbf_explicit_swap_override(self, tmp_path):
+        body = b"\x12\x34\x56\x78"
+        path = tmp_path / "blob"
+        path.write_bytes(body)
+        root = FsRoot(str(tmp_path))
+        await root.start_tree()
+        view = await root.child_summon(
+            "blob", "as(type=altera_rbf,swap=true)", "bitstream")
+        assert view._swapped is True
+        # Output is bit-reversed
+        assert (await view.read(0, 4)) == bitswap8(body)
 
 
 # --- Composition: POF / partition / as(type=rbf) / bitstream ---

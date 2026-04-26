@@ -401,17 +401,54 @@ class RbfBitstream(Node, Readable):
                  mimes=["application/x-altera-rbf"])
 class Rbf(FormatNode):
     """RBF format. Adds a single `bitstream` child exposing the
-    JTAG-bit-order view of `source` (auto-bitswap)."""
+    JTAG-bit-order view of `source`.
+
+    Bitswap behaviour is decided in this order:
+    1. `swap=true` / `swap=false` option, if given.
+    2. Cyclone-classic sync word (0x6af7f7f7) seen in the first
+       4 KiB → no swap.
+    3. Bit-swapped sync (0x56efefef) seen in the first 4 KiB →
+       swap on read.
+    4. Otherwise: passthrough (no swap). This handles Agilex /
+       SDM-style RBFs and any future Altera/Intel format that
+       doesn't carry the legacy sync; the caller asserted RBF
+       via the `.rbf` extension or `as(type=altera_rbf)`.
+    """
+
+    def __init__(self, name, source):
+        super().__init__(name, source)
+        self._swap_override = None  # None=auto, True/False=forced
+
+    def option_set(self, key, value):
+        if key == "swap":
+            v = value.lower()
+            if v in ("true", "1", "yes"):
+                self._swap_override = True
+            elif v in ("false", "0", "no"):
+                self._swap_override = False
+            elif v == "auto":
+                self._swap_override = None
+            else:
+                raise ValueError(
+                    f"{self.fqdn}: swap must be true/false/auto, "
+                    f"got {value!r}")
+            return
+        super().option_set(key, value)
 
     async def start(self):
-        head = await self._source.read(
-            0, min(self._source.size, 1024))
-        if head.find(RBF_SYNC) >= 0:
-            swapped = False
-        elif head.find(RBF_SYNC_SWAPPED) >= 0:
-            swapped = True
+        if self._swap_override is not None:
+            swapped = self._swap_override
         else:
-            raise NoMatch("altera_rbf", "no sync word in head")
+            head = await self._source.read(
+                0, min(self._source.size, 4096))
+            if RBF_SYNC in head:
+                swapped = False
+            elif RBF_SYNC_SWAPPED in head:
+                swapped = True
+            else:
+                # No legacy sync — assume passthrough (Agilex/SDM
+                # style or other modern variant).
+                swapped = False
         view = RbfBitstream("bitstream", self._source, swapped)
         self._child_attach(view)
 
