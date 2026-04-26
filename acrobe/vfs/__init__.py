@@ -131,7 +131,7 @@ async def auto_populate(target, source, name):
         await populate_format(target, fmt, source)
 
 
-async def populate_format(target, format_name, source):
+async def populate_format(target, format_name, source, *, parser_opts=None):
     """Apply a format to `target`: instantiate the parser, run its
     start(), then transplant its children to `target` and merge
     metadata.
@@ -140,9 +140,16 @@ async def populate_format(target, format_name, source):
     NOT under a wrapper. The parser instance itself is kept
     accessible as `target._format_parsers` (a list — successive
     detections append).
+
+    `parser_opts` (dict) — any options to apply to the parser via
+    option_set BEFORE start(). Used by AsNode to forward extra
+    options like `offset=`, `size=`, `value=` to the format parser.
     """
     cls = format_db.get(format_name, allow_default=False)[0]
     parser = cls(name=format_name, source=source)
+    if parser_opts:
+        for k, v in parser_opts.items():
+            parser.option_set(k, v)
     await parser.start()
     parser._started = True
 
@@ -187,14 +194,18 @@ class AsNode(Node):
     bytes as a specified format.
 
     Reached via path syntax `parent/as(type=zip)/...` or
-    `parent/as(mime-type=application/zip)/...`. start() looks up
-    the format and populates self with the format's children
-    (parser's children are transplanted to self, per D9).
+    `parent/as(mime-type=application/zip)/...`. Extra options on the
+    `as(...)` invocation (other than `type`/`mime-type`) are forwarded
+    to the format parser via its option_set, before start().
+
+    start() looks up the format and populates self with the format's
+    children (parser's children are transplanted to self, per D9).
     """
 
     def __init__(self, name="as"):
         super().__init__(name)
         self._format_name = None
+        self._parser_opts = {}
 
     def option_set(self, key, value):
         if key == "type":
@@ -205,7 +216,8 @@ class AsNode(Node):
                 raise ValueError(f"Unknown mime type: {value}")
             self._format_name = fmt
         else:
-            super().option_set(key, value)
+            # Forward to the format parser at start time.
+            self._parser_opts[key] = value
 
     async def start(self):
         if self._format_name is None:
@@ -214,7 +226,9 @@ class AsNode(Node):
         if not isinstance(self._parent, Readable):
             raise TypeError(
                 f"{self.fqdn}: as() parent must be Readable")
-        await populate_format(self, self._format_name, self._parent)
+        await populate_format(
+            self, self._format_name, self._parent,
+            parser_opts=self._parser_opts)
 
 
 from .fs import FsRoot, FileNode  # noqa: F401, E402
@@ -222,3 +236,6 @@ from . import stapl  # noqa: F401, E402  registers STAPL parser
 from . import zip as _zip  # noqa: F401, E402  registers ZIP parser
 from . import tar  # noqa: F401, E402  registers tar parser
 from . import elf  # noqa: F401, E402  registers ELF parser
+from . import bin as _bin  # noqa: F401, E402  registers Bin parser
+from . import ihex  # noqa: F401, E402  registers Ihex parser
+from . import literals  # noqa: F401, E402  registers literals

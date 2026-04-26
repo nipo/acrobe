@@ -3,10 +3,6 @@ import tempfile
 import pytest
 from acrobe.loadable import Segment, Program
 
-# Ensure format parsers are registered
-import acrobe.loadable.bin
-import acrobe.loadable.ihex
-
 
 class TestSegment:
     def test_basic(self):
@@ -140,58 +136,8 @@ class TestPaged:
         assert paged[0][5] == 0xaa
 
 
-class TestBinFormat:
-    def test_save_and_load(self):
-        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
-            fname = f.name
-
-        try:
-            p = Program()
-            p.append(Segment(0, b"\xde\xad\xbe\xef"))
-            p.save_bin(fname)
-
-            loaded = Program.from_file(fname)
-            assert len(loaded) == 1
-            assert bytes(loaded[0].data) == b"\xde\xad\xbe\xef"
-        finally:
-            os.unlink(fname)
-
-
-class TestIHexFormat:
-    def test_roundtrip(self):
-        with tempfile.NamedTemporaryFile(suffix=".hex", delete=False, mode="w") as f:
-            fname = f.name
-
-        try:
-            p = Program()
-            p.append(Segment(0x1000, b"\x01\x02\x03\x04\x05\x06\x07\x08"))
-            p.save_hex(fname)
-
-            loaded = Program.from_file(fname)
-            s = loaded.simplified()
-            assert len(s) == 1
-            assert s[0].address == 0x1000
-            assert bytes(s[0].data) == b"\x01\x02\x03\x04\x05\x06\x07\x08"
-        finally:
-            os.unlink(fname)
-
-    def test_parse_basic(self):
-        hex_content = (
-            ":020000040000FA\n"   # Extended linear address: 0x0000
-            ":04000000DEADBEEFC4\n"  # Data at 0x0000: DE AD BE EF
-            ":00000001FF\n"       # EOF
-        )
-        with tempfile.NamedTemporaryFile(suffix=".hex", delete=False, mode="w") as f:
-            f.write(hex_content)
-            fname = f.name
-
-        try:
-            p = Program.from_file(fname)
-            assert len(p) == 1
-            assert bytes(p[0].data) == b"\xde\xad\xbe\xef"
-        finally:
-            os.unlink(fname)
-
-
-# ELF parsing has migrated from acrobe.loadable.elf to the VFS in
-# acrobe.vfs.elf. See tests/test_vfs_elf.py for the new tests.
+# Format parsing has migrated from acrobe.loadable.* to the VFS:
+#  - bin     → tests/test_vfs_bin.py
+#  - ihex    → tests/test_vfs_ihex.py
+#  - elf     → tests/test_vfs_elf.py
+#  - others  → tests/test_vfs_archive.py, test_vfs_format.py, ...
