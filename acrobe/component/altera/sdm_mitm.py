@@ -17,9 +17,9 @@ from ...node import Node
 from ...db import NoMatch
 from ...engine import Batcher
 from ...protocol.jtag import CaptureIr, CaptureDr, Shift, Run, Reset, JtagInterface
-from .agilex5 import Agilex5SdmCommand, Agilex5
+from .agilex5 import Agilex5
 from .sdm_jtag import SdmJtag
-from .sdm import SdmErrorCode
+from .sdm import Command, ErrorCode
 from ...bitstring import *
 
 SDM_CMD_IR = Agilex5.SDM_CMD.ir
@@ -50,7 +50,7 @@ def _format_sdm_word(word, framing):
     if header:
         opcode, length, id_tag, reserved = header
         try:
-            name = Agilex5SdmCommand(opcode).name
+            name = Command(opcode).name
         except:
             name = f"UNK_{opcode:#05x}"
         return (f"HDR id={id_tag} op={name}({opcode:#05x}) "
@@ -190,7 +190,7 @@ class SdmMitm(JtagInterface, Batcher):
             if hdr:
                 code, length, id_tag, upper = hdr
                 try:
-                    name = Agilex5SdmCommand(code).name
+                    name = Command(code).name
                 except:
                     name = f"op={code:#05x}"
                 s += f' ({name} id={id_tag} len={length})'
@@ -217,7 +217,7 @@ class SdmMitm(JtagInterface, Batcher):
                 if hdr:
                     code, length, id_tag, upper = hdr
                     try:
-                        err_name = SdmErrorCode(code).name
+                        err_name = ErrorCode(code).name
                     except:
                         err_name = f"err={code:#05x}"
                     s += f' ({err_name} id={id_tag} len={length})'

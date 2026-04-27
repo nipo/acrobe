@@ -16,7 +16,7 @@ instructions. These must be defined on the Tap class as:
 import time
 import asyncio
 from ...bitstring import BitString
-from .sdm import Sdm, SdmTimeoutError
+from .sdm import Sdm, TimeoutError
 import random
 
 # CMD framing values [33:32]
@@ -150,7 +150,7 @@ class SdmJtag(Sdm):
                 silent_to_go = max_silent
                 interval = 0.001
             elif silent_to_go <= 0:
-                raise SdmTimeoutError("No response from SDM")
+                raise TimeoutError("No response from SDM")
             else:
                 silent_to_go -= 1
                 await asyncio.sleep(interval)
@@ -177,7 +177,7 @@ class SdmJtag(Sdm):
             # Drain stale RSP data
             for retry in range(32, -1, -1):
                 if not retry:
-                    raise SdmTimeoutError("Unable to sync")
+                    raise TimeoutError("Unable to sync")
 
                 rx = await self._tap.SDM_RSP(0, read_tdo=True)
                 word, framing = self._unpack_rsp(int(rx))
@@ -199,3 +199,11 @@ class SdmJtag(Sdm):
 
         await self._flush(nonce = nonce)
         await self._tap.run(32)
+
+class SdmJtagMixin:
+    class VoltageChannel(enum.IntEnum):
+        pass
+
+    async def child_spawn(self, name):
+        if name == "sdm":
+            return Agilex5SdmJtag(self)

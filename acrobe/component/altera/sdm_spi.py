@@ -11,9 +11,11 @@ Stack: SdmSpiAdapter → spi.Interface → spi.Target → flash driver
 
 from ...engine import Batcher
 from ...protocol.spi import Cs, Shift
+from ...node import Node
+from ...protocol import spi
+from .sdm import Command
 
-
-class SdmSpiAdapter(Batcher):
+class SdmSpiAdapter(spi.Interface):
     """Translates SPI ops to SDM SPI passthrough commands.
 
     Each CS-held transaction (between Cs(assert) and Cs(None))
@@ -23,10 +25,15 @@ class SdmSpiAdapter(Batcher):
 
     SPI_MARKER = 0x0D
 
-    def __init__(self, sdm_mailbox, transport):
-        super().__init__()
-        self._sdm = sdm_mailbox
-        self._tr = transport
+    def __init__(self, sdm):
+        super().__init__("spi")
+        self._sdm = sdm
+
+        self.child_add(spi.Target(self, cs=0, mode=0, name="cs0"))
+
+    async def start(self):
+        await self._sdm.qspi_open()
+        await self._sdm.qspi_set_cs(0)
 
     async def flush_ops(self, batch):
         # Group shifts between CS assert/deassert into transactions

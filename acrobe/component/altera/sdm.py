@@ -19,8 +19,10 @@ SDM response header (32-bit):
 
 import enum
 from ...node import Node
+from ...engine import Batcher
+from ...bitfield import *
 
-class SdmErrorCode(enum.IntEnum):
+class ErrorCode(enum.IntEnum):
     OK = 0	
     INVALID_COMMAND = 1
     UNKNOWN_COMMAND = 3
@@ -53,12 +55,78 @@ class SdmErrorCode(enum.IntEnum):
     ALT_SDM_MBOX_RESP_NO_VALID_RESP_AVAILABLE = 0x2FF
     ALT_SDM_MBOX_RESP_ERROR = 0x3FF
 
-class SdmError(Exception):
+class Command(enum.IntEnum):
+    """Known SDM command opcodes for Agilex 5."""
+    NOOP = 0x000
+    SYNC = 0x001
+    CONFIG_STATUS = 0x004
+    CONFIG_REQUEST = 0x005
+
+    GET_IDCODE = 0x010
+    GET_CHIPID = 0x012
+    GET_USERCODE = 0x013
+    GET_VOLTAGE = 0x018
+    GET_TEMPERATURE = 0x019
+    GET_CONFIGURATION_TIME = 0x065
+
+    READ_SEU_ERROR = 0x03c
+    STATUS_VR = 0x713
+
+    QSPI_OPEN = 0x032
+    QSPI_CLOSE = 0x033
+    QSPI_SET_CS = 0x034
+    QSPI_READ_DEVICE_REG = 0x035
+    QSPI_WRITE_DEVICE_REG = 0x036
+    QSPI_SEND_DEVICE_OP = 0x037
+    QSPI_READ_SHA = 0x06e
+    QSPI_ERASE = 0x038
+    QSPI_WRITE = 0x039
+    QSPI_READ = 0x03A
+
+    RSU_GET_SPT = 0x05A
+    RSU_STATUS = 0x05B
+    RSU_IMAGE_UPDATE = 0x5c
+    RSU_NOTIFY = 0x5d
+
+class ConfigStatus(Bitfield):
+    # Word 0
+    state = BooleanField(0)
+    # Word 1
+    fw_version = Field(32+28, 4)
+    quartus_major = Field(32+16, 8)
+    quartus_minor = Field(32+8, 8)
+    quartus_update = Field(32, 8)
+    # Word 2
+    nSTATUS = BooleanField(64+31)
+    nCONFIG = BooleanField(64+30)
+    clk_src = MappingField(64+6, 2, [None, "Int", "Clk1", "SecurePll"])
+    vid_enabled = BooleanField(64+4)
+    msel = MappingField(64+0, 3, {
+        0: "AvSTx32",
+        1: "AS-Fast",
+        3: "AS-Normal",
+        5: "AvSTx16",
+        6: "AvSTx8",
+        7: "JTAG",
+    })
+    # Word 3
+    hps_warmreset = BooleanField(96+5)
+    hps_coldreset = BooleanField(96+4)
+    seu_error = BooleanField(96+3)
+    cvp_done = BooleanField(96+2)
+    init_done = BooleanField(96+1)
+    conf_done = BooleanField(96+0)
+    # Word 4
+    error_location = Field(128, 32)
+    # Word 5
+    error_details = Field(160, 32)
+
+class Error(Exception):
     """SDM returned a non-zero error code."""
 
     def __init__(self, error_code, opcode=None):
         try:
-            error_code = SdmErrorCode(error_code)
+            error_code = ErrorCode(error_code)
         except:
             pass
         self.error_code = error_code
@@ -66,12 +134,11 @@ class SdmError(Exception):
         op = f" for opcode {opcode:#05x}" if opcode is not None else ""
         super().__init__(f"SDM error {error_code}{op}")
 
-
-class SdmFramingError(Exception):
+class FramingError(Exception):
     """SDM response framing mismatch."""
 
 
-class SdmTimeoutError(Exception):
+class TimeoutError(Exception):
     """No response from SDM."""
 
 
@@ -81,11 +148,19 @@ class Sdm(Node):
     Subclasses implement do_io() for the physical transport.
     This class provides the command serialization and response parsing.
     """
-
+    
     def __init__(self):
-        super().__init__("sdm")
+        Node.__init__(self, "sdm")
         self._id = 0
 
+    async def start(self):
+        await self.sync()
+
+    async def child_spawn(self, name):
+        if name == "spi":
+            from .sdm_spi import SdmSpiAdapter
+            return SdmSpiAdapter(self)
+        
     async def do_io(self, cmd: list[int]) -> list[int]:
         """Send a command frame and receive a response frame.
 
@@ -123,9 +198,9 @@ class Sdm(Node):
             Response data as bytes (excluding header).
 
         Raises:
-            SdmError: if SDM returns non-zero error code
-            SdmFramingError: if response length doesn't match header
-            SdmTimeoutError: if no response received
+            Error: if SDM returns non-zero error code
+            FramingError: if response length doesn't match header
+            TimeoutError: if no response received
         """
         # Pack arguments as 32-bit words
         arg_words = []
@@ -143,7 +218,7 @@ class Sdm(Node):
         rsp = await self.do_io([header] + arg_words)
 
         if not rsp:
-            raise SdmTimeoutError(f"No response for opcode {opcode:#05x}")
+            raise TimeoutError(f"No response for opcode {opcode:#05x}")
 
         # Parse response header
         rsp_header = rsp[0]
@@ -152,12 +227,73 @@ class Sdm(Node):
         rsp_id = (rsp_header >> 24) & 0xF
 
         if rsp_error:
-            raise SdmError(rsp_error, opcode=opcode)
+            raise Error(rsp_error, opcode=opcode)
 
         if len(rsp) != rsp_length + 1:
-            raise SdmFramingError(
+            raise FramingError(
                 f"Response length mismatch: header says {rsp_length} "
                 f"data words, got {len(rsp) - 1}")
 
         # Convert data words to bytes
         return b''.join(w.to_bytes(4, 'little') for w in rsp[1:])
+
+    async def get_idcode(self) -> int:
+        """Read IDCODE via SDM."""
+        data = await self.command(Command.GET_IDCODE)
+        return int.from_bytes(data[:4], 'little')
+
+    async def get_chipid(self) -> int:
+        """Read 64-bit unique chip ID."""
+        data = await self.command(Command.GET_CHIPID)
+        return int.from_bytes(data[:8], 'little')
+
+    async def get_usercode(self) -> int:
+        """Read USERCODE."""
+        data = await self.command(Command.GET_USERCODE)
+        return int.from_bytes(data[:4], 'little')
+
+    async def config_status(self) -> bytes:
+        """Read configuration status (6 words = 24 bytes)."""
+        v = await self.command(Command.CONFIG_STATUS)
+        v = int.from_bytes(v, "little")
+        return ConfigStatus(all = v)
+
+    async def qspi_open(self):
+        """Enable QSPI flash access."""
+        await self.command(Command.QSPI_OPEN)
+
+    async def qspi_close(self):
+        """Disable QSPI flash access."""
+        await self.command(Command.QSPI_CLOSE)
+
+    async def qspi_set_cs(self, cs: int):
+        """Select QSPI chip select line (0-3)."""
+        await self.command(
+            Command.QSPI_SET_CS,
+            (cs << 28).to_bytes(4, 'little'))
+
+    async def qspi_read(self, address: int, word_count: int) -> bytes:
+        """Read from QSPI flash. Address must be word-aligned."""
+        arg = struct.pack('<II', address, word_count)
+        return await self.command(Command.QSPI_READ, arg)
+
+    async def qspi_write(self, address: int, data: bytes):
+        """Write to QSPI flash. Address must be word-aligned."""
+        word_count = (len(data) + 3) // 4
+        arg = struct.pack('<II', address, word_count) + data
+        await self.command(Command.QSPI_WRITE, arg)
+
+    async def qspi_erase(self, address: int, word_count: int):
+        """Erase QSPI flash region. Address must be word-aligned."""
+        arg = struct.pack('<II', address, word_count)
+        await self.command(Command.QSPI_ERASE, arg)
+
+    async def qspi_read_device_reg(self, opcode: int, byte_count: int) -> bytes:
+        """Read a QSPI device register (e.g. JEDEC ID)."""
+        arg = struct.pack('<II', opcode, byte_count)
+        return await self.command(
+            Command.QSPI_READ_DEVICE_REG, arg)
+
+    async def config_request(self) -> bytes:
+        """Read a QSPI device register (e.g. JEDEC ID)."""
+        return await self.command(Command.CONFIG_REQUEST)
