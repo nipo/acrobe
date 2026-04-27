@@ -191,16 +191,17 @@ class GowinFpga(Tap, JtagSramFpga):
         await self.run(100)
         await self._assert_done()
 
-    async def load(self, program):
+    async def load(self, source):
         usercode = int(await self.USERCODE())
-        exp = int(program.info.get("UserCode", "0x0"), 16)
+        meta = source._parent.metadata if source._parent else {}
+        exp = int(meta.get("UserCode", "0x0"), 16)
         self.logger.note("Usercode 0x%08x, expected 0x%08x", usercode, exp)
         status = await self.status_read()
         if self.is_done(status) and usercode and usercode == exp:
             self.logger.note("Usercode already matches")
             return
         await self.sram_erase()
-        data = program[0].data
+        data = await source.read(0, source.size)
         await self.sram_configure(bytes(data))
 
     async def erase(self):
@@ -215,7 +216,6 @@ class GowinFpga(Tap, JtagSramFpga):
 @GowinFpga.application_db.register("spi")
 async def _gowin_spi(tap):
     from pathlib import Path
-    from ...loadable import Program, Segment
     from ...db import NoMatch as _NoMatch
     from ...vfs.fs import FileNode
     from ..jtag_spi_bridge import jtag_spi_bridge
@@ -227,14 +227,11 @@ async def _gowin_spi(tap):
         raise _NoMatch("spi firmware", f"0x{idcode_masked:08x}")
     leaf = FileNode(fw_path.name, str(fw_path))
     await leaf.start()
-    try:
-        view = await leaf.child_summon("bitstream")
-        bitstream = await view.read(0, view.size)
-    finally:
-        await leaf.stop()
-    program = Program()
-    program.append(Segment(0, bitstream, str(fw_path)))
-    await tap.load(program)
+    view = await leaf.child_summon("bitstream")
+    await tap.load(view)
+    # NOTE: leaf is intentionally not stopped — view holds a
+    # reference to leaf's source for future reads (none here, but
+    # consistent with the lifetime model). Process exit closes it.
     return jtag_spi_bridge(tap, base_freq=30e6)
 
 

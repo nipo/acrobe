@@ -1,65 +1,71 @@
+"""`acrobe loadable` — convert and inspect a single resource.
+
+Each command takes one resource path. Multi-source aggregation
+(merging multiple files) is deferred — see docs/vfs-plan.md.
+"""
+
 import re
 import asyncclick as click
 
 from . import base
-from ..loadable import Program
+from ..memory_map import save_bin, save_hex
 
 
-@base.cli.group(help="Loadable manipulation")
+@base.cli.group(help="Loadable manipulation (single-resource)")
 async def loadable():
     pass
 
 
 @loadable.command(help="Dump file parsing results")
-@click.argument("programs", type=base.PROGRAM, nargs=-1)
-async def dump(programs):
-    p = Program.from_programs(programs).simplified()
-    click.echo(f"{p.__class__.__name__}:")
+@click.argument("resource", type=base.RESOURCE)
+async def dump(resource):
+    m = await resource.memory_map()
+    p = m.simplified()
+    click.echo("MemoryMap:")
     for k, v in sorted(p.info.items()):
         click.echo(f"  {k}: {v}")
-    for seg in p:
-        click.echo(f"  {seg}")
+    for addr, data in p:
+        click.echo(f"  <0x{addr:08x}:0x{addr + len(data):08x} ({len(data)} bytes)>")
 
 
 @loadable.command(help="Hex dump image")
-@click.argument("programs", type=base.PROGRAM, nargs=-1)
-async def hexdump(programs):
+@click.argument("resource", type=base.RESOURCE)
+async def hexdump(resource):
     from ..util.hexdump import hexdump as do_hexdump
-    p = Program.from_programs(programs)
-    for s in p:
-        if s.name:
-            click.echo(f"{s.name}:")
-        do_hexdump(s.address, s.data, printer=click.echo)
+    m = await resource.memory_map()
+    for addr, data in m:
+        do_hexdump(addr, data, printer=click.echo)
 
 
-@loadable.command(name="to-bin", help="Convert to binary")
-@click.argument("programs", type=base.PROGRAM, nargs=-1)
-@click.argument("output", type=click.File("wb"))
-async def to_bin(programs, output):
-    p = Program.from_programs(programs).simplified()
-    if len(p) == 0:
-        return
-    if len(p) > 1:
-        raise click.ClickException(
-            "Cannot save multi-segment program as flat binary; "
-            "use within() first"
-        )
-    output.write(bytes(p[0].data))
-
-
-@loadable.command(name="to-hex", help="Convert to Intel HEX")
-@click.argument("programs", type=base.PROGRAM, nargs=-1)
+@loadable.command(name="to-bin", help="Convert resource to binary")
+@click.argument("resource", type=base.RESOURCE)
 @click.argument("output", type=click.Path(dir_okay=False))
-@click.option("--paged", type=int, default=0, help="Page-align segments")
-async def to_hex(programs, output, paged):
-    p = Program.from_programs(programs)
+async def to_bin(resource, output):
+    m = (await resource.memory_map()).simplified()
+    if len(m) == 0:
+        with open(output, "wb"):
+            pass
+        return
+    if len(m) > 1:
+        raise click.ClickException(
+            "Cannot save multi-chunk MemoryMap as flat binary; "
+            "use within() first")
+    save_bin(m, output)
+
+
+@loadable.command(name="to-hex", help="Convert resource to Intel HEX")
+@click.argument("resource", type=base.RESOURCE)
+@click.argument("output", type=click.Path(dir_okay=False))
+@click.option("--paged", type=int, default=0, help="Page-align chunks")
+async def to_hex(resource, output, paged):
+    m = await resource.memory_map()
     if paged:
-        p = p.paged(paged)
-    p.save_hex(output)
+        m = m.paged(paged)
+    save_hex(m, output)
 
 
 @loadable.command(name="to-c-blob", help="C blob file generator")
-@click.argument("programs", type=base.PROGRAM, nargs=-1)
+@click.argument("resource", type=base.RESOURCE)
 @click.argument("output", type=click.File("w"))
 @click.option("-n", "--name", type=str, default="blob", help="Variable name")
 @click.option("--align", type=int, default=1, help="Alignment constraint")
@@ -69,12 +75,15 @@ async def to_hex(programs, output, paged):
               help="Only emit forward declarations")
 @click.option("-S", "--size", is_flag=True, default=False,
               help="Also emit size constant")
-async def to_c_blob(programs, output, name, align, section, size,
+async def to_c_blob(resource, output, name, align, section, size,
                     static, extern):
-    p = Program.from_programs(programs).simplified()
-    if len(p) > 1:
-        raise click.ClickException("Loadable has more than one segment")
-    data = p[0].data
+    m = (await resource.memory_map()).simplified()
+    if len(m) > 1:
+        raise click.ClickException(
+            "MemoryMap has more than one chunk")
+    if len(m) == 0:
+        raise click.ClickException("MemoryMap is empty")
+    data = m[0][1]
 
     guard_name = re.sub("[^A-Z]+", "_", name.upper()) + "_DECLARED"
 
@@ -123,7 +132,7 @@ async def to_c_blob(programs, output, name, align, section, size,
 
 
 @loadable.command(name="to-vhdl-blob", help="VHDL blob file generator")
-@click.argument("programs", type=base.PROGRAM, nargs=-1)
+@click.argument("resource", type=base.RESOURCE)
 @click.argument("output", type=click.File("w"))
 @click.option("-n", "--name", type=str, default="blob", help="Variable name")
 @click.option("-p", "--package-name", type=str, default="pack",
@@ -138,12 +147,14 @@ async def to_c_blob(programs, output, name, align, section, size,
               help="SLV array item width (bit count, multiple of 8)")
 @click.option("-e", "--endian", "endian_", type=str, default="little",
               help="Multi-byte endianness")
-async def to_vhdl_blob(programs, output, name, package_name,
+async def to_vhdl_blob(resource, output, name, package_name,
                        hex_string, byte_string, slv_array, size, endian_):
-    p = Program.from_programs(programs).simplified()
-    if len(p) > 1:
-        raise click.ClickException("Loadable has more than one segment")
-    data = p[0].data
+    m = (await resource.memory_map()).simplified()
+    if len(m) > 1:
+        raise click.ClickException("MemoryMap has more than one chunk")
+    if len(m) == 0:
+        raise click.ClickException("MemoryMap is empty")
+    data = m[0][1]
 
     if slv_array:
         mode = "slv"
@@ -152,7 +163,8 @@ async def to_vhdl_blob(programs, output, name, package_name,
     elif hex_string:
         mode = "hex"
     else:
-        raise click.ClickException("Specify --hex-string, --byte-string, or --slv-array")
+        raise click.ClickException(
+            "Specify --hex-string, --byte-string, or --slv-array")
 
     if mode == "slv":
         header = (
@@ -200,12 +212,7 @@ async def to_vhdl_blob(programs, output, name, package_name,
             init += f'    & "{data[woff:woff + 32].hex()}"\n'
         init += "  )"
 
-    pre_info = ["", "Extracted from:", ""]
-    for prog in programs:
-        pre_info.append("- " + ", ".join(prog.sources))
-        for seg in prog:
-            pre_info.append(f"  {seg}")
-    pre_info_str = "\n-- ".join(pre_info)
+    pre_info_str = "\n-- ".join(["", f"Extracted from: {resource.path}", ""])
 
     output.write(
         f"{header}\n"

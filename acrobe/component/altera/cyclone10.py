@@ -56,11 +56,8 @@ class Cyclone10(Tap, JtagSramFpga):
             usercode = int(await self.USERCODE())
             self.logger.note("UserCode: 0x%08x", usercode)
 
-    async def load(self, program):
-        if len(program) != 1:
-            raise ValueError("Bitstream programming requires exactly one segment")
-
-        blob = program[0].data
+    async def load(self, source):
+        blob = await source.read(0, source.size)
 
         # RBF bytes are already in JTAG bit order (LSB-first per byte).
         # No bit-swapping needed.

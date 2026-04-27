@@ -3,7 +3,15 @@
 import pytest
 from acrobe.target import Target
 from acrobe.target.memory import Region, Ram, Flash
-from acrobe.loadable import Program, Segment
+from acrobe.memory_map import MemoryMap
+
+
+def _mm(*chunks):
+    """Build a MemoryMap from (address, bytes) pairs."""
+    m = MemoryMap()
+    for addr, data in chunks:
+        m.append(addr, data)
+    return m
 
 
 class MockRam(Ram):
@@ -58,10 +66,8 @@ class TestTarget:
     async def test_write_to_flash(self):
         t, flash, _ = self._make_target()
 
-        prog = Program()
-        prog.append(Segment(0x08000000, b"\xaa" * 256))
-
-        await t.write(prog)
+        m = _mm((0x08000000, b"\xaa" * 256))
+        await t.write(m)
 
         assert len(flash.write_log) >= 1
         # Data should be written
@@ -72,10 +78,8 @@ class TestTarget:
     async def test_write_to_ram(self):
         t, _, ram = self._make_target()
 
-        prog = Program()
-        prog.append(Segment(0x20000000, b"\xbb" * 16))
-
-        await t.write(prog)
+        m = _mm((0x20000000, b"\xbb" * 16))
+        await t.write(m)
 
         data = await ram.read(0, 16)
         assert data == b"\xbb" * 16
@@ -84,10 +88,8 @@ class TestTarget:
     async def test_write_with_erase(self):
         t, flash, _ = self._make_target()
 
-        prog = Program()
-        prog.append(Segment(0x08000000, b"\xcc" * 256))
-
-        await t.write(prog, do_erase=True)
+        m = _mm((0x08000000, b"\xcc" * 256))
+        await t.write(m, do_erase=True)
 
         # Erase should have been called
         assert len(flash.erase_log) >= 1
@@ -97,10 +99,8 @@ class TestTarget:
         t, flash, _ = self._make_target()
         flash.is_blank = False
 
-        prog = Program()
-        prog.append(Segment(0x08000000, b"\xdd" * 256))
-
-        await t.write(prog)
+        m = _mm((0x08000000, b"\xdd" * 256))
+        await t.write(m)
 
         # Should erase because not blank
         assert len(flash.erase_log) >= 1
@@ -110,10 +110,8 @@ class TestTarget:
         t, flash, _ = self._make_target()
         flash.is_blank = True
 
-        prog = Program()
-        prog.append(Segment(0x08000000, b"\xee" * 256))
-
-        await t.write(prog)
+        m = _mm((0x08000000, b"\xee" * 256))
+        await t.write(m)
 
         # No erase needed
         assert len(flash.erase_log) == 0
@@ -121,48 +119,35 @@ class TestTarget:
     @pytest.mark.asyncio
     async def test_verify_success(self):
         t, flash, _ = self._make_target()
-
-        prog = Program()
-        prog.append(Segment(0x08000000, b"\xaa" * 256))
-
-        await t.write(prog)
-        result = await t.verify(prog)
-        assert result is True
+        m = _mm((0x08000000, b"\xaa" * 256))
+        await t.write(m)
+        assert await t.verify(m) is True
 
     @pytest.mark.asyncio
     async def test_verify_failure(self):
         t, flash, _ = self._make_target()
-
-        prog = Program()
-        prog.append(Segment(0x08000000, b"\xaa" * 256))
-
-        # Don't write — flash is 0xff, program expects 0xaa
-        result = await t.verify(prog)
-        assert result is False
+        m = _mm((0x08000000, b"\xaa" * 256))
+        # Don't write — flash is 0xff, map expects 0xaa
+        assert await t.verify(m) is False
 
     @pytest.mark.asyncio
     async def test_read(self):
         t, flash, ram = self._make_target()
-
-        # Write something to flash
         flash._data[0:4] = b"\x11\x22\x33\x44"
-
-        prog = await t.read()
-        assert len(prog.segments) == 2  # flash + ram
-
-        # Flash segment
-        flash_seg = [s for s in prog.segments if s.address == 0x08000000][0]
-        assert flash_seg.data[:4] == bytearray(b"\x11\x22\x33\x44")
+        m = await t.read()
+        assert len(m) == 2  # flash + ram
+        flash_chunk = [(a, d) for a, d in m if a == 0x08000000][0]
+        assert flash_chunk[1][:4] == b"\x11\x22\x33\x44"
 
     @pytest.mark.asyncio
     async def test_read_range(self):
         t, flash, ram = self._make_target()
         flash._data[0:4] = b"\xde\xad\xbe\xef"
-
-        prog = await t.read(begin=0x08000000, end=0x08000100)
-        assert len(prog.segments) == 1
-        assert prog.segments[0].address == 0x08000000
-        assert len(prog.segments[0]) == 0x100
+        m = await t.read(begin=0x08000000, end=0x08000100)
+        assert len(m) == 1
+        addr, data = m[0]
+        assert addr == 0x08000000
+        assert len(data) == 0x100
 
     @pytest.mark.asyncio
     async def test_erase_all(self):
@@ -185,32 +170,21 @@ class TestTarget:
 
     @pytest.mark.asyncio
     async def test_write_multi_segment(self):
-        """Write program with segments in both flash and RAM."""
+        """Write a MemoryMap with chunks in both flash and RAM."""
         t, flash, ram = self._make_target()
         flash.is_blank = True
-
-        prog = Program()
-        prog.append(Segment(0x08000000, b"\x11" * 256))
-        prog.append(Segment(0x20000000, b"\x22" * 64))
-
-        await t.write(prog)
-
-        flash_data = await flash.read(0, 256)
-        assert flash_data == b"\x11" * 256
-
-        ram_data = await ram.read(0, 64)
-        assert ram_data == b"\x22" * 64
+        m = _mm((0x08000000, b"\x11" * 256), (0x20000000, b"\x22" * 64))
+        await t.write(m)
+        assert (await flash.read(0, 256)) == b"\x11" * 256
+        assert (await ram.read(0, 64)) == b"\x22" * 64
 
     @pytest.mark.asyncio
     async def test_write_segment_outside_regions_ignored(self):
-        """Segments not covering any region are silently ignored."""
+        """Chunks not covering any region are silently ignored."""
         t, flash, _ = self._make_target()
         flash.is_blank = True
-
-        prog = Program()
-        prog.append(Segment(0x40000000, b"\xff" * 16))
-
-        await t.write(prog)
+        m = _mm((0x40000000, b"\xff" * 16))
+        await t.write(m)
 
         # Nothing written
         assert len(flash.write_log) == 0

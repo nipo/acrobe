@@ -301,23 +301,34 @@ the byte-data-Node mould; add when a use case appears.
 **Removed.** `acrobe/loadable/ihex.py`, `acrobe/loadable/bin.py`,
 `acrobe/loadable/literals.py`.
 
-### Step 12 — Soft dissolution: VFS-backed Program (full removal deferred)
+### Step 12 — Hard dissolution: Program/Segment removed
 
-**Status as implemented**: soft dissolution. Program/Segment
-remain as in-memory aggregator classes; `Program.from_file` is
-rewired to walk the VFS (parsing happens entirely in
-`acrobe.vfs.*`). Existing callers (Target.write/read/verify, FPGA
-load() methods) continue to work unchanged. A new
-`acrobe/program_view.py` provides `from_node` which builds a
-Program from a started VFS subtree by collecting every
-Readable+Addressable descendant.
+**Status: complete.** `acrobe/loadable/` is deleted entirely. The
+in-memory addressed-bytes representation is now `MemoryMap` in
+`acrobe/memory_map.py`, holding `(address, bytes)` tuples (no
+separate Segment class). It includes `from_node` (async, walks
+a started VFS subtree), `simplified`, `paged`, `within`, `read`,
+plus `save_bin`/`save_hex`/`save` formatters.
 
-Hard dissolution (full removal of Program/Segment, conversion of
-target.write to take a Node subtree directly) is deferred — it
-touches every FPGA load() method and the CLI; see open
-decisions for the migration sketch.
+Migration:
 
-### Step 12 (full) — Hard dissolution (deferred)
+- **CLI**: `ProgramParamType` (called `Program.from_file` from
+  Click's sync `convert`, blew up under nested event loops) is
+  replaced by `ResourceRef`, a deferred holder that async
+  commands resolve via `await ref.resolve()` (returns a started
+  Node) or `await ref.memory_map()` (builds a MemoryMap). Each
+  `acrobe loadable` and `acrobe chip` subcommand now takes a
+  single `RESOURCE` argument.
+- **Multi-source merging** is deferred — single resource only.
+- **Target.write/read/verify**: take a MemoryMap or a Node
+  (Node is auto-coerced via `MemoryMap.from_node`). Read returns
+  a MemoryMap.
+- **FPGA `load()` methods**: take a Readable Node (the bitstream
+  payload). Bytes via `await source.read(0, source.size)`;
+  metadata via `source.parent.metadata` (UserID, UserCode, etc.).
+- **`FpgaTarget.write`**: uses a new `find_bitstream(node)`
+  helper that picks the `bitstream` child if present, else uses
+  the node itself (when Readable and has no Readable children).
 
 **Scope.** Remove `acrobe/loadable/model.py`'s `Program` and
 `Segment` classes. Methods migrate as follows:

@@ -1,14 +1,29 @@
 """Target framework.
 
 A Target is an agglomeration of memory regions (Flash, RAM, EEPROM)
-that can be programmed. It dispatches program segments to the appropriate
-child Region, orchestrating erase/write/verify operations.
+that can be programmed. It dispatches addressed bytes to the
+appropriate child Region, orchestrating erase/write/verify
+operations.
+
+`Target.write` accepts either a `MemoryMap` or a started VFS Node
+subtree (the latter is converted via `MemoryMap.from_node`).
+`Target.read` returns a `MemoryMap`.
 """
 
 from ..node import Node
 from .memory import Region, Flash
+from ..memory_map import MemoryMap
 
-from ..loadable import Program, Segment
+
+async def _coerce_memory_map(arg):
+    """Accept a MemoryMap or a Node, return a MemoryMap."""
+    if isinstance(arg, MemoryMap):
+        return arg
+    if isinstance(arg, Node):
+        return await MemoryMap.from_node(arg)
+    raise TypeError(
+        f"Target write/verify expects a MemoryMap or Node, "
+        f"got {type(arg).__name__}")
 
 
 class Target(Node):
@@ -17,7 +32,7 @@ class Target(Node):
     Subclasses represent specific SoCs or board configurations.
     They add Region children representing memory banks.
 
-    Target.write() dispatches program segments to child regions,
+    Target.write() dispatches a MemoryMap to child regions,
     handling erase/write/verify orchestration.
     """
 
@@ -36,48 +51,40 @@ class Target(Node):
             return func
         return decorator
 
-    async def write(self, program, *, do_erase=False, do_verify=False,
+    async def write(self, source, *, do_erase=False, do_verify=False,
                     do_start=False, update=True, assume_clean=False):
-        """Program the target with the given program.
-
-        Args:
-            program: Program with segments to write
-            do_erase: erase all flash regions first
-            do_verify: verify after writing
-            do_start: reset after successful write
-            update: use CRC-based selective update (skip unchanged pages)
-            assume_clean: treat all flash as blank (skip erase)
-        """
+        """Program the target with `source` (MemoryMap or Node)."""
+        m = await _coerce_memory_map(source)
         if do_erase:
             await self.erase_all()
         if assume_clean:
             self._force_blank()
 
-        program = program.simplified()
+        m = m.simplified()
         regions = sorted(self.children_of_class(Region))
 
         to_erase = []
         to_write = []
 
         for region in regions:
-            region_program = program.within(region.address, region.end)
-            if not region_program:
+            region_m = m.within(region.address, region.end)
+            if not region_m:
                 continue
 
             # Collect erase operations for non-blank regions
             if isinstance(region, Flash) and not region.is_blank:
-                for seg in region_program:
-                    offset = seg.address - region.address
-                    to_erase.append((region, offset, len(seg)))
+                for addr, data in region_m:
+                    offset = addr - region.address
+                    to_erase.append((region, offset, len(data)))
 
             # Collect write operations (paged for Flash)
             if isinstance(region, Flash):
-                paged = region_program.paged(region.write_page_size)
-                for seg in paged:
-                    to_write.append((region, seg.address - region.address, seg.data))
+                paged = region_m.paged(region.write_page_size)
+                for addr, data in paged:
+                    to_write.append((region, addr - region.address, data))
             else:
-                for seg in region_program:
-                    to_write.append((region, seg.address - region.address, seg.data))
+                for addr, data in region_m:
+                    to_write.append((region, addr - region.address, data))
 
         # Erase
         with self.progress("Erasing", len(to_erase), "regions") as p:
@@ -93,37 +100,36 @@ class Target(Node):
 
         success = True
         if do_verify:
-            success = await self.verify(program)
+            success = await self.verify(m)
 
         if do_start and success:
             await self.reset()
 
-    async def verify(self, program):
-        """Verify programmed data against expected program content."""
-        program = program.simplified()
+    async def verify(self, source):
+        """Verify programmed data against `source` (MemoryMap or Node)."""
+        m = (await _coerce_memory_map(source)).simplified()
         regions = sorted(self.children_of_class(Region))
 
         for region in regions:
-            region_program = program.within(region.address, region.end)
-            if not region_program:
+            region_m = m.within(region.address, region.end)
+            if not region_m:
                 continue
-
-            for seg in region_program:
-                offset = seg.address - region.address
-                actual = await region.read(offset, len(seg))
-                if actual != bytes(seg.data):
+            for addr, data in region_m:
+                offset = addr - region.address
+                actual = await region.read(offset, len(data))
+                if actual != bytes(data):
                     self.logger.error("Mismatch in %s at 0x%08x",
-                                      region.name, seg.address)
+                                      region.name, addr)
                     return False
         return True
 
-    async def read(self, begin=0, end=None):
-        """Read all readable regions into a Program."""
+    async def read(self, begin=0, end=None) -> MemoryMap:
+        """Read all readable regions into a MemoryMap."""
         regions = sorted(self.children_of_class(Region))
         if end is None:
             end = max((r.end for r in regions), default=0)
 
-        p = Program()
+        m = MemoryMap()
         for region in regions:
             r_start = max(region.address, begin)
             r_end = min(region.end, end)
@@ -132,8 +138,8 @@ class Target(Node):
             offset = r_start - region.address
             size = r_end - r_start
             data = await region.read(offset, size)
-            p.append(Segment(r_start, data))
-        return p
+            m.chunks.append((r_start, bytes(data)))
+        return m
 
     async def erase_all(self):
         """Erase all flash regions."""

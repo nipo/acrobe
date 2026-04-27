@@ -6,7 +6,14 @@ from acrobe.component.spi_flash import SpiFlash
 from acrobe.target import Target, Field
 from acrobe.target.memory import Flash
 from acrobe.target.spi_flash import SpiFlashBank, SpiFlashTarget
-from acrobe.loadable import Program, Segment
+from acrobe.memory_map import MemoryMap
+
+
+def _mm(*chunks):
+    m = MemoryMap()
+    for addr, data in chunks:
+        m.append(addr, data)
+    return m
 
 
 class FakeSpiTarget:
@@ -113,11 +120,8 @@ class TestSpiFlashTarget:
     @pytest.mark.asyncio
     async def test_write_programs_flash(self):
         target, flash = self._make_target(size=0x10000, page_size=256)
-
-        prog = Program()
-        prog.append(Segment(0, b"\xaa" * 256))
-
-        await target.write(prog)
+        m = _mm((0, b"\xaa" * 256))
+        await target.write(m)
         data = await flash.read(0, 256)
         assert data == b"\xaa" * 256
 
@@ -131,24 +135,22 @@ class TestSpiFlashTarget:
     async def test_verify_success(self):
         target, flash = self._make_target()
         flash._data[0:4] = b"\x11\x22\x33\x44"
-        prog = Program()
-        prog.append(Segment(0, b"\x11\x22\x33\x44"))
-        assert await target.verify(prog) is True
+        m = _mm((0, b"\x11\x22\x33\x44"))
+        assert await target.verify(m) is True
 
     @pytest.mark.asyncio
     async def test_verify_failure(self):
         target, flash = self._make_target()
-        prog = Program()
-        prog.append(Segment(0, b"\x11\x22\x33\x44"))
-        assert await target.verify(prog) is False
+        m = _mm((0, b"\x11\x22\x33\x44"))
+        assert await target.verify(m) is False
 
     @pytest.mark.asyncio
     async def test_read(self):
         target, flash = self._make_target(size=0x1000)
         flash._data[0:4] = b"\xab\xcd\xef\x01"
-        prog = await target.read(begin=0, end=0x100)
-        assert len(prog.segments) == 1
-        assert prog.segments[0].data[:4] == bytearray(b"\xab\xcd\xef\x01")
+        m = await target.read(begin=0, end=0x100)
+        assert len(m) == 1
+        assert m[0][1][:4] == b"\xab\xcd\xef\x01"
 
 
 class TestSpiFlashRegistration:

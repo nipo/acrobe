@@ -48,12 +48,41 @@ class HexParamType(click.ParamType):
 HEX = HexParamType()
 
 
-class ProgramParamType(click.ParamType):
-    name = "program"
+class ResourceRef:
+    """Deferred VFS resource resolver.
+
+    Click's `ParamType.convert` is sync, so it can't await the VFS
+    walk that turns a path into a started Node. ResourceRef holds
+    the path string and exposes async helpers; commands await
+    `.resolve()` (or `.memory_map()`) inside their async body.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self._node = None
+
+    async def resolve(self):
+        """Walk the VFS and return the started leaf Node."""
+        if self._node is None:
+            from .resource import _summon
+            self._node = await _summon(self.path)
+        return self._node
+
+    async def memory_map(self):
+        """Resolve and build a MemoryMap by walking the subtree's
+        Readable+Addressable descendants."""
+        from ..memory_map import MemoryMap
+        node = await self.resolve()
+        return await MemoryMap.from_node(node)
+
+
+class ResourceParamType(click.ParamType):
+    name = "resource"
 
     def convert(self, value, param, ctx):
-        from ..loadable import Program
-        return Program.from_file(value)
+        if isinstance(value, ResourceRef):
+            return value
+        return ResourceRef(value)
 
 
-PROGRAM = ProgramParamType()
+RESOURCE = ResourceParamType()

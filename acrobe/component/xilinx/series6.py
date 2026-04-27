@@ -58,15 +58,13 @@ class Series6(Tap, JtagSramFpga, ConfigAccessPort):
             userid = int(await self.IR_USERCODE())
             self.logger.note("UserID: 0x%08x", userid)
 
-    async def load(self, program):
-        if len(program) != 1:
-            raise ValueError("Bitstream programming only supports one config payload")
-
-        blob = program[0].data
+    async def load(self, source):
+        blob = await source.read(0, source.size)
         if len(blob) % 2:
             raise ValueError("Odd data length in bitstream")
 
-        userid = program.info.get("userid")
+        meta = source._parent.metadata if source._parent else {}
+        userid = meta.get("userid")
         if userid is not None and userid != 0xffffffff:
             hw_userid = int(await self.IR_USERCODE())
             if hw_userid == userid:

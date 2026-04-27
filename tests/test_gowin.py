@@ -9,7 +9,24 @@ from acrobe.protocol.jtag import (
 )
 from acrobe.bitstring import BitString
 from acrobe.engine import Batcher
-from acrobe.loadable import Program, Segment
+from acrobe.node import Node, Readable
+
+
+class _Bitstream(Node, Readable):
+    def __init__(self, name, data):
+        super().__init__(name)
+        self._data = bytes(data)
+    @property
+    def size(self): return len(self._data)
+    async def read(self, offset, size): return self._data[offset:offset+size]
+
+
+def make_bitstream(data, **metadata):
+    parent = Node("file")
+    parent._metadata.update(metadata)
+    leaf = _Bitstream("bitstream", data)
+    parent._child_attach(leaf)
+    return leaf
 
 
 # -- Mock Interface --
@@ -166,11 +183,7 @@ class TestLoad:
         iface = SkipMock()
         tap = GowinFpga(iface, idcode=0x0001481b)
 
-        prog = Program()
-        prog.append(Segment(0, b'\x00' * 100))
-        prog.info["UserCode"] = "0xDEADBEEF"
-
-        await tap.load(prog)
+        await tap.load(make_bitstream(b'\x00' * 100, UserCode="0xDEADBEEF"))
         # Only USERCODE + STATUS reads, no large data shift
         assert len(iface.shifts) <= 3
 
@@ -206,11 +219,7 @@ class TestLoad:
         iface = ReloadMock()
         tap = GowinFpga(iface, idcode=0x0001481b)
 
-        prog = Program()
-        prog.append(Segment(0, b'\x00' * 100))
-        prog.info["UserCode"] = "0xDEADBEEF"
-
-        await tap.load(prog)
+        await tap.load(make_bitstream(b'\x00' * 100, UserCode="0xDEADBEEF"))
         # Full reload has many more shifts (data transfer)
         assert len(iface.shifts) > 3
 

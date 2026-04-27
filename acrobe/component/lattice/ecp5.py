@@ -116,10 +116,11 @@ class ECP5(Tap, JtagSramFpga):
                 return
         raise RuntimeError(f"ECP5 SRAM load failed (DONE not set): {status}")
 
-    async def load(self, program):
+    async def load(self, source):
+        blob = await source.read(0, source.size)
         # Bitswap: bitstream file is MSB-first (SPI order),
         # JTAG shifts LSB-first, so reverse bits in each byte.
-        blob = bitswap8(bytes(program[0].data))
+        blob = bitswap8(bytes(blob))
 
         # Preload boundary scan with all-ones to clear I/O state
         await self.PRELOAD_SAMPLE(BitString(b'\xff' * 26), read_tdo=False)

@@ -13,6 +13,7 @@ instructions. These must be defined on the Tap class as:
              00=idle, 01=more, 11=last
 """
 
+import enum
 import time
 import asyncio
 from ...bitstring import BitString

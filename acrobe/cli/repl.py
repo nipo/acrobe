@@ -21,12 +21,13 @@ async def repl():
     from ptpython.repl import embed
 
     from ..root import root, roots
-    from ..node import Node
+    from ..node import Node, Readable, Writable, Addressable
     from ..adapter.model import HwRoot, UsbEnumerator, Adapter
     from ..target import Target, Field
     from ..target.memory import Region, Flash, Ram
     from ..protocol import jtag, swd, spi, i2c
-    from ..loadable import Program, Segment
+    from ..memory_map import MemoryMap
+    from ..vfs import FsRoot
 
     history_dir = click.get_app_dir("acrobe")
     os.makedirs(history_dir, exist_ok=True)
@@ -38,6 +39,9 @@ async def repl():
             "root": root,
             "roots": roots,
             "Node": Node,
+            "Readable": Readable,
+            "Writable": Writable,
+            "Addressable": Addressable,
             "HwRoot": HwRoot,
             "UsbEnumerator": UsbEnumerator,
             "Adapter": Adapter,
@@ -50,8 +54,8 @@ async def repl():
             "swd": swd,
             "spi": spi,
             "i2c": i2c,
-            "Program": Program,
-            "Segment": Segment,
+            "MemoryMap": MemoryMap,
+            "FsRoot": FsRoot,
         },
         configure=repl_config,
         title="Acrobe",

@@ -62,30 +62,28 @@ async def chip(ctx, root_paths, target_sel):
     ctx.obj["hw_root"] = hw_root
 
 
-@chip.command(help="Program target")
-@click.argument('files', nargs=-1, type=base.PROGRAM)
+@chip.command(help="Program target with a single resource")
+@click.argument('resource', type=base.RESOURCE)
 @click.option('-e', '--erase', is_flag=True, help="Erase before programming")
 @click.option('-c', '--check', 'verify', is_flag=True, help="Verify after programming")
 @click.option('--run', is_flag=True, help="Reset after programming")
 @click.option('-C', '--assume-clean', is_flag=True, help="Assume flash is blank")
 @click.pass_context
-async def program(ctx, files, erase, verify, run, assume_clean):
-    from ..loadable import Program
+async def program(ctx, resource, erase, verify, run, assume_clean):
     target = ctx.obj["target"]
-    prog = Program.from_programs(files)
-    await target.write(prog, do_erase=erase, do_verify=verify,
+    node = await resource.resolve()
+    await target.write(node, do_erase=erase, do_verify=verify,
                        do_start=run, assume_clean=assume_clean)
     click.echo("Done.")
 
 
-@chip.command(help="Verify target contents against files")
-@click.argument('files', nargs=-1, required=True, type=base.PROGRAM)
+@chip.command(help="Verify target contents against a resource")
+@click.argument('resource', required=True, type=base.RESOURCE)
 @click.pass_context
-async def check(ctx, files):
-    from ..loadable import Program
+async def check(ctx, resource):
     target = ctx.obj["target"]
-    prog = Program.from_programs(files)
-    ok = await target.verify(prog)
+    node = await resource.resolve()
+    ok = await target.verify(node)
     if ok:
         click.echo("Verify OK.")
     else:
@@ -99,9 +97,10 @@ async def check(ctx, files):
 @click.option('--end', type=base.HEX, default=None, help="End address (hex)")
 @click.pass_context
 async def readback(ctx, filename, begin, end):
+    from ..memory_map import save
     target = ctx.obj["target"]
-    prog = await target.read(begin=begin, end=end)
-    prog.save(filename)
+    m = await target.read(begin=begin, end=end)
+    save(m, filename)
     click.echo(f"Read back to {filename}.")
 
 

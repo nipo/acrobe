@@ -19,8 +19,36 @@ from acrobe.protocol.jtag import (
 )
 from acrobe.bitstring import BitString
 from acrobe.engine import Batcher
-from acrobe.loadable import Program, Segment
+from acrobe.node import Node, Readable
 from acrobe.endian import swib_u16, swib_u32
+
+
+class _Bitstream(Node, Readable):
+    """Test helper: a Readable Node holding fixed bytes,
+    optionally with a Node parent carrying metadata (mirrors what
+    populate_format produces in real walks)."""
+
+    def __init__(self, name, data: bytes):
+        super().__init__(name)
+        self._data = bytes(data)
+
+    @property
+    def size(self) -> int:
+        return len(self._data)
+
+    async def read(self, offset, size):
+        return self._data[offset:offset + size]
+
+
+def make_bitstream(data: bytes, **metadata) -> _Bitstream:
+    """Build a (parent, leaf) tree where leaf is a Readable
+    bitstream whose parent carries `metadata` — matches the shape
+    FPGA.load() expects (source.parent.metadata for hints)."""
+    parent = Node("file")
+    parent._metadata.update(metadata)
+    leaf = _Bitstream("bitstream", data)
+    parent._child_attach(leaf)
+    return leaf
 
 
 # -- Mock Interface with IR status support --
@@ -52,7 +80,7 @@ class TestSramFpga:
     async def test_load_raises(self):
         fpga = SramFpga("test")
         with pytest.raises(NotImplementedError):
-            await fpga.load(Program())
+            await fpga.load(make_bitstream(b""))
 
     @pytest.mark.asyncio
     async def test_erase_raises(self):
@@ -86,8 +114,8 @@ class TestFpgaTarget:
         loaded = []
 
         class MockFpga(SramFpga):
-            async def load(self, program):
-                loaded.append(program)
+            async def load(self, source):
+                loaded.append(source)
 
             async def erase(self):
                 pass
@@ -97,9 +125,7 @@ class TestFpgaTarget:
 
         fpga = MockFpga("mock")
         target = FpgaTarget(fpga)
-        prog = Program()
-        prog.append(Segment(0, b'\x00' * 100))
-        await target.write(prog)
+        await target.write(make_bitstream(b'\x00' * 100))
         assert len(loaded) == 1
 
     @pytest.mark.asyncio
@@ -107,7 +133,7 @@ class TestFpgaTarget:
         erased = []
 
         class MockFpga(SramFpga):
-            async def load(self, program):
+            async def load(self, source):
                 pass
 
             async def erase(self):
@@ -118,9 +144,7 @@ class TestFpgaTarget:
 
         fpga = MockFpga("mock")
         target = FpgaTarget(fpga)
-        prog = Program()
-        prog.append(Segment(0, b'\x00'))
-        await target.write(prog, do_erase=True)
+        await target.write(make_bitstream(b'\x00'), do_erase=True)
         assert len(erased) == 1
 
     @pytest.mark.asyncio
@@ -128,7 +152,7 @@ class TestFpgaTarget:
         erased = []
 
         class MockFpga(SramFpga):
-            async def load(self, program):
+            async def load(self, source):
                 pass
 
             async def erase(self):
@@ -145,7 +169,7 @@ class TestFpgaTarget:
     @pytest.mark.asyncio
     async def test_verify_delegates(self):
         class MockFpga(SramFpga):
-            async def load(self, program):
+            async def load(self, source):
                 pass
 
             async def erase(self):
@@ -156,7 +180,7 @@ class TestFpgaTarget:
 
         fpga = MockFpga("mock")
         target = FpgaTarget(fpga)
-        assert await target.verify(Program()) is True
+        assert await target.verify(make_bitstream(b"")) is True
 
 
 # -- ConfigAccessPort mixin --
@@ -229,23 +253,11 @@ class TestSeries6:
         assert await tap.is_configured() is False
 
     @pytest.mark.asyncio
-    async def test_load_rejects_multi_segment(self):
-        iface = FpgaMockInterface()
-        tap = Series6(iface, idcode=0x04001093)
-        prog = Program()
-        prog.append(Segment(0, b'\x00' * 10))
-        prog.append(Segment(100, b'\x00' * 10))
-        with pytest.raises(ValueError, match="one config payload"):
-            await tap.load(prog)
-
-    @pytest.mark.asyncio
     async def test_load_rejects_odd_length(self):
         iface = FpgaMockInterface(ir_status_val=0x30)
         tap = Series6(iface, idcode=0x04001093)
-        prog = Program()
-        prog.append(Segment(0, b'\x00' * 11))
         with pytest.raises(ValueError, match="Odd"):
-            await tap.load(prog)
+            await tap.load(make_bitstream(b'\x00' * 11))
 
 
 # -- Series7 --
@@ -270,10 +282,8 @@ class TestSeries7:
     async def test_load_rejects_non_aligned(self):
         iface = FpgaMockInterface()
         tap = Series7(iface, idcode=0x03631093)
-        prog = Program()
-        prog.append(Segment(0, b'\x00' * 13))
         with pytest.raises(ValueError, match="not 32-bit aligned"):
-            await tap.load(prog)
+            await tap.load(make_bitstream(b'\x00' * 13))
 
 
 # -- Device Registration via ChainSimulator --
@@ -445,10 +455,7 @@ class TestSeries6LoadSequence:
         tap = Series6(iface, idcode=0x04001093)
 
         # Build a minimal 16-bit-word bitstream (2 words = 4 bytes)
-        prog = Program()
-        prog.append(Segment(0, struct.pack(">2H", 0xaa99, 0x5566)))
-
-        await tap.load(prog)
+        await tap.load(make_bitstream(struct.pack(">2H", 0xaa99, 0x5566)))
         # Verify we had some IR status checks
         assert len(ir_status_responses) > 0
 
@@ -484,11 +491,9 @@ class TestSeries6UseridSkip:
         iface = UseridMockInterface(usercode=0xCAFEBABE, done=True)
         tap = Series6(iface, idcode=0x04001093)
 
-        prog = Program()
-        prog.append(Segment(0, struct.pack(">2H", 0xaa99, 0x5566)))
-        prog.info["userid"] = 0xCAFEBABE
-
-        await tap.load(prog)
+        bs = make_bitstream(
+            struct.pack(">2H", 0xaa99, 0x5566), userid=0xCAFEBABE)
+        await tap.load(bs)
         # Only USERCODE read + ir_status polls, no JPROGRAM reset
         # The JPROGRAM shift would add many more ops
         assert len(iface.shifts) <= 3
@@ -518,11 +523,9 @@ class TestSeries6UseridSkip:
         iface = ReloadMockInterface()
         tap = Series6(iface, idcode=0x04001093)
 
-        prog = Program()
-        prog.append(Segment(0, struct.pack(">2H", 0xaa99, 0x5566)))
-        prog.info["userid"] = 0xCAFEBABE
-
-        await tap.load(prog)
+        bs = make_bitstream(
+            struct.pack(">2H", 0xaa99, 0x5566), userid=0xCAFEBABE)
+        await tap.load(bs)
         # Full reload: USERCODE read + reset + cfg_shift + start
         assert len(iface.shifts) > 3
 
@@ -548,11 +551,8 @@ class TestSeries6UseridSkip:
         iface = NoUseridMockInterface()
         tap = Series6(iface, idcode=0x04001093)
 
-        prog = Program()
-        prog.append(Segment(0, struct.pack(">2H", 0xaa99, 0x5566)))
-        # No userid in info
-
-        await tap.load(prog)
+        # No userid in metadata
+        await tap.load(make_bitstream(struct.pack(">2H", 0xaa99, 0x5566)))
         # No 32-bit USERCODE read
         assert all(len(s.tdi) != 32 for s in iface.shifts)
 
@@ -578,11 +578,9 @@ class TestSeries6UseridSkip:
         iface = NoCheckMockInterface()
         tap = Series6(iface, idcode=0x04001093)
 
-        prog = Program()
-        prog.append(Segment(0, struct.pack(">2H", 0xaa99, 0x5566)))
-        prog.info["userid"] = 0xffffffff
-
-        await tap.load(prog)
+        bs = make_bitstream(
+            struct.pack(">2H", 0xaa99, 0x5566), userid=0xffffffff)
+        await tap.load(bs)
         # No 32-bit USERCODE read
         assert all(len(s.tdi) != 32 for s in iface.shifts)
 
@@ -594,11 +592,9 @@ class TestSeries7UseridSkip:
         iface = UseridMockInterface(usercode=0xCAFEBABE, done=True)
         tap = Series7(iface, idcode=0x03631093)
 
-        prog = Program()
-        prog.append(Segment(0, struct.pack(">2L", 0xaa995566, 0x20000000)))
-        prog.info["userid"] = 0xCAFEBABE
-
-        await tap.load(prog)
+        bs = make_bitstream(
+            struct.pack(">2L", 0xaa995566, 0x20000000), userid=0xCAFEBABE)
+        await tap.load(bs)
         assert len(iface.shifts) <= 3
 
     @pytest.mark.asyncio
@@ -626,11 +622,9 @@ class TestSeries7UseridSkip:
         iface = ReloadMockInterface()
         tap = Series7(iface, idcode=0x03631093)
 
-        prog = Program()
-        prog.append(Segment(0, struct.pack(">2L", 0xaa995566, 0x20000000)))
-        prog.info["userid"] = 0xCAFEBABE
-
-        await tap.load(prog)
+        bs = make_bitstream(
+            struct.pack(">2L", 0xaa995566, 0x20000000), userid=0xCAFEBABE)
+        await tap.load(bs)
         assert len(iface.shifts) > 3
 
 
@@ -656,7 +650,5 @@ class TestSeries7LoadSequence:
         tap = Series7(iface, idcode=0x03631093)
 
         # Build a minimal 32-bit-word bitstream (2 words = 8 bytes)
-        prog = Program()
-        prog.append(Segment(0, struct.pack(">2L", 0xaa995566, 0x20000000)))
-
-        await tap.load(prog)
+        await tap.load(make_bitstream(
+            struct.pack(">2L", 0xaa995566, 0x20000000)))

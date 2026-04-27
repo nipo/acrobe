@@ -4,7 +4,7 @@ import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 
-from ..component import Component
+from ..node import Node
 
 
 class Parity(enum.Enum):
@@ -83,7 +83,7 @@ def modemstate_to_signals(b: int) -> Signals:
     )
 
 
-class SerialPort(Component, ABC):
+class SerialPort(Node, ABC):
     """Abstract async serial port.
 
     Superset of Pipe: adds line config, break, flush, modem signals,

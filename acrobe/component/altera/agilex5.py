@@ -7,7 +7,7 @@ from ..fpga import JtagSramFpga
 from ...bitstring import BitString
 from ...bitfield import *
 from ...node import Node
-from .sdm import Sdm, Error, ConfigStatus
+from .sdm import Sdm, Error, ConfigStatus, Command
 from .sdm_jtag import SdmJtagMixin
 
 class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
@@ -70,12 +70,9 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
         self.logger.note("IDCODE: 0x%08x, configured: %s",
                          self.idcode, configured)
 
-    async def load(self, program):
+    async def load(self, source):
         """Load bitstream into Agilex 5 via SDM."""
-        if len(program) != 1:
-            raise ValueError("Bitstream requires exactly one segment")
-
-        blob = program[0].data
+        blob = await source.read(0, source.size)
         total_bits = len(blob) * 8
         sdm = await self._spawn_sdm_client()
 
@@ -91,7 +88,7 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
             await asyncio.sleep(0.1)
             try:
                 cs = await sdm.config_status()
-            except SdmError:
+            except Error:
                 if not retry:
                     raise
             if cs.conf_done:
@@ -171,16 +168,16 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
             first = False
 
             if error:
-                raise SdmError(0, opcode=int(
-                    Agilex5SdmCommand.CONFIG_REQUEST))
+                raise Error(0, opcode=int(
+                    Command.CONFIG_REQUEST))
 
             if progress >= total_bits:
                 break
 
             status_retries -= 1
             if status_retries <= 0:
-                raise SdmError(0, opcode=int(
-                    Agilex5SdmCommand.CONFIG_REQUEST))
+                raise Error(0, opcode=int(
+                    Command.CONFIG_REQUEST))
 
             # Flow control
             if done:
