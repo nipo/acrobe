@@ -2,6 +2,7 @@ from . import info  # noqa: F401
 from . import chip  # noqa: F401
 from . import loadable  # noqa: F401
 from . import resource  # noqa: F401
+from . import rfc2217  # noqa: F401
 from . import stapl  # noqa: F401
 from . import repl  # noqa: F401
 from . import run  # noqa: F401

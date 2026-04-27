@@ -18,27 +18,38 @@ async def info():
 
 
 def _make_hw_root():
-    """Create HwRoot with USB enumerator."""
+    """Create HwRoot with USB and TTY enumerators."""
     root = HwRoot()
     root.add_enumerator(UsbEnumerator())
+    try:
+        from ..adapter.tty import TtyEnumerator
+        root.add_enumerator(TtyEnumerator())
+    except ImportError:
+        pass
     return root
 
 
-@info.command(help="List recognized USB adapters")
+@info.command(help="List recognized adapters")
 async def adapters():
-    enum = UsbEnumerator()
-    found = await enum.scan()
-    if not found:
+    hw_root = _make_hw_root()
+    any_found = False
+    for enum in hw_root._enumerators:
+        found = await enum.scan()
+        if not found:
+            continue
+        any_found = True
+        for info, adapter_cls, desc, serial in found:
+            name = make_adapter_name(info, serial)
+            interfaces = ", ".join(adapter_cls.supported_interfaces)
+            if desc is not None and hasattr(desc, "vendor_id"):
+                ident = f"{desc.vendor_id:04x}:{desc.product_id:04x}"
+            elif hasattr(info, "path"):
+                ident = info.path
+            else:
+                ident = ""
+            click.echo(f"  {name}  {ident}  interfaces: {interfaces}")
+    if not any_found:
         click.echo("No recognized adapters found.")
-        return
-    for info, adapter_cls, desc, serial in found:
-        name = make_adapter_name(info, serial)
-        interfaces = ", ".join(adapter_cls.supported_interfaces)
-        click.echo(
-            f"  {name}  "
-            f"{desc.vendor_id:04x}:{desc.product_id:04x}  "
-            f"interfaces: {interfaces}"
-        )
 
 
 @info.command(help="Resolve root path, discover, dump component tree")
