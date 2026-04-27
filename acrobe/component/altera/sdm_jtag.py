@@ -207,4 +207,4 @@ class SdmJtagMixin:
 
     async def child_spawn(self, name):
         if name == "sdm":
-            return Agilex5SdmJtag(self)
+            return SdmJtag(self)

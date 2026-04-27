@@ -74,7 +74,7 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
         """Load bitstream into Agilex 5 via SDM."""
         blob = await source.read(0, source.size)
         total_bits = len(blob) * 8
-        sdm = await self._spawn_sdm_client()
+        sdm = await self.child_summon("sdm")
 
         await sdm.config_request()
 
@@ -206,7 +206,7 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
             trailer = BitString(0, 1)
             frame = header_bs + data_slice + trailer
 
-            self.CONFIG(frame, dr_length=len(frame), read_tdo=False)
+            self.CONFIG(frame, read_tdo=False)
             await self.run(16)
 
             status_retries = self._STREAM_STATUS_RETRIES
