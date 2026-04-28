@@ -310,3 +310,156 @@ class BitString(BitStringBase):
         if len(other):
             n.append(other)
         return n
+
+
+class MutableBitString(BitStringBase):
+    """
+    Fixed-length bitstring with mutable bytearray backing.
+
+    Construction matches BitString's prototype (same args). Once built,
+    individual bits can be modified in place via __setitem__ — single-bit
+    set is O(1) without copying or reallocating, unlike BitString (which
+    is optimized for append-only construction and degrades sharply on
+    per-bit mutation).
+    """
+
+    def __init__(self, *args, **kwargs):
+        if not args and not kwargs:
+            self._data = bytearray()
+            self._length = 0
+            return
+        # Reuse BitString's argument parsing for the initial value.
+        seed = BitString(*args, **kwargs)
+        self._length = len(seed)
+        self._data = bytearray(seed.data)
+        # Normalize storage: exactly ceil(length / 8) bytes, with junk in
+        # bits past the end of the last byte cleared. Keeps __int__,
+        # __eq__ and friends from leaking the unused tail.
+        expected = (self._length + 7) // 8
+        if len(self._data) < expected:
+            self._data.extend(b'\x00' * (expected - len(self._data)))
+        elif len(self._data) > expected:
+            del self._data[expected:]
+        excess = self._length & 7
+        if excess and self._data:
+            self._data[-1] &= (1 << excess) - 1
+
+    @property
+    def data(self):
+        return bytes(self._data)
+
+    def __len__(self):
+        return self._length
+
+    def __getitem__(self, offset):
+        if isinstance(offset, slice):
+            step = offset.step
+            b, e = offset.start, offset.stop
+
+            if step is None or step == 1:
+                if b is None:
+                    b = 0
+                elif b < 0:
+                    b += self._length
+                if e is None:
+                    e = self._length
+                elif e < 0:
+                    e += self._length
+                b = max(0, min(b, self._length))
+                e = max(0, min(e, self._length))
+                if e <= b:
+                    return BitString(0, 0)
+                return BitStringSlice(self, b, e)
+
+            if step == -1:
+                # Descending: produce a fresh bitstring whose bit i is
+                # the source bit at (b - i). Out-of-range source bits
+                # contribute 0.
+                if b is None:
+                    b = self._length - 1
+                elif b < 0:
+                    b += self._length
+                if e is None:
+                    end_excl = -1
+                elif e < 0:
+                    end_excl = e + self._length
+                else:
+                    end_excl = e
+                slice_len = b - end_excl
+                if slice_len <= 0:
+                    return BitString(0, 0)
+                result = MutableBitString(0, slice_len)
+                for i in range(slice_len):
+                    pos = b - i
+                    if 0 <= pos < self._length and \
+                            self._data[pos >> 3] & (1 << (pos & 7)):
+                        result[i] = True
+                return result
+
+            raise ValueError("unsupported slice step %r" % (step,))
+
+        if offset < 0:
+            offset += self._length
+        if not (0 <= offset < self._length):
+            raise IndexError(offset)
+        return bool((self._data[offset >> 3] >> (offset & 7)) & 1)
+
+    def __setitem__(self, offset, value):
+        if isinstance(offset, slice):
+            step = offset.step
+            b, e = offset.start, offset.stop
+
+            if step is None or step == 1:
+                if b is None:
+                    b = 0
+                elif b < 0:
+                    b += self._length
+                if e is None:
+                    e = self._length
+                elif e < 0:
+                    e += self._length
+                b = max(0, min(b, self._length))
+                e = max(0, min(e, self._length))
+                slice_len = e - b
+                n = min(slice_len, len(value))
+                for i in range(n):
+                    pos = b + i
+                    if value[i]:
+                        self._data[pos >> 3] |= 1 << (pos & 7)
+                    else:
+                        self._data[pos >> 3] &= ~(1 << (pos & 7))
+                return
+            if step == -1:
+                # Descending slice: positions go b, b-1, b-2, ..., e+1.
+                # `e` is exclusive; None means "down to and including 0".
+                if b is None:
+                    b = self._length - 1
+                elif b < 0:
+                    b += self._length
+                if e is None:
+                    end_excl = -1
+                elif e < 0:
+                    end_excl = e + self._length
+                else:
+                    end_excl = e
+                slice_len = b - end_excl
+                n = min(slice_len, len(value))
+                for i in range(n):
+                    pos = b - i
+                    if not (0 <= pos < self._length):
+                        continue
+                    if value[i]:
+                        self._data[pos >> 3] |= 1 << (pos & 7)
+                    else:
+                        self._data[pos >> 3] &= ~(1 << (pos & 7))
+                return
+            raise ValueError("unsupported slice step %r" % (step,))
+
+        if offset < 0:
+            offset += self._length
+        if not (0 <= offset < self._length):
+            raise IndexError(offset)
+        if value:
+            self._data[offset >> 3] |= 1 << (offset & 7)
+        else:
+            self._data[offset >> 3] &= ~(1 << (offset & 7))
