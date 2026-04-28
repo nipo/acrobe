@@ -75,7 +75,7 @@ class _TapShift:
         self.read_tdo = read_tdo
 
     def __repr__(self):
-        if ir is not None:
+        if self.ir_value is not None:
             ir = f"{self.ir_value:#x}"
         return f"_TapShift(ir={ir}, tdi={self.tdi!r}, read_tdo={self.read_tdo})"
 
