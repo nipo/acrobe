@@ -40,6 +40,18 @@ class BitStringBase(ABC):
     def __hash__(self):
         return hash((len(self), bytes(self)))
 
+    def reversed(self):
+        """Return a new BitString with the bits in reverse order."""
+        n = len(self)
+        if n == 0:
+            return BitString()
+        val = int(self)
+        rev = 0
+        for i in range(n):
+            if val & (1 << i):
+                rev |= 1 << (n - 1 - i)
+        return BitString(rev, n)
+
 
 class BitStringSlice(BitStringBase):
     def __init__(self, bs, begin, end):
@@ -353,50 +365,24 @@ class MutableBitString(BitStringBase):
 
     def __getitem__(self, offset):
         if isinstance(offset, slice):
-            step = offset.step
+            if offset.step not in (None, 1):
+                raise ValueError(
+                    "MutableBitString supports only step=1 slices; "
+                    "use .reversed() for descending order")
             b, e = offset.start, offset.stop
-
-            if step is None or step == 1:
-                if b is None:
-                    b = 0
-                elif b < 0:
-                    b += self._length
-                if e is None:
-                    e = self._length
-                elif e < 0:
-                    e += self._length
-                b = max(0, min(b, self._length))
-                e = max(0, min(e, self._length))
-                if e <= b:
-                    return BitString(0, 0)
-                return BitStringSlice(self, b, e)
-
-            if step == -1:
-                # Descending: produce a fresh bitstring whose bit i is
-                # the source bit at (b - i). Out-of-range source bits
-                # contribute 0.
-                if b is None:
-                    b = self._length - 1
-                elif b < 0:
-                    b += self._length
-                if e is None:
-                    end_excl = -1
-                elif e < 0:
-                    end_excl = e + self._length
-                else:
-                    end_excl = e
-                slice_len = b - end_excl
-                if slice_len <= 0:
-                    return BitString(0, 0)
-                result = MutableBitString(0, slice_len)
-                for i in range(slice_len):
-                    pos = b - i
-                    if 0 <= pos < self._length and \
-                            self._data[pos >> 3] & (1 << (pos & 7)):
-                        result[i] = True
-                return result
-
-            raise ValueError("unsupported slice step %r" % (step,))
+            if b is None:
+                b = 0
+            elif b < 0:
+                b += self._length
+            if e is None:
+                e = self._length
+            elif e < 0:
+                e += self._length
+            b = max(0, min(b, self._length))
+            e = max(0, min(e, self._length))
+            if e <= b:
+                return BitString(0, 0)
+            return BitStringSlice(self, b, e)
 
         if offset < 0:
             offset += self._length
@@ -406,54 +392,30 @@ class MutableBitString(BitStringBase):
 
     def __setitem__(self, offset, value):
         if isinstance(offset, slice):
-            step = offset.step
+            if offset.step not in (None, 1):
+                raise ValueError(
+                    "MutableBitString supports only step=1 slices; "
+                    "reverse the source with .reversed() instead")
             b, e = offset.start, offset.stop
-
-            if step is None or step == 1:
-                if b is None:
-                    b = 0
-                elif b < 0:
-                    b += self._length
-                if e is None:
-                    e = self._length
-                elif e < 0:
-                    e += self._length
-                b = max(0, min(b, self._length))
-                e = max(0, min(e, self._length))
-                slice_len = e - b
-                n = min(slice_len, len(value))
-                for i in range(n):
-                    pos = b + i
-                    if value[i]:
-                        self._data[pos >> 3] |= 1 << (pos & 7)
-                    else:
-                        self._data[pos >> 3] &= ~(1 << (pos & 7))
-                return
-            if step == -1:
-                # Descending slice: positions go b, b-1, b-2, ..., e+1.
-                # `e` is exclusive; None means "down to and including 0".
-                if b is None:
-                    b = self._length - 1
-                elif b < 0:
-                    b += self._length
-                if e is None:
-                    end_excl = -1
-                elif e < 0:
-                    end_excl = e + self._length
+            if b is None:
+                b = 0
+            elif b < 0:
+                b += self._length
+            if e is None:
+                e = self._length
+            elif e < 0:
+                e += self._length
+            b = max(0, min(b, self._length))
+            e = max(0, min(e, self._length))
+            slice_len = e - b
+            n = min(slice_len, len(value))
+            for i in range(n):
+                pos = b + i
+                if value[i]:
+                    self._data[pos >> 3] |= 1 << (pos & 7)
                 else:
-                    end_excl = e
-                slice_len = b - end_excl
-                n = min(slice_len, len(value))
-                for i in range(n):
-                    pos = b - i
-                    if not (0 <= pos < self._length):
-                        continue
-                    if value[i]:
-                        self._data[pos >> 3] |= 1 << (pos & 7)
-                    else:
-                        self._data[pos >> 3] &= ~(1 << (pos & 7))
-                return
-            raise ValueError("unsupported slice step %r" % (step,))
+                    self._data[pos >> 3] &= ~(1 << (pos & 7))
+            return
 
         if offset < 0:
             offset += self._length

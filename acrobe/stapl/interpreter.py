@@ -56,43 +56,32 @@ def _set_bit(bs, idx: int, value) -> None:
         bs[idx] = value
 
 
-def _get_subrange(source, high: int, low: int) -> MutableBitString:
-    """Extract bits [low..high] into a new MutableBitString.
+def _get_subrange(source, high: int, low: int) -> BitStringBase:
+    """Extract bits [low..high] (STAPL semantics).
 
-    high >= low → ascending (low to high inclusive).
-    high  < low → descending (low down to high inclusive, reversed).
-
-    Out-of-bounds positions read as 0.
+    high >= low → ascending (low to high inclusive); returns a slice view.
+    high  < low → descending (low down to high inclusive, reversed bits).
     """
     if high >= low:
-        size = high - low + 1
-        result = MutableBitString(0, size)
-        for i in range(size):
-            if _get_bit(source, low + i):
-                result[i] = True
-        return result
-    size = low - high + 1
-    result = MutableBitString(0, size)
-    for i in range(size):
-        if _get_bit(source, low - i):
-            result[i] = True
-    return result
+        return source[low:high + 1]
+    return source[high:low + 1].reversed()
 
 
 def _set_subrange(target, high: int, low: int, source) -> None:
     """Assign bits [low..high] from source (STAPL semantics).
 
-    Lenient: out-of-bounds writes are silently dropped; source shorter
-    than the range is OK (only the available bits are written).
+    Source shorter than the range writes only the available bits and
+    leaves the rest of the range untouched. For descending ranges the
+    written positions stay anchored at `low` (the high index in STAPL
+    notation), matching the original STAPL bit order.
     """
     if high >= low:
-        size = high - low + 1
-        for i in range(min(size, len(source))):
-            _set_bit(target, low + i, bool(source[i]))
+        target[low:high + 1] = source
     else:
-        size = low - high + 1
-        for i in range(min(size, len(source))):
-            _set_bit(target, low - i, bool(source[i]))
+        n = min(low - high + 1, len(source))
+        # Anchor the assignment at `low`: write to the n highest indices
+        # of the ascending range, with source bits reversed.
+        target[low + 1 - n:low + 1] = source.reversed()
 
 
 def _copy_bits(target, source) -> None:

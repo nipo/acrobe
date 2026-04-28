@@ -1927,42 +1927,35 @@ class _ExprEmitter:
             case _:
                 return f'{self.int_expr(expr)} + 1'
 
-    def _exclusive_end_rev(self, expr):
-        """Emit expr - 1 with simplification for reversed slice stop."""
-        match expr:
-            case BinOp(op='+', left=a, right=IntLiteral(value=1)):
-                return self.int_expr(a)
-            case IntLiteral(value=0):
-                return None  # will need special handling
-            case IntLiteral(value=v):
-                return self.int_expr(IntLiteral(value=v - 1))
-            case _:
-                return f'{self.int_expr(expr)} - 1'
-
     def slice_expr(self, high, low):
-        """Emit slice for a[high..low] subrange (STAPL convention).
+        """Emit ascending Python slice for STAPL var[high..low].
 
-        Returns a string like '[0:10]' or '[3::-1]'.
-        Uses _try_const_fold to determine direction statically.
-        Falls back to get_subrange() for dynamic cases.
+        Always emits ascending order [min:max+1]. For STAPL descending
+        subranges (high < low) the caller is responsible for applying
+        .reversed() to either the source (read context) or the assigned
+        value (write context); see is_descending().
         """
+        if self.is_descending(high, low):
+            # Bounds order is high..low ascending in Python.
+            return f'[{self.int_expr(high)}:{self._exclusive_end(low)}]'
+        return f'[{self.int_expr(low)}:{self._exclusive_end(high)}]'
+
+    def is_descending(self, high, low) -> bool:
+        """True when STAPL var[high..low] denotes a descending subrange."""
         h_val = _try_const_fold(high)
         l_val = _try_const_fold(low)
+        return (h_val is not None and l_val is not None and h_val < l_val)
 
-        if h_val is not None and l_val is not None:
-            if h_val >= l_val:
-                # Ascending: a[low:high+1]
-                return f'[{self.int_expr(low)}:{self._exclusive_end(high)}]'
-            else:
-                # Reversed: a[low:high-1:-1] (or a[low::-1] when high=0)
-                stop = self._exclusive_end_rev(high)
-                if stop is None:
-                    return f'[{self.int_expr(low)}::-1]'
-                return f'[{self.int_expr(low)}:{stop}:-1]'
-        else:
-            # Dynamic: cannot determine direction at compile time
-            # Emit ascending and hope for the best (all real STAPL uses ascending)
-            return f'[{self.int_expr(low)}:{self._exclusive_end(high)}]'
+    def subrange_rvalue(self, arr, high, low):
+        """Emit a read-only expression for `arr` over STAPL var[high..low].
+
+        Adds `.reversed()` for descending subranges so the resulting bit
+        order matches STAPL semantics regardless of slice direction.
+        """
+        base = f'{arr}{self.slice_expr(high, low)}'
+        if self.is_descending(high, low):
+            return f'{base}.reversed()'
+        return base
 
     def int_expr(self, expr, _parent_prec=0, _type_hint=None):
         """Emit expression that evaluates to int.
@@ -1987,8 +1980,7 @@ class _ExprEmitter:
                 return f'{arr}[{self._emit_int(idx)}]'
 
             case ArraySubrange(name=n, high=h, low=l):
-                arr = self._ref(n)
-                return f'int({arr}{self.slice_expr(h, l)})'
+                return f'int({self.subrange_rvalue(self._ref(n), h, l)})'
 
             case ArrayWhole(name=n):
                 arr = self._ref(n)
@@ -2055,8 +2047,7 @@ class _ExprEmitter:
         """Emit int conversion of a bits expression."""
         match expr:
             case ArraySubrange(name=n, high=h, low=l):
-                arr = self._ref(n)
-                return f'int({arr}{self.slice_expr(h, l)})'
+                return f'int({self.subrange_rvalue(self._ref(n), h, l)})'
             case ArrayWhole(name=n):
                 return f'int({self._ref(n)})'
             case VarRef(name=n):
@@ -2073,8 +2064,7 @@ class _ExprEmitter:
                 return self._ref(n)
 
             case ArraySubrange(name=n, high=h, low=l):
-                arr = self._ref(n)
-                return f'{arr}{self.slice_expr(h, l)}'
+                return self.subrange_rvalue(self._ref(n), h, l)
 
             case ArrayWhole(name=n):
                 return self._ref(n)
@@ -2341,9 +2331,13 @@ class _StmtEmitter:
                 ref = t if t in self._proc_locals else f'self.{t}'
                 th = e._type_for_var(t)
                 if h is not None and l is not None:
-                    # Subrange assignment
-                    w.line(f'{ref}{e.slice_expr(h, l)} = '
-                           f'{e.bits_expr(v)}')
+                    # Subrange assignment. The LHS is always an ascending
+                    # Python slice; for STAPL descending subranges we
+                    # reverse the source so the bit order matches.
+                    rhs = e.bits_expr(v)
+                    if e.is_descending(h, l):
+                        rhs = f'({rhs}).reversed()'
+                    w.line(f'{ref}{e.slice_expr(h, l)} = {rhs}')
                 elif idx is not None:
                     w.line(f'{ref}[{e.int_expr(idx)}] = '
                            f'{e.int_expr(v, _type_hint=th)}')
@@ -2537,14 +2531,17 @@ class _StmtEmitter:
 
         Subrange assignments use a BitString r-value (read-only source);
         whole-array assignments install a MutableBitString as the variable's
-        new storage so subsequent statements can mutate it.
+        new storage so subsequent statements can mutate it. STAPL descending
+        subranges reverse the captured value so bit ordering matches.
         """
         w = self._w
         match capture_expr:
             case ArraySubrange(name=n, high=h, low=l):
                 ref = n if n in self._proc_locals else f'self.{n}'
-                w.line(f'{ref}{self._expr.slice_expr(h, l)} = '
-                       f'BitString(_tdo, {length_s})')
+                rhs = f'BitString(_tdo, {length_s})'
+                if self._expr.is_descending(h, l):
+                    rhs = f'({rhs}).reversed()'
+                w.line(f'{ref}{self._expr.slice_expr(h, l)} = {rhs}')
             case ArrayWhole(name=n):
                 ref = n if n in self._proc_locals else f'self.{n}'
                 w.line(f'{ref} = MutableBitString(_tdo, {length_s})')
