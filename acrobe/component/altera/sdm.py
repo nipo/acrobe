@@ -262,6 +262,34 @@ class Sdm(Node):
         """Enable QSPI flash access."""
         await self.command(Command.QSPI_OPEN)
 
+    async def get_voltages(self, channels):
+        """Retrieve voltages from core"""
+
+        bitfield = 0
+        for c in channels:
+            bitfield |= 1 << int(c)
+        
+        rsp = await self.command(Command.GET_VOLTAGE, int(bitfield).to_bytes(4, "little"))
+        vs = [(int.from_bytes(rsp[i:i+4], "little") / 0x10000) for i in range(0, len(rsp), 4)]
+        return dict(zip(sorted(channels), vs))
+
+    async def get_temperatures(self, location, channels):
+        """Retrieve voltages from core"""
+
+        bitfield = location << 16
+        for c in channels:
+            bitfield |= 1 << int(c)
+
+        rsp = await self.command(Command.GET_TEMPERATURE, int(bitfield).to_bytes(4, "little"))
+        ret = {}
+        for c, off in zip(sorted(channels), range(0, len(rsp), 4)):
+            v = int.from_bytes(rsp[off:off+4], "little")
+            if v & 0x80000000:
+                ret[(location, c)] = None
+            else:
+                ret[(location, c)] = ((v & ~0xf0000000) - (v & 0x10000000)) / 0x100
+        return ret
+
     async def qspi_close(self):
         """Disable QSPI flash access."""
         await self.command(Command.QSPI_CLOSE)
