@@ -36,26 +36,6 @@ from ...vfs import (
 
 POF_MAGIC = b"POF\x00"
 SOF_MAGIC = b"SOF\x00"
-# Cyclone-classic / older Stratix / Arria sync.
-RBF_SYNC_LEGACY = bytes([0x6a, 0xf7, 0xf7, 0xf7])
-# Agilex / SDM sync — appears at offset 0 of Agilex RBFs.
-RBF_SYNC_AGILEX = bytes([0x95, 0x48, 0x29, 0x62])
-# Bit-swapped forms (occur when bytes were shifted through JTAG and
-# re-packed in the alternate bit order).
-RBF_SYNC_LEGACY_SWAPPED = bitswap8(RBF_SYNC_LEGACY)
-RBF_SYNC_AGILEX_SWAPPED = bitswap8(RBF_SYNC_AGILEX)
-# Backwards-compat aliases used by tests (legacy spelling).
-RBF_SYNC = RBF_SYNC_LEGACY
-RBF_SYNC_SWAPPED = RBF_SYNC_LEGACY_SWAPPED
-
-# Detection table: (sync_bytes, swapped_view).
-_RBF_SYNCS = [
-    (RBF_SYNC_LEGACY, False),
-    (RBF_SYNC_AGILEX, False),
-    (RBF_SYNC_LEGACY_SWAPPED, True),
-    (RBF_SYNC_AGILEX_SWAPPED, True),
-]
-
 
 # --- Section tags shared by POF and SOF ---
 
@@ -424,7 +404,6 @@ class Rbf(FormatNode):
     first 4 KiB for any known sync word:
 
     - Cyclone classic / older Stratix / Arria: 0x6af7f7f7
-    - Agilex / SDM: 0x95482962
 
     Each sync also has a bit-swapped counterpart (occurs when
     bytes were shifted through JTAG and re-packed in the
@@ -437,6 +416,13 @@ class Rbf(FormatNode):
     present, parsing fails — the caller can either pick the
     right format or pass `swap=` to bypass detection.
     """
+
+    # Cyclone-classic / older Stratix / Arria sync.
+    RBF_SYNC = bytes([0x6a, 0xf7, 0xf7, 0xf7])
+    _RBF_SYNCS = [
+        (RBF_SYNC, False),
+        (bitswap8(RBF_SYNC), True),
+    ]
 
     def __init__(self, name, source):
         super().__init__(name, source)
@@ -468,7 +454,7 @@ class Rbf(FormatNode):
             # Take the EARLIEST-matching sync from any family —
             # avoids false positives from later byte sequences.
             best = None
-            for sync, sw in _RBF_SYNCS:
+            for sync, sw in self._RBF_SYNCS:
                 pos = head.find(sync)
                 if pos >= 0 and (best is None or pos < best[0]):
                     best = (pos, sw, sync)
@@ -482,6 +468,108 @@ class Rbf(FormatNode):
         view = RbfBitstream("bitstream", self._source, swapped)
         self._child_attach(view)
 
+class CmfBitstream(Node, Readable):
+    """JTAG-bit-order view of a raw CMF byte stream.
+
+    Detects bitswap from the position of the sync word (0x6af7f7f7).
+    If the sync appears bitswapped in the source, every byte read
+    is swapped on the way out.
+    """
+
+    def __init__(self, name, source, swapped):
+        super().__init__(name)
+        self._source = source
+        self._swapped = swapped
+
+    @property
+    def size(self) -> int:
+        return self._source.size
+
+    async def read(self, offset, size):
+        data = await self._source.read(offset, size)
+        if self._swapped:
+            data = bitswap8(data)
+        return data
+
+    @property
+    def metadata(self) -> dict:
+        return {"swapped": self._swapped, **self._metadata}
+
+
+@register_format("altera_cmf",
+                 exts=["rbf"],
+                 mimes=["application/x-altera-cmf"])
+class Cmf(FormatNode):
+    """CMF format. Adds a single `bitstream` child exposing the
+    canonical-byte-order view of `source`.
+
+    Detects which device family wrote the file by scanning the
+    first 4 KiB for any known sync word:
+
+    - Agilex / SDM: 0x95482962
+
+    Each sync also has a bit-swapped counterpart (occurs when
+    bytes were shifted through JTAG and re-packed in the
+    alternate bit order). When the bit-swapped form is found,
+    every byte read is swapped on the way out so the consumer
+    sees canonical bytes.
+
+    `swap=true|false|auto` can force the swap behaviour; default
+    is `auto` (driven by the detected sync). If no known sync is
+    present, parsing fails — the caller can either pick the
+    right format or pass `swap=` to bypass detection.
+    """
+
+    # Agilex / SDM sync — appears at offset 0 of Agilex CMFs.
+    CMF_SYNC = bytes([0x95, 0x48, 0x29, 0x62])
+    _CMF_SYNCS = [
+        (CMF_SYNC, False),
+        (bitswap8(CMF_SYNC), True),
+        ]
+
+    def __init__(self, name, source):
+        super().__init__(name, source)
+        self._swap_override = None  # None=auto, True/False=forced
+
+    def option_set(self, key, value):
+        if key == "swap":
+            v = value.lower()
+            if v in ("true", "1", "yes"):
+                self._swap_override = True
+            elif v in ("false", "0", "no"):
+                self._swap_override = False
+            elif v == "auto":
+                self._swap_override = None
+            else:
+                raise ValueError(
+                    f"{self.fqdn}: swap must be true/false/auto, "
+                    f"got {value!r}")
+            return
+        super().option_set(key, value)
+
+    async def start(self):
+        if self._swap_override is not None:
+            swapped = self._swap_override
+            family = "user-specified"
+        else:
+            head = await self._source.read(
+                0, min(self._source.size, 4096))
+            # Take the EARLIEST-matching sync from any family —
+            # avoids false positives from later byte sequences.
+            best = None
+            for sync, sw in self._CMF_SYNCS:
+                pos = head.find(sync)
+                if pos >= 0 and (best is None or pos < best[0]):
+                    best = (pos, sw, sync)
+            if best is None:
+                raise NoMatch(
+                    "altera_cmf",
+                    "no recognised sync word in first 4KiB")
+            swapped = best[1]
+            family = best[2].hex()
+        self._metadata["sync_family"] = family
+        view = CmfBitstream("bitstream", self._source, swapped)
+        self._child_attach(view)
 
 # Note: RBF magic detection is unreliable from raw bytes alone —
 # the sync word can appear anywhere in the first KB. We don't

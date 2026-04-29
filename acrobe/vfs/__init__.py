@@ -68,27 +68,38 @@ def register_magic(fn):
 
 
 def detect_by_extension(name):
-    """Resolve a filename to a format name via ext_db.
+    """Resolve a filename to candidate format names via ext_db.
 
-    Tries compound extensions first (file.tar.gz → tar.gz),
-    then progressively shorter ones, ending with the simple
-    extension. Returns None if no match.
+    Tries compound extensions first (file.tar.gz → tar.gz), then
+    progressively shorter ones, ending with the simple extension.
+    Returns a list of all formats registered for the longest matching
+    extension, in registration order. Returns [] if no match.
+
+    Multiple formats can register for the same extension (e.g. legacy
+    Altera RBF and Agilex CMF both use ".rbf" but have different
+    contents); auto_populate tries each in turn, falling through on
+    NoMatch.
     """
     if "." not in name:
-        return None
+        return []
     parts = name.lower().split(".")
     # Try compound extensions, longest first
     for i in range(1, len(parts)):
         ext = ".".join(parts[i:])
         try:
-            return ext_db.get(ext, allow_default=False)[0]
+            return list(ext_db.get(ext, allow_default=False))
         except NoMatch:
             continue
-    return None
+    return []
 
 
 def detect_by_mime(mime):
-    """Resolve a mime type to a format name via mime_db."""
+    """Resolve a mime type to a format name via mime_db.
+
+    Returns the first registered format. Used by `as(mime-type=...)`
+    where the user has explicitly chosen a format, so a single
+    deterministic answer is wanted.
+    """
     try:
         return mime_db.get(mime.lower(), allow_default=False)[0]
     except NoMatch:
@@ -108,27 +119,44 @@ async def detect_by_magic(source):
     return None
 
 
-async def auto_detect(name, source):
-    """Detect the format of `source` (a Readable). Tries extension
-    on `name` first, then magic. Returns format_db key, or None."""
-    fmt = detect_by_extension(name)
-    if fmt is not None:
-        return fmt
-    fmt = await detect_by_magic(source)
-    return fmt
+async def auto_detect_candidates(name, source):
+    """Return an ordered list of format-name candidates for `source`.
+
+    Extension matches come first (in registration order), followed by
+    a magic-byte match if it adds anything new. Used by auto_populate
+    to walk candidates until one parser accepts the bytes.
+    """
+    candidates = list(detect_by_extension(name))
+    magic = await detect_by_magic(source)
+    if magic is not None and magic not in candidates:
+        candidates.append(magic)
+    return candidates
 
 
 async def auto_populate(target, source, name):
-    """Run auto-detection on `source` (a Readable). If a format
-    matches, populate `target`'s children via the format parser.
-    No-op if no format matches.
+    """Run auto-detection on `source` (a Readable). Tries each
+    candidate format in turn (extension matches first, then magic);
+    a parser may signal "wrong format" by raising NoMatch from
+    start(), in which case the next candidate is tried.
+
+    Behaviour:
+    - No candidates at all (unknown extension and no magic match): no-op.
+    - One or more candidates, all reject: re-raise the last NoMatch.
+    - First candidate that succeeds wins.
 
     Usage from a Readable Node's start():
         await auto_populate(self, self, self.name)
     """
-    fmt = await auto_detect(name, source)
-    if fmt is not None:
-        await populate_format(target, fmt, source)
+    last_err = None
+    for fmt in await auto_detect_candidates(name, source):
+        try:
+            await populate_format(target, fmt, source)
+            return
+        except NoMatch as e:
+            last_err = e
+            continue
+    if last_err is not None:
+        raise last_err
 
 
 async def populate_format(target, format_name, source, *, parser_opts=None):
