@@ -279,7 +279,7 @@ async def run(filename, root_path, action_name, no_crc, includes):
     import logging
     from ..stapl import load, Interpreter, StaplExit
     from ..stapl.player import JtagPlayer
-    from ..adapter.model import HwRoot, UsbEnumerator
+    from ..adapter.model import make_hw_root
     from ..protocol.jtag import JtagInterface
     from .. import log
 
@@ -294,8 +294,7 @@ async def run(filename, root_path, action_name, no_crc, includes):
     actions = list(prog.actions.keys())
     click.echo(f"Available actions: {', '.join(actions)}")
 
-    hw_root = HwRoot()
-    hw_root.add_enumerator(UsbEnumerator())
+    hw_root = make_hw_root()
 
     if root_path:
         parts = root_path.strip('/').split('/')

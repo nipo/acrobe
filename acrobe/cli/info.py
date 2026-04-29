@@ -1,7 +1,7 @@
 import asyncclick as click
 
 from . import base
-from ..adapter.model import HwRoot, UsbEnumerator, make_adapter_name
+from ..adapter.model import make_hw_root, make_adapter_name
 from ..node import Node
 
 
@@ -17,21 +17,9 @@ async def info():
     pass
 
 
-def _make_hw_root():
-    """Create HwRoot with USB and TTY enumerators."""
-    root = HwRoot()
-    root.add_enumerator(UsbEnumerator())
-    try:
-        from ..adapter.tty import TtyEnumerator
-        root.add_enumerator(TtyEnumerator())
-    except ImportError:
-        pass
-    return root
-
-
 @info.command(help="List recognized adapters")
 async def adapters():
-    hw_root = _make_hw_root()
+    hw_root = make_hw_root()
     any_found = False
     for enum in hw_root._enumerators:
         found = await enum.scan()
@@ -57,7 +45,7 @@ async def adapters():
               help="Component path (e.g. proby-9/jtag)")
 async def enumerate(root_path):
     parts = root_path.strip("/").split("/")
-    hw_root = _make_hw_root()
+    hw_root = make_hw_root()
 
     leaf = await hw_root.child_summon(*parts)
 

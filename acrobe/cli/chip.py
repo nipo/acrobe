@@ -8,7 +8,7 @@ import sys
 import asyncclick as click
 
 from . import base
-from ..adapter.model import HwRoot, UsbEnumerator
+from ..adapter.model import make_hw_root
 from ..target import Target, Field
 from ..node import Node
 
@@ -20,8 +20,7 @@ from ..node import Node
               help="Target index or name (default: 0)")
 @click.pass_context
 async def chip(ctx, root_paths, target_sel):
-    hw_root = HwRoot()
-    hw_root.add_enumerator(UsbEnumerator())
+    hw_root = make_hw_root()
 
     roots = []
     for path in root_paths:

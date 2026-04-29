@@ -16,7 +16,7 @@ Usage::
     asyncio.run(main())
 """
 
-from .adapter.model import HwRoot, UsbEnumerator
+from .adapter.model import make_hw_root
 from .plugin import load_plugins
 
 
@@ -26,14 +26,13 @@ async def roots(*paths):
     Each *path* is a ``"/"``-separated component path such as
     ``"proby-9/jtag/tap0"`` with optional ``"name(opt1,opt2)"`` syntax.
 
-    Plugins are loaded, a :class:`HwRoot` with USB enumeration is set
-    up, and every leaf component's tree is started before it is
-    returned.
+    Plugins are loaded, a :class:`HwRoot` with the standard set of
+    enumerators is set up, and every leaf component's tree is
+    started before it is returned.
     """
     load_plugins()
 
-    hw_root = HwRoot()
-    hw_root.add_enumerator(UsbEnumerator())
+    hw_root = make_hw_root()
 
     result = []
     for path in paths:

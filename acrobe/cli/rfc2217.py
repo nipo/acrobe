@@ -3,7 +3,7 @@
 import asyncclick as click
 
 from . import base
-from .info import _make_hw_root
+from ..adapter.model import make_hw_root
 from ..protocol.serial import SerialPort
 from ..rfc2217 import Rfc2217Listener
 
@@ -18,7 +18,7 @@ from ..rfc2217 import Rfc2217Listener
               help="Bind address (default 0.0.0.0)")
 async def serial_server(root_path, tcp_port, host):
     parts = root_path.strip("/").split("/")
-    hw_root = _make_hw_root()
+    hw_root = make_hw_root()
     leaf = await hw_root.child_summon(*parts)
     if not isinstance(leaf, SerialPort):
         raise click.ClickException(
