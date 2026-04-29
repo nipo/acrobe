@@ -71,9 +71,9 @@ class ECP5(Tap, JtagSramFpga):
 
     ERASE_SRAM = 1
 
-    def __init__(self, interface, idcode, **kw):
+    def __init__(self, idcode, **kw):
         name = _ECP5_PARTS.get(idcode & 0x0FFFFFFF, f"ECP5-0x{idcode:08x}")
-        super().__init__(interface, idcode, name=name, **kw)
+        super().__init__(idcode=idcode, name=name, **kw)
 
     async def _read_status(self):
         raw = await self.LSC_READ_STATUS()

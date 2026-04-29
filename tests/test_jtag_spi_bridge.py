@@ -7,6 +7,7 @@ from acrobe.component.nsl.transactor.spi import SpiTransactor
 from acrobe.component.jtag_spi_bridge import jtag_spi_bridge
 from acrobe.protocol.spi import Cs, Shift, Interface, Target
 from acrobe.engine import Batcher
+from acrobe.protocol.jtag import Chain, JtagInterface
 from acrobe.bitstring import BitString
 
 
@@ -409,7 +410,7 @@ class TestJtagSpiBridge:
         assert iface.children[0].cs == 0
 
 
-class _GowinLoadMock(Batcher):
+class _GowinLoadMock(JtagInterface):
     """Mock that handles the JTAG shifts for GowinFpga.load().
 
     Returns usercode=0 (forces reload), status=0 during erase,
@@ -418,7 +419,7 @@ class _GowinLoadMock(Batcher):
     DONE_BIT = 13
 
     def __init__(self):
-        super().__init__()
+        super().__init__(name="gowin-load-mock")
         self._32bit_count = 0
 
     async def flush_ops(self, batch):
@@ -446,7 +447,10 @@ class TestGowinChildSpawn:
         from acrobe.protocol.spi import Interface as SpiInterface
 
         # GW5A-25 has a firmware file (0x0001281b_jtag_spi.fs.gz)
-        tap = GowinFpga(_GowinLoadMock(), idcode=0x0001281b)
+        iface = _GowinLoadMock()
+        chain = Chain()
+        iface.child_add(chain)
+        tap = chain.tap_add(0x0001281b, irlen=8, base=GowinFpga)
         result = await tap._child_spawn_mro("spi")
         assert isinstance(result, SpiInterface)
 
@@ -457,7 +461,10 @@ class TestGowinChildSpawn:
         from acrobe.db import NoMatch
 
         # GW2A-18 (0x0000081b) has no firmware file
-        tap = GowinFpga(_GowinLoadMock(), idcode=0x0000081b)
+        iface = _GowinLoadMock()
+        chain = Chain()
+        iface.child_add(chain)
+        tap = chain.tap_add(0x0000081b, irlen=8, base=GowinFpga)
         with pytest.raises(NoMatch):
             await tap._child_spawn_mro("spi")
 
@@ -467,7 +474,10 @@ class TestGowinChildSpawn:
         from acrobe.component.gowin.gw1n import GowinFpga
         from acrobe.protocol.spi import Interface as SpiInterface
 
-        tap = GowinFpga(_GowinLoadMock(), idcode=0x0001281b)
+        iface = _GowinLoadMock()
+        chain = Chain()
+        iface.child_add(chain)
+        tap = chain.tap_add(0x0001281b, irlen=8, base=GowinFpga)
         result = await tap.child_summon("spi")
         assert isinstance(result, SpiInterface)
         assert result in tap.children
@@ -479,6 +489,9 @@ class TestGowinChildSpawn:
         from acrobe.component.gowin.gw1n import GowinFpga
         from acrobe.db import NoMatch
 
-        tap = GowinFpga(_GowinLoadMock(), idcode=0x0001281b)
+        iface = _GowinLoadMock()
+        chain = Chain()
+        iface.child_add(chain)
+        tap = chain.tap_add(0x0001281b, irlen=8, base=GowinFpga)
         with pytest.raises(NoMatch):
             await tap._child_spawn_mro("unknown")

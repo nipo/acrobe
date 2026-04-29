@@ -226,7 +226,7 @@ _AGILEX5_PARTS = {
 class Agilex5E(Agilex5):
     """Agilex 5 E-series."""
 
-    def __init__(self, interface, idcode, **kw):
+    def __init__(self, idcode, **kw):
         name = _AGILEX5_PARTS.get(
             idcode & 0xfffffff, f"Agilex5-0x{idcode:08x}")
-        super().__init__(interface, idcode, name=name, **kw)
+        super().__init__(idcode=idcode, name=name, **kw)

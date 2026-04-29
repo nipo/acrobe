@@ -50,7 +50,7 @@ class ProbyAdapter(Adapter):
         logger = logging.getLogger(name)
         transport = await FtdiTransport.from_device(device, interface_index=_JTAG_CHANNEL)
         engine = MpsseEngine(transport, logger)
-        jtag = JtagMpsse(engine, logger)
+        jtag = JtagMpsse(engine)
         resetn_bit = 1 << _RESETN_PIN
         await jtag.setup(gpio_oe=resetn_bit, gpio_val=resetn_bit)
         return cls(name, device, transport, engine, jtag)
@@ -64,12 +64,16 @@ class ProbyAdapter(Adapter):
         await leaf.start()
         view = await leaf.child_summon("bitstream")
 
-        chain = Chain(self._jtag)
-        await chain.discover()
-        tap = chain.children[0]
+        chain = Chain()
+        self._jtag.child_add(chain)
+        try:
+            await chain.discover()
+            tap = chain.children[0]
 
-        self.logger.trace("Loading %s firmware...", mode)
-        await tap.load(view)
+            self.logger.trace("Loading %s firmware...", mode)
+            await tap.load(view)
+        finally:
+            await self._jtag.child_remove(chain)
 
         self._loaded_mode = mode
 
@@ -81,7 +85,7 @@ class ProbyAdapter(Adapter):
     async def _open_channel_a(self, gpio_oe, gpio_val):
         transport = await FtdiTransport.from_device(self._device, interface_index=0)
         engine = MpsseEngine(transport, self.logger)
-        jtag = JtagMpsse(engine, self.logger)
+        jtag = JtagMpsse(engine)
         await jtag.setup(gpio_oe=gpio_oe, gpio_val=gpio_val)
         self._transport_a = transport
         return jtag
@@ -90,7 +94,8 @@ class ProbyAdapter(Adapter):
         name_lower = name.lower()
 
         if name_lower == "jtag":
-            return JtagInterface(self._jtag, name="jtag")
+            self._jtag._name = "jtag"
+            return self._jtag
 
         if name_lower == "jtag-pt":
             async with self._channel_a_lock:
@@ -98,7 +103,8 @@ class ProbyAdapter(Adapter):
                 await self._reprogram("jtag_swd_raw")
                 jtag = await self._open_channel_a(
                     gpio_oe=0x0710, gpio_val=0x0310)
-                return JtagInterface(jtag, name="jtag-pt")
+                jtag._name = "jtag-pt"
+                return jtag
 
         raise NoMatch("interface", name)
 

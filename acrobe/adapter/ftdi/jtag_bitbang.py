@@ -3,12 +3,11 @@ from __future__ import annotations
 import asyncio
 
 from .transport import ftdi_baudrate_divisor
-from ...engine import Batcher
 from ...bitstring import BitString, BitStringBase
 from ...protocol import jtag
 
 
-class JtagBitbang(Batcher):
+class JtagBitbang(jtag.JtagInterface):
     """JTAG interface using FTDI sync bitbang mode.
 
     Translates JTAG protocol operations into GPIO byte sequences
@@ -26,8 +25,8 @@ class JtagBitbang(Batcher):
     STATE_RTI = "rti"
     STATE_PAUSE = "pause"
 
-    def __init__(self, transport, *, tck, tms, tdi, tdo, logger):
-        super().__init__()
+    def __init__(self, transport, *, tck, tms, tdi, tdo, name="jtag"):
+        super().__init__(name=name)
         self._transport = transport
         self._tck = tck
         self._tms = tms
@@ -37,7 +36,6 @@ class JtagBitbang(Batcher):
         self._state = self.STATE_UNKNOWN
         self._baudrate = None
         self._baudrate_dirty = False
-        self.logger = logger
 
     def freq_update(self, freq):
         """Set JTAG clock frequency via FTDI bitbang baud rate.

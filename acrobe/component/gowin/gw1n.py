@@ -117,10 +117,10 @@ class GowinFpga(Tap, JtagSramFpga):
 
     _status_type = Gw1nStatus
 
-    def __init__(self, interface, idcode, **kw):
+    def __init__(self, idcode, **kw):
         part_no = _idcode_to_part_no(idcode)
         name = parts.get(part_no, f"Gowin-0x{idcode:08x}")
-        super().__init__(interface, idcode, name=name, **kw)
+        super().__init__(idcode=idcode, name=name, **kw)
 
     async def status_read(self):
         raw = await self.READ_STATUS()

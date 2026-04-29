@@ -5,11 +5,19 @@ from acrobe.component.gowin.gw1n import GowinFpga, Gw1n, Gw2a, Gw5a, DONE_BIT, G
 from acrobe.component.fpga import JtagSramFpga, SramFpga
 from acrobe.protocol.jtag import (
     Tap, Chain, Shift, CaptureDr, CaptureIr, Reset, Run,
-    TapInstruction,
+    TapInstruction, JtagInterface,
 )
 from acrobe.bitstring import BitString
-from acrobe.engine import Batcher
 from acrobe.node import Node, Readable
+
+
+def _attach_tap(iface, base, idcode, irlen=None):
+    """Build a single-tap chain under iface and return the tap."""
+    chain = Chain()
+    iface.child_add(chain)
+    if irlen is None:
+        irlen = base.irlen
+    return chain.tap_add(idcode, irlen=irlen, base=base)
 
 
 class _Bitstream(Node, Readable):
@@ -31,11 +39,11 @@ def make_bitstream(data, **metadata):
 
 # -- Mock Interface --
 
-class GowinMockInterface(Batcher):
+class GowinMockInterface(JtagInterface):
     """Mock that tracks shifts and returns configurable status/usercode."""
 
     def __init__(self, status=0, usercode=0):
-        super().__init__()
+        super().__init__(name="gowin-mock")
         self.status = status
         self.usercode = usercode
         self.shifts = []
@@ -60,11 +68,11 @@ class GowinMockInterface(Batcher):
         return self.status
 
 
-class StatusOnlyMock(Batcher):
+class StatusOnlyMock(JtagInterface):
     """Mock that always returns a fixed status for 32-bit reads."""
 
     def __init__(self, status=0):
-        super().__init__()
+        super().__init__(name="status-only")
         self.status = status
 
     async def flush_ops(self, batch):
@@ -86,24 +94,24 @@ class TestGowinFpga:
 
     def test_is_jtag_sram_fpga(self):
         iface = StatusOnlyMock()
-        tap = GowinFpga(iface, idcode=0x0001481b)
+        tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
         assert isinstance(tap, JtagSramFpga)
         assert isinstance(tap, SramFpga)
         assert isinstance(tap, Tap)
 
     def test_name_from_parts(self):
         iface = StatusOnlyMock()
-        tap = GowinFpga(iface, idcode=0x0001481b)
+        tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
         assert tap.name == "GW5A-60"
 
     def test_name_unknown_part(self):
         iface = StatusOnlyMock()
-        tap = GowinFpga(iface, idcode=0x0ffff81b)
+        tap = _attach_tap(iface, GowinFpga, idcode=0x0ffff81b)
         assert "0x0ffff81b" in tap.name
 
     def test_has_instructions(self):
         iface = StatusOnlyMock()
-        tap = GowinFpga(iface, idcode=0x0001481b)
+        tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
         assert isinstance(tap.ISC_ENABLE, TapInstruction)
         assert isinstance(tap.ISC_DISABLE, TapInstruction)
         assert isinstance(tap.READ_STATUS, TapInstruction)
@@ -115,7 +123,7 @@ class TestGowinFpga:
 
     def test_is_done(self):
         iface = StatusOnlyMock()
-        tap = GowinFpga(iface, idcode=0x0001481b)
+        tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
         assert tap.is_done(Gw1nStatus(1 << 13)) is True
         assert tap.is_done(Gw1nStatus(0)) is False
         assert tap.is_done(Gw1nStatus(0xffffffff)) is True
@@ -128,7 +136,7 @@ class TestStatusRead:
     async def test_status_read(self):
         status_val = (1 << DONE_BIT) | 0x07
         iface = StatusOnlyMock(status=status_val)
-        tap = GowinFpga(iface, idcode=0x0001481b)
+        tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
         st = await tap.status_read()
         assert int(st) == status_val
         assert st.Done is True
@@ -143,13 +151,13 @@ class TestIsConfigured:
     @pytest.mark.asyncio
     async def test_configured(self):
         iface = StatusOnlyMock(status=(1 << DONE_BIT))
-        tap = GowinFpga(iface, idcode=0x0001481b)
+        tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
         assert await tap.is_configured() is True
 
     @pytest.mark.asyncio
     async def test_not_configured(self):
         iface = StatusOnlyMock(status=0)
-        tap = GowinFpga(iface, idcode=0x0001481b)
+        tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
         assert await tap.is_configured() is False
 
 
@@ -161,9 +169,9 @@ class TestLoad:
         """When usercode matches and Done is set, load() skips reprogramming."""
         status_val = 1 << DONE_BIT
 
-        class SkipMock(Batcher):
+        class SkipMock(JtagInterface):
             def __init__(self):
-                super().__init__()
+                super().__init__(name="skip-mock")
                 self.shifts = []
 
             async def flush_ops(self, batch):
@@ -181,7 +189,7 @@ class TestLoad:
                     future.set_result(op)
 
         iface = SkipMock()
-        tap = GowinFpga(iface, idcode=0x0001481b)
+        tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
 
         await tap.load(make_bitstream(b'\x00' * 100, UserCode="0xDEADBEEF"))
         # Only USERCODE + STATUS reads, no large data shift
@@ -191,9 +199,9 @@ class TestLoad:
     async def test_usercode_mismatch_reloads(self):
         """When usercode doesn't match, full reload happens."""
 
-        class ReloadMock(Batcher):
+        class ReloadMock(JtagInterface):
             def __init__(self):
-                super().__init__()
+                super().__init__(name="reload-mock")
                 self.shifts = []
                 self._32bit_count = 0
 
@@ -217,7 +225,7 @@ class TestLoad:
                     future.set_result(op)
 
         iface = ReloadMock()
-        tap = GowinFpga(iface, idcode=0x0001481b)
+        tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
 
         await tap.load(make_bitstream(b'\x00' * 100, UserCode="0xDEADBEEF"))
         # Full reload has many more shifts (data transfer)
@@ -232,15 +240,15 @@ class TestErase:
         """erase() delegates to sram_erase()."""
         # Status returns not-Done (0) so erase succeeds on first try
         iface = StatusOnlyMock(status=0)
-        tap = GowinFpga(iface, idcode=0x0001481b)
+        tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
         await tap.erase()
 
 
 # -- Device Registration via ChainSimulator --
 
-class ChainSimulator(Batcher):
+class ChainSimulator(JtagInterface):
     def __init__(self, devices):
-        super().__init__()
+        super().__init__(name="sim")
         self.devices = devices
         self._reg_val = 0
         self._reg_len = 0
@@ -300,7 +308,7 @@ class TestDeviceRegistration:
     async def test_gw5a_60(self):
         """GW5A-60 (0x0001481b) discovered as Gw5a."""
         sim = ChainSimulator([(0x0001481b, 8)])
-        chain = Chain(sim)
+        chain = Chain(); sim.child_add(chain)
         await chain.discover()
         tap = chain.children[0]
         assert isinstance(tap, Gw5a)
@@ -312,7 +320,7 @@ class TestDeviceRegistration:
         """GW1N-9 (part_no=0x1005) discovered as Gw1n."""
         idcode = (0x1005 << 12) | 0x81b
         sim = ChainSimulator([(idcode, 8)])
-        chain = Chain(sim)
+        chain = Chain(); sim.child_add(chain)
         await chain.discover()
         tap = chain.children[0]
         assert isinstance(tap, Gw1n)
@@ -323,7 +331,7 @@ class TestDeviceRegistration:
         """GW2A-18 (part_no=0x0000) discovered as Gw2a."""
         idcode = (0x0000 << 12) | 0x81b
         sim = ChainSimulator([(idcode, 8)])
-        chain = Chain(sim)
+        chain = Chain(); sim.child_add(chain)
         await chain.discover()
         tap = chain.children[0]
         assert isinstance(tap, Gw2a)
@@ -334,7 +342,7 @@ class TestDeviceRegistration:
         # GW5A-60 with revision nibble = 0xF
         idcode = 0xF001481b
         sim = ChainSimulator([(idcode, 8)])
-        chain = Chain(sim)
+        chain = Chain(); sim.child_add(chain)
         await chain.discover()
         tap = chain.children[0]
         assert isinstance(tap, Gw5a)
@@ -347,7 +355,7 @@ class TestDeviceRegistration:
             (0x0001481b, 8),   # GW5A-60
             (0x04001093, 6),   # Spartan6 LX9
         ])
-        chain = Chain(sim)
+        chain = Chain(); sim.child_add(chain)
         await chain.discover()
         assert len(chain.children) == 2
         assert isinstance(chain.children[0], Gw5a)

@@ -8,12 +8,11 @@ from .mpsse import (
     ShiftBits, ShiftBytes, ShiftTms, ClockBits, ClockBytes,
     ThreePhase, Adaptive, Loopback, ClockDiv5, ClockDivisor,
 )
-from ...engine import Batcher
 from ...bitstring import BitString, BitStringBase
 from ...protocol import jtag
 
 
-class JtagMpsse(jtag.JtagInterface, Batcher):
+class JtagMpsse(jtag.JtagInterface):
     """JTAG interface using FTDI MPSSE.
 
     Translates JTAG protocol operations (CaptureDr, CaptureIr, Shift,
@@ -34,8 +33,7 @@ class JtagMpsse(jtag.JtagInterface, Batcher):
     STATE_PAUSE = "pause"
 
     def __init__(self, engine: MpsseEngine):
-        jtag.JtagInterface.__init__(self)
-        Batcher.__init__(self)
+        super().__init__()
         self._engine = engine
         self._state = self.STATE_UNKNOWN
         self._gpio_oe = 0

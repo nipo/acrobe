@@ -73,10 +73,10 @@ class _TapShift:
         self.ir_value = ir_value
         self.tdi = tdi
         self.read_tdo = read_tdo
+        self.tdo = None
 
     def __repr__(self):
-        if self.ir_value is not None:
-            ir = f"{self.ir_value:#x}"
+        ir = "None" if self.ir_value is None else f"{self.ir_value:#x}"
         return f"_TapShift(ir={ir}, tdi={self.tdi!r}, read_tdo={self.read_tdo})"
 
 class _TapRun:
@@ -87,8 +87,30 @@ class _TapRun:
         return f"_TapRun(cycles={self.cycles})"
 
 class _TapIrStatus:
+    def __init__(self):
+        self.tdo = None
+
     def __repr__(self):
         return "_TapIrStatus()"
+
+
+# Tap → parent submission
+
+class TapOp:
+    """A single tap-level op forwarded by a Tap to its parent.
+
+    The Tap is the source context; the parent (Chain, AjiHost, …) uses
+    it to look up per-tap state (geometry, open_id, …) and translates
+    the inner op accordingly. The parent resolves the future with the
+    inner op as the result, after populating tdo on shifts.
+    """
+
+    def __init__(self, tap, op):
+        self.tap = tap
+        self.op = op
+
+    def __repr__(self):
+        return f"TapOp({self.tap.name!r}, {self.op!r})"
 
 
 # Instruction Registry
@@ -219,19 +241,24 @@ def _idcode_eq(key, lookup):
 
 
 class Tap(Batcher, Node, InstructionRegistry):
+    """A single TAP. Batches TAP-level ops (_TapShift, _TapRun,
+    _TapIrStatus) and forwards them to its tree parent (a Chain or any
+    other parent-of-taps) wrapped in `TapOp` envelopes.
+
+    The Tap holds no chain geometry and no reference to the underlying
+    JTAG interface — its only collaborator is its direct parent. The
+    parent owns geometry, current_ir caching, and translation to
+    bit-level (or AJI, or whatever else) ops.
+    """
+
     irlen = None
     max_freq = None
     db = Db("TAP idcode", eq_func=_idcode_eq)
 
-    def __init__(self, interface, idcode=None, irlen=None, name=None):
+    def __init__(self, idcode=None, irlen=None, name=None):
         if irlen is not None:
             self.irlen = irlen
         self.idcode = idcode
-        self.ir_pre = 0
-        self.ir_post = 0
-        self.dr_pre = 0
-        self.dr_post = 0
-        self._interface = interface
 
         if name is None:
             name = f"TAP[0x{int(idcode):08x}]" if isinstance(idcode, int) else "TAP"
@@ -239,14 +266,6 @@ class Tap(Batcher, Node, InstructionRegistry):
         Batcher.__init__(self)
         Node.__init__(self, name)
         self._init_instructions()
-
-    def position_set(self, ir_pre, dr_pre, ir_post=None, dr_post=None):
-        self.ir_pre = ir_pre
-        self.dr_pre = dr_pre
-        if ir_post is not None:
-            self.ir_post = ir_post
-        if dr_post is not None:
-            self.dr_post = dr_post
 
     def ir(self, value, dr_length=None):
         """Create a dynamic instruction for an ad-hoc IR value."""
@@ -257,10 +276,8 @@ class Tap(Batcher, Node, InstructionRegistry):
         return self.post(_TapRun(cycles))
 
     def ir_status(self):
-        """Post an IR status capture. Shifts BYPASS into IR, returns Future -> BitString.
-
-        The captured IR value contains status bits (device-specific).
-        This always forces an IR shift regardless of _current_ir tracking.
+        """Post an IR status capture. Shifts BYPASS into IR and returns
+        the captured IR bits as a BitString.
         """
         return self.post(_TapIrStatus())
 
@@ -288,86 +305,43 @@ class Tap(Batcher, Node, InstructionRegistry):
                 else:
                     raise ValueError("Cannot determine shift length from int without DR length")
             elif not isinstance(tdi, BitStringBase):
-                raise TypeError(f"tdi must be int, BitString, or None")
+                raise TypeError("tdi must be int, BitString, or None")
 
         op = _TapShift(ir_value, tdi, read_tdo)
         return self.post(op)
 
     async def flush_ops(self, batch):
-        """Translate tap-level ops into JTAG interface ops."""
-        self.logger.protocol("Tap batch: %s", [op for op, _ in batch])
-        jtag_futures = []
-        # Track which batch entries need TDO extraction
-        tdo_info = []  # list of (batch_index, jtag_shift_future)
-        current_ir = None
-        bypass_val = (1 << self.irlen) - 1
+        """Forward each TAP-level op to the parent wrapped in a TapOp.
 
-        for idx, (op, future) in enumerate(batch):
-            if isinstance(op, _TapIrStatus):
-                # Capture IR status: split IR shift into pre/data/post
-                # so we can read just our device's captured IR value.
-                jtag_futures.append(self._interface.post(CaptureIr()))
+        The parent populates tdo on the inner op (for shifts that read)
+        and resolves the parent-side future with the inner op. We map
+        that back to a per-call result: the captured tdo for shifts /
+        ir-status, None otherwise.
+        """
+        if self._parent is None:
+            raise RuntimeError(f"Tap {self.name!r} has no parent to forward to")
 
-                if self.ir_pre:
-                    jtag_futures.append(self._interface.post(
-                        Shift(BitString(-1, self.ir_pre), read_tdo=False)))
-
-                data_shift = Shift(BitString(bypass_val, self.irlen), read_tdo=True)
-                data_future = self._interface.post(data_shift)
-                jtag_futures.append(data_future)
-
-                if self.ir_post:
-                    jtag_futures.append(self._interface.post(
-                        Shift(BitString(-1, self.ir_post), read_tdo=False)))
-
-                current_ir = bypass_val
-                tdo_info.append((idx, data_future))
-
-            elif isinstance(op, _TapShift):
-                # IR shift if IR changed
-                if op.ir_value is not None and op.ir_value != current_ir:
-                    ir_data = (BitString(-1, self.ir_pre) +
-                               BitString(op.ir_value, self.irlen) +
-                               BitString(-1, self.ir_post))
-                    jtag_futures.append(self._interface.post(CaptureIr()))
-                    jtag_futures.append(self._interface.post(
-                        Shift(ir_data, read_tdo=False)))
-                    current_ir = op.ir_value
-
-                # DR shift
-                if op.tdi is not None:
-                    jtag_futures.append(self._interface.post(CaptureDr()))
-
-                    if self.dr_pre:
-                        jtag_futures.append(self._interface.post(
-                            Shift(BitString(0, self.dr_pre), read_tdo=False)))
-
-                    data_shift = Shift(op.tdi, read_tdo=op.read_tdo)
-                    data_future = self._interface.post(data_shift)
-                    jtag_futures.append(data_future)
-
-                    if self.dr_post:
-                        jtag_futures.append(self._interface.post(
-                            Shift(BitString(0, self.dr_post), read_tdo=False)))
-
-                    if op.read_tdo:
-                        tdo_info.append((idx, data_future))
-
-            elif isinstance(op, _TapRun):
-                jtag_futures.append(self._interface.post(Run(op.cycles)))
-
-        # Await all JTAG interface futures
-        if jtag_futures:
-            await asyncio.gather(*jtag_futures)
-
-        # Resolve futures with TDO values
-        for idx, data_future in tdo_info:
-            shift_op = data_future.result()  # The Shift op, with .tdo populated
-            batch[idx][1].set_result(shift_op.tdo)
-
-        # Resolve remaining futures with None
+        forwarded = []
         for op, future in batch:
-            if not future.done():
+            parent_future = self._parent.post(TapOp(self, op))
+            forwarded.append((op, parent_future, future))
+
+        for op, parent_future, future in forwarded:
+            try:
+                await parent_future
+            except Exception as exc:
+                if not future.done():
+                    future.set_exception(exc)
+                continue
+            # Map inner-op state to the user-facing result.
+            if isinstance(op, _TapShift):
+                if op.tdi is not None and op.read_tdo:
+                    future.set_result(op.tdo)
+                else:
+                    future.set_result(None)
+            elif isinstance(op, _TapIrStatus):
+                future.set_result(op.tdo)
+            else:
                 future.set_result(None)
 
     def __repr__(self):
@@ -376,16 +350,25 @@ class Tap(Batcher, Node, InstructionRegistry):
 
 # JTAG Interface
 
-class JtagInterface(Node, FreqCapper):
-    """JTAG master interface. Holds a single Chain as child.
+class JtagInterface(Batcher, Node, FreqCapper):
+    """Bit-level JTAG master interface.
 
-    Supports multiple chains (e.g. behind a mux) in the future.
+    Receives bit-level ops (Reset, Run, CaptureDr, CaptureIr, Shift,
+    SwdToJtag) via `post`. Concrete subclasses (JtagMpsse,
+    JtagBitbang, …) implement `flush_ops` to drive hardware.
+
+    Children are typically a single `Chain`. Chains post bit-level ops
+    to the interface; the interface drives them through hardware.
     """
     db = Db("Interface handler")
 
     def __init__(self, name="jtag"):
+        Batcher.__init__(self)
         Node.__init__(self, name)
         FreqCapper.__init__(self)
+
+    async def flush_ops(self, batch):
+        raise NotImplementedError
 
     async def child_spawn(self, name):
         return await self.db.acall(name, self)
@@ -404,15 +387,54 @@ class OpenChain(Exception):
     """TDO line is stuck or disconnected."""
     pass
 
-@JtagInterface.db.register("chain")
-class Chain(Node):
-    """JTAG Chain. Holds TAPs and manages chain geometry."""
 
-    def __init__(self, interface, name="chain"):
-        super().__init__(name)
-        self._interface = interface
+class ChainContext:
+    """Per-tap state held by Chain.
+
+    Stores the geometry of a TAP within the chain (IR/DR padding) and
+    a cached `current_ir` so redundant IR shifts can be elided across
+    flushes.
+    """
+
+    __slots__ = ("tap", "ir_pre", "ir_post", "dr_pre", "dr_post", "current_ir")
+
+    def __init__(self, tap, ir_pre=0, dr_pre=0, ir_post=0, dr_post=0):
+        self.tap = tap
+        self.ir_pre = ir_pre
+        self.ir_post = ir_post
+        self.dr_pre = dr_pre
+        self.dr_post = dr_post
+        self.current_ir = None
+
+    def __repr__(self):
+        return (f"ChainContext({self.tap.name!r}, "
+                f"ir_pre={self.ir_pre}, ir_post={self.ir_post}, "
+                f"dr_pre={self.dr_pre}, dr_post={self.dr_post})")
+
+
+class Chain(Batcher, Node):
+    """A bit-level JTAG chain. Parent of Taps.
+
+    Receives `TapOp` envelopes from its child Taps via `post`. Looks
+    up each tap's geometry in `self._contexts` and translates the
+    inner op into bit-level ops (`CaptureIr`, `CaptureDr`, `Shift`,
+    `Run`) posted to its own parent — a `JtagInterface`.
+
+    Tracks `current_ir` per tap across flushes so redundant IR shifts
+    can be elided. When any IR shift happens, the OTHER taps' IRs are
+    loaded with all-1s (BYPASS) by construction; we update their
+    cached `current_ir` accordingly.
+    """
+
+    def __init__(self, name="chain"):
+        Batcher.__init__(self)
+        Node.__init__(self, name)
+        self._contexts = {}  # tap → ChainContext
         self.total_irlen = 0
         self.total_drlen = 0
+
+    def context(self, tap) -> ChainContext:
+        return self._contexts[tap]
 
     async def start(self):
         jtag_iface = self.parent_of_class(JtagInterface)
@@ -426,23 +448,18 @@ class Chain(Node):
             return
         jtag_iface.freq_cap_min(self.children)
 
+    # --- Discovery (bit-level, posts directly to parent) ---
+
     async def _shift_discover(self, max_length=512, shift_in=None):
         """Probe a register's length by shifting a marker through.
 
         Shifts a 32-bit marker followed by zeros. The marker's
         position in TDO reveals the register length.
-
-        Args:
-            max_length: maximum register length to probe.
-            shift_in: value to shift back into the register after
-                measuring (e.g. -1 for all-ones). None to leave as-is.
-
-        Returns the captured register contents (BitString).
         """
         marker = 0xc05a5a03
         tdi = BitString(marker, 32) + BitString(0, max_length + 4)
         shift = Shift(tdi, read_tdo=True)
-        result = await self._interface.post(shift)
+        result = await self._parent.post(shift)
         tdo = result.tdo[:max_length + 32]
 
         if not int(tdo):
@@ -461,8 +478,8 @@ class Chain(Node):
         if shift_in is not None:
             back = BitString(shift_in, len(register))
             shift_back = Shift(back, read_tdo=False)
-            await self._interface.post(shift_back)
-            await self._interface.post(Run(1))
+            await self._parent.post(shift_back)
+            await self._parent.post(Run(1))
 
         return register
 
@@ -472,34 +489,24 @@ class Chain(Node):
         Reliably identifies IDCODEs and TAP count. Determines IR
         lengths from the captured IR pattern (JTAG spec: after
         Capture-IR, each TAP's IR starts with 01 in bits [1:0]).
-        Cross-references with Tap.db for known IR lengths to
-        disambiguate when needed.
-
-        Unknown devices get a generic Tap with the discovered IR
-        length.
         """
-        # Reset and read DR — contains IDCODEs
         self.logger.trace("Discovering chain...")
-        self._interface.post(Reset())
-        self._interface.post(Run(1))
-        self._interface.post(CaptureDr())
+        self._parent.post(Reset())
+        self._parent.post(Run(1))
+        self._parent.post(CaptureDr())
         reset_dr = await self._shift_discover()
         self.logger.trace("DR after reset: %d bits", len(reset_dr))
 
-        # Capture IR (loads default IR), shift all-ones to load BYPASS
-        self._interface.post(CaptureIr())
+        self._parent.post(CaptureIr())
         captured_ir = await self._shift_discover(shift_in=-1)
         captured_ir_length = len(captured_ir)
         self.logger.trace("IR captured: %d bits", captured_ir_length)
 
-        # Now all TAPs are in BYPASS (1-bit DR each).
-        # Probe DR to count devices.
-        self._interface.post(CaptureDr())
+        self._parent.post(CaptureDr())
         bypass_dr = await self._shift_discover(max_length=captured_ir_length // 2)
         device_count = len(bypass_dr)
         self.logger.trace("BYPASS DR: %d devices", device_count)
 
-        # Extract IDCODEs from reset DR
         idcodes = []
         pos = 0
         for _ in range(device_count):
@@ -515,15 +522,10 @@ class Chain(Node):
         self.logger.note("IDCODEs: %s", ", ".join(
             f"0x{idc:08x}" if idc else "none" for idc in idcodes))
 
-        # Determine IR lengths from captured IR pattern.
-        # JTAG spec: after Capture-IR, each TAP loads a value with
-        # bits [1:0] = 01. So we look for positions where bit pair
-        # is 01 — these are potential IR boundaries.
         cutoffs = [i for i in range(captured_ir_length)
                    if int(captured_ir[i:i + 2]) == 1]
         cutoffs.append(captured_ir_length)
 
-        # Build all possible IR length assignments
         segments = [b - a for a, b in zip(cutoffs, cutoffs[1:])]
 
         def ir_merge(prefix, parts, count_left):
@@ -539,7 +541,6 @@ class Chain(Node):
 
         possibilities = ir_merge([], segments, device_count)
 
-        # Filter by known IR lengths from Tap.db
         known_irlens = [self._irlen_for(idc) for idc in idcodes]
         possibilities = [
             p for p in possibilities
@@ -553,13 +554,11 @@ class Chain(Node):
         ir_lengths = possibilities[0]
         self.logger.trace("IR lengths: %s", ir_lengths)
 
-        # Create TAPs
         for idcode, irlen in zip(idcodes, ir_lengths):
             tap = self.tap_add(idcode, irlen)
             self.logger.note("TAP: %s (irlen=%d)", tap._name, irlen)
 
-        # Return to Run-Test/Idle
-        await self._interface.post(Run(1))
+        await self._parent.post(Run(1))
 
     @staticmethod
     def _irlen_for(idcode):
@@ -575,37 +574,175 @@ class Chain(Node):
             return irlens.pop()
         return None
 
-    def tap_add(self, idcode, irlen, ir_pre=None, dr_pre=None):
-        """Add a TAP to the chain at the current end position."""
+    # --- Tap registration ---
+
+    def tap_add(self, idcode, irlen, ir_pre=None, dr_pre=None, base=None):
+        """Add a TAP to the chain at the current end position.
+
+        If `base` is given, instantiate that class directly. Otherwise
+        consult `Tap.db` for an idcode-matching subclass; fall back to
+        the generic Tap.
+        """
         if ir_pre is None:
             ir_pre = self.total_irlen
         if dr_pre is None:
             dr_pre = self.total_drlen
 
-        try:
-            tap = Tap.db.call(idcode, self._interface, idcode, irlen=irlen)
-        except NoMatch:
-            tap = Tap(self._interface, idcode=idcode, irlen=irlen)
+        if base is not None:
+            tap = base(idcode=idcode, irlen=irlen)
+        else:
+            try:
+                tap = Tap.db.call(idcode, idcode=idcode, irlen=irlen)
+            except NoMatch:
+                tap = Tap(idcode=idcode, irlen=irlen)
 
         self.total_irlen += irlen
         self.total_drlen += 1
 
         ir_post = self.total_irlen - ir_pre - irlen
         dr_post = self.total_drlen - dr_pre - 1
-        tap.position_set(ir_pre, dr_pre, ir_post, dr_post)
+        ctx = ChainContext(tap, ir_pre=ir_pre, dr_pre=dr_pre,
+                           ir_post=ir_post, dr_post=dr_post)
+        self._contexts[tap] = ctx
 
-        # Update existing TAPs' post values
-        for child in self.children:
-            if child is not tap:
-                if child.ir_pre < ir_pre:
-                    child.ir_post += irlen
-                    child.dr_post += 1
-                else:
-                    child.ir_pre += irlen
-                    child.dr_pre += 1
+        # Update existing taps' post values.
+        for child_tap, child_ctx in self._contexts.items():
+            if child_tap is tap:
+                continue
+            if child_ctx.ir_pre < ir_pre:
+                child_ctx.ir_post += irlen
+                child_ctx.dr_post += 1
+            else:
+                child_ctx.ir_pre += irlen
+                child_ctx.dr_pre += 1
 
         self.child_add(tap)
         return tap
+
+    # --- Bit-level translation of TapOps ---
+
+    async def flush_ops(self, batch):
+        """Translate TapOp envelopes from child Taps into bit-level ops
+        posted to the JtagInterface parent. Resolves each TapOp's
+        future once the bit-level work completes.
+        """
+        self.logger.protocol("Chain batch: %s", [top for top, _ in batch])
+
+        if self._parent is None:
+            raise RuntimeError(f"Chain {self.name!r} has no parent to forward to")
+
+        bit_futures = []
+        # Records per top whose result depends on a captured Shift.
+        # (top_op, top_future, data_future) — data_future.result().tdo
+        # supplies the TDO bits.
+        tdo_extracts = []
+        # Records per top with no TDO to extract; resolved straight after the gather.
+        # (top_op, top_future)
+        plain_resolves = []
+
+        for top, top_future in batch:
+            if not isinstance(top, TapOp):
+                exc = TypeError(f"Chain expects TapOp, got {type(top).__name__}")
+                if not top_future.done():
+                    top_future.set_exception(exc)
+                continue
+
+            tap = top.tap
+            op = top.op
+            ctx = self._contexts.get(tap)
+            if ctx is None:
+                exc = ValueError(
+                    f"Tap {tap.name!r} not registered in chain {self.name!r}")
+                if not top_future.done():
+                    top_future.set_exception(exc)
+                continue
+
+            bypass_val = (1 << tap.irlen) - 1
+
+            if isinstance(op, _TapIrStatus):
+                bit_futures.append(self._parent.post(CaptureIr()))
+                if ctx.ir_pre:
+                    bit_futures.append(self._parent.post(
+                        Shift(BitString(-1, ctx.ir_pre), read_tdo=False)))
+                data_shift = Shift(BitString(bypass_val, tap.irlen), read_tdo=True)
+                data_future = self._parent.post(data_shift)
+                bit_futures.append(data_future)
+                if ctx.ir_post:
+                    bit_futures.append(self._parent.post(
+                        Shift(BitString(-1, ctx.ir_post), read_tdo=False)))
+                self._invalidate_ir_cache_for_shift(tap, bypass_val)
+                tdo_extracts.append((op, top_future, data_future))
+
+            elif isinstance(op, _TapShift):
+                if op.ir_value is not None and op.ir_value != ctx.current_ir:
+                    ir_data = (BitString(-1, ctx.ir_pre) +
+                               BitString(op.ir_value, tap.irlen) +
+                               BitString(-1, ctx.ir_post))
+                    bit_futures.append(self._parent.post(CaptureIr()))
+                    bit_futures.append(self._parent.post(
+                        Shift(ir_data, read_tdo=False)))
+                    self._invalidate_ir_cache_for_shift(tap, op.ir_value)
+
+                if op.tdi is not None:
+                    bit_futures.append(self._parent.post(CaptureDr()))
+                    if ctx.dr_pre:
+                        bit_futures.append(self._parent.post(
+                            Shift(BitString(0, ctx.dr_pre), read_tdo=False)))
+                    data_shift = Shift(op.tdi, read_tdo=op.read_tdo)
+                    data_future = self._parent.post(data_shift)
+                    bit_futures.append(data_future)
+                    if ctx.dr_post:
+                        bit_futures.append(self._parent.post(
+                            Shift(BitString(0, ctx.dr_post), read_tdo=False)))
+                    if op.read_tdo:
+                        tdo_extracts.append((op, top_future, data_future))
+                    else:
+                        plain_resolves.append((op, top_future))
+                else:
+                    plain_resolves.append((op, top_future))
+
+            elif isinstance(op, _TapRun):
+                bit_futures.append(self._parent.post(Run(op.cycles)))
+                plain_resolves.append((op, top_future))
+
+            else:
+                exc = ValueError(f"Unknown tap op: {type(op).__name__}")
+                if not top_future.done():
+                    top_future.set_exception(exc)
+
+        if bit_futures:
+            try:
+                await asyncio.gather(*bit_futures)
+            except Exception as exc:
+                # Bit-level failure: propagate to all unresolved top futures.
+                for op, top_future, _ in tdo_extracts:
+                    if not top_future.done():
+                        top_future.set_exception(exc)
+                for op, top_future in plain_resolves:
+                    if not top_future.done():
+                        top_future.set_exception(exc)
+                raise
+
+        for op, top_future, data_future in tdo_extracts:
+            shift_op = data_future.result()
+            op.tdo = shift_op.tdo
+            if not top_future.done():
+                top_future.set_result(op)
+
+        for op, top_future in plain_resolves:
+            if not top_future.done():
+                top_future.set_result(op)
+
+    def _invalidate_ir_cache_for_shift(self, tap, new_ir):
+        """An IR shift just happened: this tap loaded `new_ir`, all
+        others were padded with all-1s and now hold BYPASS."""
+        target_ctx = self._contexts.get(tap)
+        if target_ctx is not None:
+            target_ctx.current_ir = new_ir
+        for other_tap, other_ctx in self._contexts.items():
+            if other_tap is tap:
+                continue
+            other_ctx.current_ir = (1 << other_tap.irlen) - 1
 
     async def child_spawn(self, name):
         """Delegate to single TAP when chain has exactly one device."""
@@ -615,3 +752,12 @@ class Chain(Node):
 
     def __repr__(self):
         return f"<Chain {self._name} taps={len(self._children)}>"
+
+
+@JtagInterface.db.register("chain")
+def _spawn_chain(interface):
+    """Factory invoked by JtagInterface.child_spawn('chain'). The
+    `interface` arg is the spawning JtagInterface; we don't store it
+    because Chain reaches its parent via the Node tree.
+    """
+    return Chain()

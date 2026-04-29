@@ -15,10 +15,9 @@ from acrobe.component.xilinx.kintex7 import Kintex7
 from acrobe.component.xilinx.zynq import Zynq
 from acrobe.protocol.jtag import (
     Tap, Chain, Shift, CaptureDr, CaptureIr, Reset, Run,
-    Dr, Instruction, TapInstruction,
+    Dr, Instruction, TapInstruction, JtagInterface,
 )
 from acrobe.bitstring import BitString
-from acrobe.engine import Batcher
 from acrobe.node import Node, Readable
 from acrobe.endian import swib_u16, swib_u32
 
@@ -53,11 +52,11 @@ def make_bitstream(data: bytes, **metadata) -> _Bitstream:
 
 # -- Mock Interface with IR status support --
 
-class FpgaMockInterface(Batcher):
+class FpgaMockInterface(JtagInterface):
     """Mock interface that tracks IR status bits per device."""
 
     def __init__(self, ir_status_val=0):
-        super().__init__()
+        super().__init__(name="fpga-mock")
         self.ops = []
         self.ir_status_val = ir_status_val
 
@@ -67,6 +66,15 @@ class FpgaMockInterface(Batcher):
             if isinstance(op, Shift) and op.read_tdo:
                 op.tdo = BitString(self.ir_status_val, len(op.tdi))
             future.set_result(op)
+
+
+def _attach_tap(iface, base, idcode, irlen=None):
+    """Test helper: build a single-tap chain under iface and return the tap."""
+    chain = Chain()
+    iface.child_add(chain)
+    if irlen is None:
+        irlen = base.irlen
+    return chain.tap_add(idcode, irlen=irlen, base=base)
 
 
 # -- SramFpga abstract API --
@@ -191,7 +199,7 @@ class TestConfigAccessPort:
         """send_op_wait returns True when expected bits match."""
         # done=True means bit 5 set -> ir_status value 0b100000 = 0x20
         iface = FpgaMockInterface(ir_status_val=0x20)
-        tap = Series7(iface, idcode=0x03631093)
+        tap = _attach_tap(iface, Series7, idcode=0x03631093)
         result = await tap.send_op_wait(-1, done=True)
         assert result is True
 
@@ -199,7 +207,7 @@ class TestConfigAccessPort:
     async def test_send_op_wait_failure(self):
         """send_op_wait returns False when bits never match."""
         iface = FpgaMockInterface(ir_status_val=0x00)
-        tap = Series7(iface, idcode=0x03631093)
+        tap = _attach_tap(iface, Series7, idcode=0x03631093)
         result = await tap.send_op_wait(-1, done=True)
         assert result is False
 
@@ -207,7 +215,7 @@ class TestConfigAccessPort:
     async def test_send_op_wait_with_ir_shift(self):
         """send_op_wait with a real IR value shifts that instruction first."""
         iface = FpgaMockInterface(ir_status_val=0x10)  # init=True
-        tap = Series6(iface, idcode=0x04001093)
+        tap = _attach_tap(iface, Series6, idcode=0x04001093)
         result = await tap.send_op_wait(int(tap.IR_JPROGRAM), init=True)
         assert result is True
 
@@ -235,7 +243,7 @@ class TestSeries6:
 
     def test_is_jtag_sram_fpga(self):
         iface = FpgaMockInterface()
-        tap = Series6(iface, idcode=0x04001093)
+        tap = _attach_tap(iface, Series6, idcode=0x04001093)
         assert isinstance(tap, JtagSramFpga)
         assert isinstance(tap, SramFpga)
 
@@ -243,19 +251,19 @@ class TestSeries6:
     async def test_is_configured(self):
         # done bit is bit 5 = 0x20
         iface = FpgaMockInterface(ir_status_val=0x20)
-        tap = Series6(iface, idcode=0x04001093)
+        tap = _attach_tap(iface, Series6, idcode=0x04001093)
         assert await tap.is_configured() is True
 
     @pytest.mark.asyncio
     async def test_is_not_configured(self):
         iface = FpgaMockInterface(ir_status_val=0x00)
-        tap = Series6(iface, idcode=0x04001093)
+        tap = _attach_tap(iface, Series6, idcode=0x04001093)
         assert await tap.is_configured() is False
 
     @pytest.mark.asyncio
     async def test_load_rejects_odd_length(self):
         iface = FpgaMockInterface(ir_status_val=0x30)
-        tap = Series6(iface, idcode=0x04001093)
+        tap = _attach_tap(iface, Series6, idcode=0x04001093)
         with pytest.raises(ValueError, match="Odd"):
             await tap.load(make_bitstream(b'\x00' * 11))
 
@@ -281,18 +289,18 @@ class TestSeries7:
     @pytest.mark.asyncio
     async def test_load_rejects_non_aligned(self):
         iface = FpgaMockInterface()
-        tap = Series7(iface, idcode=0x03631093)
+        tap = _attach_tap(iface, Series7, idcode=0x03631093)
         with pytest.raises(ValueError, match="not 32-bit aligned"):
             await tap.load(make_bitstream(b'\x00' * 13))
 
 
 # -- Device Registration via ChainSimulator --
 
-class ChainSimulator(Batcher):
+class ChainSimulator(JtagInterface):
     """Copy of test_jtag.ChainSimulator for FPGA device discovery tests."""
 
     def __init__(self, devices):
-        super().__init__()
+        super().__init__(name="sim")
         self.devices = devices
         self._reg_val = 0
         self._reg_len = 0
@@ -351,7 +359,7 @@ class TestDeviceRegistration:
     @pytest.mark.asyncio
     async def test_spartan6_lx9(self):
         sim = ChainSimulator([(0x04001093, 6)])
-        chain = Chain(sim)
+        chain = Chain(); sim.child_add(chain)
         await chain.discover()
         tap = chain.children[0]
         assert isinstance(tap, Spartan6)
@@ -361,7 +369,7 @@ class TestDeviceRegistration:
     @pytest.mark.asyncio
     async def test_artix7_100t(self):
         sim = ChainSimulator([(0x03631093, 6)])
-        chain = Chain(sim)
+        chain = Chain(); sim.child_add(chain)
         await chain.discover()
         tap = chain.children[0]
         assert isinstance(tap, Artix7)
@@ -371,7 +379,7 @@ class TestDeviceRegistration:
     @pytest.mark.asyncio
     async def test_spartan7_s25(self):
         sim = ChainSimulator([(0x037c4093, 6)])
-        chain = Chain(sim)
+        chain = Chain(); sim.child_add(chain)
         await chain.discover()
         tap = chain.children[0]
         assert isinstance(tap, Spartan7)
@@ -380,7 +388,7 @@ class TestDeviceRegistration:
     @pytest.mark.asyncio
     async def test_kintex7_160t(self):
         sim = ChainSimulator([(0x0364c093, 6)])
-        chain = Chain(sim)
+        chain = Chain(); sim.child_add(chain)
         await chain.discover()
         tap = chain.children[0]
         assert isinstance(tap, Kintex7)
@@ -389,7 +397,7 @@ class TestDeviceRegistration:
     @pytest.mark.asyncio
     async def test_zynq_020(self):
         sim = ChainSimulator([(0x03727093, 6)])
-        chain = Chain(sim)
+        chain = Chain(); sim.child_add(chain)
         await chain.discover()
         tap = chain.children[0]
         assert isinstance(tap, Zynq)
@@ -402,7 +410,7 @@ class TestDeviceRegistration:
             (0x04001093, 6),   # Spartan6 LX9
             (0x03631093, 6),   # Artix7 100T
         ])
-        chain = Chain(sim)
+        chain = Chain(); sim.child_add(chain)
         await chain.discover()
         assert len(chain.children) == 2
         assert isinstance(chain.children[0], Spartan6)
@@ -412,7 +420,7 @@ class TestDeviceRegistration:
     async def test_has_instructions(self):
         """Registered TAPs have expected instruction attributes."""
         iface = FpgaMockInterface()
-        tap = Artix7(iface, idcode=0x03631093)
+        tap = _attach_tap(iface, Artix7, idcode=0x03631093)
         assert isinstance(tap.BYPASS, TapInstruction)
         assert isinstance(tap.IDCODE, TapInstruction)
         assert isinstance(tap.IR_CFG_IN, TapInstruction)
@@ -421,13 +429,13 @@ class TestDeviceRegistration:
     @pytest.mark.asyncio
     async def test_user_ir_series6(self):
         iface = FpgaMockInterface()
-        tap = Spartan6(iface, idcode=0x04001093)
+        tap = _attach_tap(iface, Spartan6, idcode=0x04001093)
         assert tap.USER_IR == [0x02, 0x03, 0x1a, 0x1b]
 
     @pytest.mark.asyncio
     async def test_user_ir_series7(self):
         iface = FpgaMockInterface()
-        tap = Zynq(iface, idcode=0x03727093)
+        tap = _attach_tap(iface, Zynq, idcode=0x03727093)
         assert tap.USER_IR == [0x02, 0x03, 0x22, 0x23]
 
 
@@ -440,7 +448,7 @@ class TestSeries6LoadSequence:
         call_count = [0]
         ir_status_responses = []
 
-        class LoadMockInterface(Batcher):
+        class LoadMockInterface(JtagInterface):
             async def flush_ops(self, batch):
                 for op, future in batch:
                     if isinstance(op, Shift) and op.read_tdo:
@@ -452,7 +460,7 @@ class TestSeries6LoadSequence:
                     future.set_result(op)
 
         iface = LoadMockInterface()
-        tap = Series6(iface, idcode=0x04001093)
+        tap = _attach_tap(iface, Series6, idcode=0x04001093)
 
         # Build a minimal 16-bit-word bitstream (2 words = 4 bytes)
         await tap.load(make_bitstream(struct.pack(">2H", 0xaa99, 0x5566)))
@@ -462,7 +470,7 @@ class TestSeries6LoadSequence:
 
 # -- UserID skip tests --
 
-class UseridMockInterface(Batcher):
+class UseridMockInterface(JtagInterface):
     """Mock that returns a configurable USERCODE and tracks reload attempts."""
 
     def __init__(self, usercode, done=True):
@@ -489,7 +497,7 @@ class TestSeries6UseridSkip:
     async def test_userid_match_skips_reload(self):
         """When userid matches and FPGA is configured, load() skips reprogramming."""
         iface = UseridMockInterface(usercode=0xCAFEBABE, done=True)
-        tap = Series6(iface, idcode=0x04001093)
+        tap = _attach_tap(iface, Series6, idcode=0x04001093)
 
         bs = make_bitstream(
             struct.pack(">2H", 0xaa99, 0x5566), userid=0xCAFEBABE)
@@ -503,7 +511,7 @@ class TestSeries6UseridSkip:
         """When userid doesn't match, full reload happens."""
         call_count = [0]
 
-        class ReloadMockInterface(Batcher):
+        class ReloadMockInterface(JtagInterface):
             def __init__(self):
                 super().__init__()
                 self.shifts = []
@@ -521,7 +529,7 @@ class TestSeries6UseridSkip:
                     future.set_result(op)
 
         iface = ReloadMockInterface()
-        tap = Series6(iface, idcode=0x04001093)
+        tap = _attach_tap(iface, Series6, idcode=0x04001093)
 
         bs = make_bitstream(
             struct.pack(">2H", 0xaa99, 0x5566), userid=0xCAFEBABE)
@@ -534,7 +542,7 @@ class TestSeries6UseridSkip:
         """When program has no userid, no USERCODE read happens."""
         call_count = [0]
 
-        class NoUseridMockInterface(Batcher):
+        class NoUseridMockInterface(JtagInterface):
             def __init__(self):
                 super().__init__()
                 self.shifts = []
@@ -549,7 +557,7 @@ class TestSeries6UseridSkip:
                     future.set_result(op)
 
         iface = NoUseridMockInterface()
-        tap = Series6(iface, idcode=0x04001093)
+        tap = _attach_tap(iface, Series6, idcode=0x04001093)
 
         # No userid in metadata
         await tap.load(make_bitstream(struct.pack(">2H", 0xaa99, 0x5566)))
@@ -561,7 +569,7 @@ class TestSeries6UseridSkip:
         """UserID 0xffffffff is treated as absent."""
         call_count = [0]
 
-        class NoCheckMockInterface(Batcher):
+        class NoCheckMockInterface(JtagInterface):
             def __init__(self):
                 super().__init__()
                 self.shifts = []
@@ -576,7 +584,7 @@ class TestSeries6UseridSkip:
                     future.set_result(op)
 
         iface = NoCheckMockInterface()
-        tap = Series6(iface, idcode=0x04001093)
+        tap = _attach_tap(iface, Series6, idcode=0x04001093)
 
         bs = make_bitstream(
             struct.pack(">2H", 0xaa99, 0x5566), userid=0xffffffff)
@@ -590,7 +598,7 @@ class TestSeries7UseridSkip:
     async def test_userid_match_skips_reload(self):
         """When userid matches and FPGA is configured, load() skips reprogramming."""
         iface = UseridMockInterface(usercode=0xCAFEBABE, done=True)
-        tap = Series7(iface, idcode=0x03631093)
+        tap = _attach_tap(iface, Series7, idcode=0x03631093)
 
         bs = make_bitstream(
             struct.pack(">2L", 0xaa995566, 0x20000000), userid=0xCAFEBABE)
@@ -602,7 +610,7 @@ class TestSeries7UseridSkip:
         """When userid doesn't match, full reload happens."""
         call_count = [0]
 
-        class ReloadMockInterface(Batcher):
+        class ReloadMockInterface(JtagInterface):
             def __init__(self):
                 super().__init__()
                 self.shifts = []
@@ -620,7 +628,7 @@ class TestSeries7UseridSkip:
                     future.set_result(op)
 
         iface = ReloadMockInterface()
-        tap = Series7(iface, idcode=0x03631093)
+        tap = _attach_tap(iface, Series7, idcode=0x03631093)
 
         bs = make_bitstream(
             struct.pack(">2L", 0xaa995566, 0x20000000), userid=0xCAFEBABE)
@@ -636,7 +644,7 @@ class TestSeries7LoadSequence:
         """Test the full Series7 load sequence."""
         call_count = [0]
 
-        class LoadMockInterface(Batcher):
+        class LoadMockInterface(JtagInterface):
             async def flush_ops(self, batch):
                 for op, future in batch:
                     if isinstance(op, Shift) and op.read_tdo:
@@ -647,7 +655,7 @@ class TestSeries7LoadSequence:
                     future.set_result(op)
 
         iface = LoadMockInterface()
-        tap = Series7(iface, idcode=0x03631093)
+        tap = _attach_tap(iface, Series7, idcode=0x03631093)
 
         # Build a minimal 32-bit-word bitstream (2 words = 8 bytes)
         await tap.load(make_bitstream(

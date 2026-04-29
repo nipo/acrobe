@@ -3,19 +3,20 @@ import pytest
 from acrobe.protocol.jtag import (
     Shift, CaptureDr, CaptureIr, Reset, Run, SwdToJtag,
     Dr, Instruction, TapDr, TapInstruction, InstructionRegistry,
-    Tap, Chain, OpenChain, _DynamicInstruction, _TapShift, _TapRun,
+    Tap, Chain, ChainContext, OpenChain, _DynamicInstruction,
+    _TapShift, _TapRun, JtagInterface,
 )
 from acrobe.bitstring import BitString
-from acrobe.engine import Batcher
 
 
-# -- Mock Interface --
+# -- Mock Interfaces --
 
-class MockInterface(Batcher):
-    """Records all posted ops and resolves Shift.tdo with dummy data."""
+class MockInterface(JtagInterface):
+    """Records all bit-level ops posted to it. Resolves Shift.tdo with
+    zero data so Tap-level reads see all-zero TDO."""
 
     def __init__(self):
-        super().__init__()
+        super().__init__(name="mock")
         self.ops = []
 
     async def flush_ops(self, batch):
@@ -24,6 +25,18 @@ class MockInterface(Batcher):
             if isinstance(op, Shift) and op.read_tdo:
                 op.tdo = BitString(0, len(op.tdi))
             future.set_result(op)
+
+
+def _make_chain(iface):
+    chain = Chain()
+    iface.child_add(chain)
+    return chain
+
+
+def _make_tap(iface, base=Tap, idcode=0, irlen=4):
+    """Test helper: build chain under iface and add a single tap."""
+    chain = _make_chain(iface)
+    return chain.tap_add(idcode, irlen=irlen, base=base)
 
 
 class TestJtagOps:
@@ -40,7 +53,6 @@ class TestJtagOps:
     def test_reset_default(self):
         r = Reset()
         assert len(r.tms) >= 5
-        # All TMS bits should be 1
         assert int(r.tms) == (1 << len(r.tms)) - 1
 
     def test_reset_custom_count(self):
@@ -57,14 +69,13 @@ class TestJtagOps:
 
     def test_swd_to_jtag(self):
         s = SwdToJtag()
-        # 50 + 16 + 5 = 71 bits
         assert len(s.tms) == 71
 
 
 class TestInstructionRegistry:
     def test_dr_spawn(self):
         dr = Dr(length=32)
-        tap = Tap(MockInterface(), irlen=4)
+        tap = _make_tap(MockInterface())
         spawned = dr._spawn("TEST_DR", tap)
         assert isinstance(spawned, TapDr)
         assert spawned.length == 32
@@ -75,16 +86,14 @@ class TestInstructionRegistry:
             ID_REG = Dr(length=32)
             IDCODE = Instruction(0x0e, "ID_REG")
 
-        iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
-
+        tap = _make_tap(MockInterface(), base=MyTap)
         assert isinstance(tap.ID_REG, TapDr)
         assert isinstance(tap.IDCODE, TapInstruction)
         assert tap.IDCODE.dr is tap.ID_REG
         assert tap.IDCODE.dr.length == 32
 
     def test_bypass_always_present(self):
-        tap = Tap(MockInterface(), irlen=4)
+        tap = _make_tap(MockInterface())
         assert isinstance(tap.BYPASS, TapInstruction)
         assert isinstance(tap.BYPASS_REG, TapDr)
         assert tap.BYPASS_REG.length == 1
@@ -94,7 +103,7 @@ class TestInstructionRegistry:
             ID_REG = Dr(length=32)
             IDCODE = Instruction(0x0e, "ID_REG")
 
-        tap = MyTap(MockInterface(), irlen=4)
+        tap = _make_tap(MockInterface(), base=MyTap)
         instrs = list(tap.instructions())
         names = {i.name for i in instrs}
         assert "BYPASS" in names
@@ -104,36 +113,36 @@ class TestInstructionRegistry:
         class MyTap(Tap):
             IDCODE = Instruction(0x0e)
 
-        tap = MyTap(MockInterface(), irlen=4)
+        tap = _make_tap(MockInterface(), base=MyTap)
         assert int(tap.IDCODE) == 0x0e
 
     def test_instruction_ir_masked(self):
         class MyTap(Tap):
             WIDE = Instruction(0xff)
 
-        tap = MyTap(MockInterface(), irlen=4)
-        # 0xff masked to 4 bits = 0x0f
+        tap = _make_tap(MockInterface(), base=MyTap)
         assert int(tap.WIDE) == 0x0f
 
 
 class TestTapBasics:
     def test_tap_init(self):
-        tap = Tap(MockInterface(), idcode=0x12345678, irlen=4)
+        tap = Tap(idcode=0x12345678, irlen=4)
         assert tap.irlen == 4
         assert tap.idcode == 0x12345678
         assert "TAP" in tap.name
 
     def test_tap_init_no_idcode(self):
-        tap = Tap(MockInterface(), irlen=4, name="test")
+        tap = Tap(irlen=4, name="test")
         assert tap.name == "test"
 
-    def test_position_set(self):
-        tap = Tap(MockInterface(), irlen=4)
-        tap.position_set(3, 1, 5, 2)
-        assert tap.ir_pre == 3
-        assert tap.dr_pre == 1
-        assert tap.ir_post == 5
-        assert tap.dr_post == 2
+    def test_chain_context_geometry(self):
+        chain = Chain()
+        tap = chain.tap_add(0, irlen=4)
+        ctx = chain.context(tap)
+        assert ctx.ir_pre == 0
+        assert ctx.ir_post == 0
+        assert ctx.dr_pre == 0
+        assert ctx.dr_post == 0
 
 
 class TestTapShift:
@@ -144,10 +153,8 @@ class TestTapShift:
             ID_REG = Dr(length=32)
             IDCODE = Instruction(0x0e, "ID_REG")
 
-        iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
+        tap = _make_tap(MockInterface(), base=MyTap)
         result = await tap.IDCODE()
-        # MockInterface returns all-zero TDO
         assert result is not None
         assert isinstance(result, BitString)
         assert len(result) == 32
@@ -159,10 +166,8 @@ class TestTapShift:
             DATA_REG = Dr(length=8)
             DATA = Instruction(0x01, "DATA_REG")
 
-        iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
+        tap = _make_tap(MockInterface(), base=MyTap)
         result = await tap.DATA(0xab)
-        # read_tdo defaults to True when tdi is provided
         assert result is not None
 
     @pytest.mark.asyncio
@@ -172,14 +177,13 @@ class TestTapShift:
             DATA_REG = Dr(length=8)
             DATA = Instruction(0x01, "DATA_REG")
 
-        iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
+        tap = _make_tap(MockInterface(), base=MyTap)
         result = await tap.DATA(0xab, read_tdo=False)
         assert result is None
 
     @pytest.mark.asyncio
     async def test_ir_tracking(self):
-        """IR shift is only emitted when IR changes."""
+        """IR shift is only emitted when IR changes (across batches)."""
         class MyTap(Tap):
             REG_A = Dr(length=8)
             REG_B = Dr(length=8)
@@ -187,7 +191,7 @@ class TestTapShift:
             INST_B = Instruction(0x02, "REG_B")
 
         iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
+        tap = _make_tap(iface, base=MyTap)
 
         await tap.INST_A(0)
         capture_ir_count_1 = sum(1 for op in iface.ops if isinstance(op, CaptureIr))
@@ -211,12 +215,14 @@ class TestTapShift:
             DATA = Instruction(0x05, "DATA_REG")
 
         iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
-        tap.position_set(ir_pre=3, dr_pre=0, ir_post=5, dr_post=0)
+        chain = _make_chain(iface)
+        tap = chain.tap_add(0, irlen=4, base=MyTap)
+        ctx = chain.context(tap)
+        ctx.ir_pre = 3
+        ctx.ir_post = 5
 
         await tap.DATA(0)
 
-        # Find the IR shift: the shift immediately after CaptureIr
         ir_shift = None
         for i, op in enumerate(iface.ops):
             if isinstance(op, CaptureIr):
@@ -227,11 +233,8 @@ class TestTapShift:
 
         # Total IR length: 3 (pre) + 4 (irlen) + 5 (post) = 12 bits
         assert len(ir_shift.tdi) == 12
-        # Pre-padding is all 1s (BYPASS)
         assert int(ir_shift.tdi[:3]) == 0b111
-        # IR value (0x05 in 4 bits)
         assert int(ir_shift.tdi[3:7]) == 0x05
-        # Post-padding is all 1s (BYPASS)
         assert int(ir_shift.tdi[7:12]) == 0b11111
 
     @pytest.mark.asyncio
@@ -242,32 +245,25 @@ class TestTapShift:
             DATA = Instruction(0x01, "DATA_REG")
 
         iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
-        tap.position_set(ir_pre=0, dr_pre=2, ir_post=0, dr_post=3)
+        chain = _make_chain(iface)
+        tap = chain.tap_add(0, irlen=4, base=MyTap)
+        ctx = chain.context(tap)
+        ctx.dr_pre = 2
+        ctx.dr_post = 3
 
         await tap.DATA(0xab)
 
-        # Should have: CaptureDr, DR pre-shift (2 bits), data shift (8 bits), DR post-shift (3 bits)
         capture_dr_ops = [op for op in iface.ops if isinstance(op, CaptureDr)]
         assert len(capture_dr_ops) == 1
 
-        shift_ops = [op for op in iface.ops if isinstance(op, Shift)
-                     and not any(isinstance(prev, CaptureIr)
-                                 for prev in iface.ops[:iface.ops.index(op)]
-                                 if isinstance(prev, CaptureIr) and
-                                 iface.ops.index(prev) > max(
-                                     (iface.ops.index(o) for o in iface.ops[:iface.ops.index(op)]
-                                      if isinstance(o, CaptureDr)),
-                                     default=-1))]
-        # Simpler: count shifts after the CaptureDr
         dr_start = next(i for i, op in enumerate(iface.ops) if isinstance(op, CaptureDr))
-        dr_shifts = [op for op in iface.ops[dr_start+1:] if isinstance(op, Shift)]
+        dr_shifts = [op for op in iface.ops[dr_start + 1:] if isinstance(op, Shift)]
 
         # 3 shifts: pre (2 bits), data (8 bits), post (3 bits)
         assert len(dr_shifts) == 3
-        assert len(dr_shifts[0].tdi) == 2   # pre
-        assert len(dr_shifts[1].tdi) == 8   # data
-        assert len(dr_shifts[2].tdi) == 3   # post
+        assert len(dr_shifts[0].tdi) == 2
+        assert len(dr_shifts[1].tdi) == 8
+        assert len(dr_shifts[2].tdi) == 3
 
     @pytest.mark.asyncio
     async def test_batching(self):
@@ -277,8 +273,7 @@ class TestTapShift:
             INST_A = Instruction(0x01, "DATA_REG")
             INST_B = Instruction(0x02, "DATA_REG")
 
-        iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
+        tap = _make_tap(MockInterface(), base=MyTap)
 
         f1 = tap.INST_A(0x11)
         f2 = tap.INST_B(0x22)
@@ -290,7 +285,7 @@ class TestTapShift:
     async def test_run(self):
         """tap.run() posts a Run op to the interface."""
         iface = MockInterface()
-        tap = Tap(iface, irlen=4)
+        tap = _make_tap(iface)
         await tap.run(10)
 
         run_ops = [op for op in iface.ops if isinstance(op, Run)]
@@ -304,8 +299,7 @@ class TestTapShift:
             ID_REG = Dr(length=32, type=int)
             IDCODE = Instruction(0x0e, "ID_REG")
 
-        iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
+        tap = _make_tap(MockInterface(), base=MyTap)
         assert tap.ID_REG.type is int
         result = await tap.IDCODE()
         assert isinstance(result, BitString)
@@ -314,56 +308,54 @@ class TestTapShift:
 class TestIrStatus:
     @pytest.mark.asyncio
     async def test_ir_status_returns_bitstring(self):
-        """ir_status() returns a BitString of irlen bits."""
-        iface = MockInterface()
-        tap = Tap(iface, irlen=6)
+        tap = _make_tap(MockInterface(), irlen=6)
         result = await tap.ir_status()
         assert isinstance(result, BitString)
         assert len(result) == 6
 
     @pytest.mark.asyncio
     async def test_ir_status_emits_capture_ir(self):
-        """ir_status() emits CaptureIr."""
         iface = MockInterface()
-        tap = Tap(iface, irlen=6)
+        tap = _make_tap(iface, irlen=6)
         await tap.ir_status()
         assert any(isinstance(op, CaptureIr) for op in iface.ops)
 
     @pytest.mark.asyncio
     async def test_ir_status_shifts_bypass(self):
-        """ir_status() shifts BYPASS (all 1s) into IR."""
         iface = MockInterface()
-        tap = Tap(iface, irlen=6)
+        tap = _make_tap(iface, irlen=6)
         await tap.ir_status()
         shifts = [op for op in iface.ops if isinstance(op, Shift)]
-        # Single shift with read_tdo=True, all-ones BYPASS
         assert len(shifts) == 1
         assert shifts[0].read_tdo is True
         assert int(shifts[0].tdi) == 0x3f  # 6 bits all ones
 
     @pytest.mark.asyncio
     async def test_ir_status_updates_current_ir(self):
-        """After ir_status(), _current_ir is BYPASS (all 1s)."""
+        """After ir_status(), the tap's cached IR is BYPASS (all 1s)."""
         class MyTap(Tap):
             DATA_REG = Dr(length=8)
             DATA = Instruction(0x05, "DATA_REG")
 
         iface = MockInterface()
-        tap = MyTap(iface, irlen=6)
-        # Set IR to something first
+        chain = _make_chain(iface)
+        tap = chain.tap_add(0, irlen=6, base=MyTap)
+
         await tap.DATA(0)
-        assert tap._current_ir == 0x05
+        assert chain.context(tap).current_ir == 0x05
 
         iface.ops.clear()
         await tap.ir_status()
-        assert tap._current_ir == 0x3f  # all ones, BYPASS
+        assert chain.context(tap).current_ir == 0x3f  # all ones, BYPASS
 
     @pytest.mark.asyncio
     async def test_ir_status_with_chain_padding(self):
-        """ir_status() emits pre/post padding shifts with read_tdo=False."""
         iface = MockInterface()
-        tap = Tap(iface, irlen=6)
-        tap.position_set(ir_pre=4, dr_pre=1, ir_post=5, dr_post=1)
+        chain = _make_chain(iface)
+        tap = chain.tap_add(0, irlen=6)
+        ctx = chain.context(tap)
+        ctx.ir_pre = 4
+        ctx.ir_post = 5
 
         await tap.ir_status()
         shifts = [op for op in iface.ops if isinstance(op, Shift)]
@@ -371,20 +363,18 @@ class TestIrStatus:
         assert len(shifts) == 3
         assert len(shifts[0].tdi) == 4
         assert shifts[0].read_tdo is False
-        assert int(shifts[0].tdi) == 0xf  # all 1s
+        assert int(shifts[0].tdi) == 0xf
         assert len(shifts[1].tdi) == 6
         assert shifts[1].read_tdo is True
-        assert int(shifts[1].tdi) == 0x3f  # BYPASS
+        assert int(shifts[1].tdi) == 0x3f
         assert len(shifts[2].tdi) == 5
         assert shifts[2].read_tdo is False
-        assert int(shifts[2].tdi) == 0x1f  # all 1s
+        assert int(shifts[2].tdi) == 0x1f
 
     @pytest.mark.asyncio
     async def test_ir_status_no_padding_when_zero(self):
-        """ir_status() with no pre/post emits only one data shift."""
         iface = MockInterface()
-        tap = Tap(iface, irlen=4)
-        # default: ir_pre=0, ir_post=0
+        tap = _make_tap(iface, irlen=4)
         await tap.ir_status()
         shifts = [op for op in iface.ops if isinstance(op, Shift)]
         assert len(shifts) == 1
@@ -394,9 +384,7 @@ class TestIrStatus:
 class TestDynamicInstruction:
     @pytest.mark.asyncio
     async def test_dynamic_read(self):
-        """tap.ir(value, length) creates a readable dynamic instruction."""
-        iface = MockInterface()
-        tap = Tap(iface, irlen=4)
+        tap = _make_tap(MockInterface())
         dyn = tap.ir(0x05, dr_length=32)
         result = await dyn()
         assert result is not None
@@ -404,85 +392,72 @@ class TestDynamicInstruction:
 
     @pytest.mark.asyncio
     async def test_dynamic_write(self):
-        """Dynamic instruction with tdi."""
-        iface = MockInterface()
-        tap = Tap(iface, irlen=4)
+        tap = _make_tap(MockInterface())
         dyn = tap.ir(0x05, dr_length=8)
         result = await dyn(0xab)
         assert result is not None
 
     @pytest.mark.asyncio
     async def test_dynamic_write_bitstring(self):
-        """Dynamic instruction with BitString tdi."""
-        iface = MockInterface()
-        tap = Tap(iface, irlen=4)
+        tap = _make_tap(MockInterface())
         dyn = tap.ir(0x05)
         result = await dyn(BitString(0xab, 8))
         assert result is not None
 
     def test_dynamic_no_length_int_raises(self):
-        """Dynamic instruction without length can't determine shift from int."""
-        iface = MockInterface()
-        tap = Tap(iface, irlen=4)
+        tap = _make_tap(MockInterface())
         dyn = tap.ir(0x05)
         with pytest.raises(ValueError, match="Cannot determine"):
             dyn(42)
 
     def test_dynamic_ir_masked(self):
-        """Dynamic instruction IR value is masked to irlen."""
-        iface = MockInterface()
-        tap = Tap(iface, irlen=4)
+        tap = _make_tap(MockInterface())
         dyn = tap.ir(0xff)
         assert dyn._ir_value == 0x0f
 
     def test_dynamic_repr(self):
-        iface = MockInterface()
-        tap = Tap(iface, irlen=4)
+        tap = _make_tap(MockInterface())
         dyn = tap.ir(0x05)
         assert "DynamicInstruction" in repr(dyn)
 
 
 class TestChain:
     def test_single_tap(self):
-        iface = MockInterface()
-        chain = Chain(iface)
+        chain = Chain()
         tap = chain.tap_add(0x12345678, irlen=4)
 
         assert isinstance(tap, Tap)
         assert tap.irlen == 4
-        assert tap.ir_pre == 0
-        assert tap.ir_post == 0
-        assert tap.dr_pre == 0
-        assert tap.dr_post == 0
+        ctx = chain.context(tap)
+        assert ctx.ir_pre == 0
+        assert ctx.ir_post == 0
+        assert ctx.dr_pre == 0
+        assert ctx.dr_post == 0
         assert chain.total_irlen == 4
         assert chain.total_drlen == 1
 
     def test_two_taps(self):
-        iface = MockInterface()
-        chain = Chain(iface)
-
+        chain = Chain()
         tap1 = chain.tap_add(0x11111111, irlen=4)
         tap2 = chain.tap_add(0x22222222, irlen=5)
 
         assert chain.total_irlen == 9
         assert chain.total_drlen == 2
 
-        # tap1 was added first (position 0)
-        assert tap1.ir_pre == 0
-        assert tap1.ir_post == 5  # tap2's irlen
-        assert tap1.dr_pre == 0
-        assert tap1.dr_post == 1
+        c1 = chain.context(tap1)
+        c2 = chain.context(tap2)
+        assert c1.ir_pre == 0
+        assert c1.ir_post == 5
+        assert c1.dr_pre == 0
+        assert c1.dr_post == 1
 
-        # tap2 was added second (position 1)
-        assert tap2.ir_pre == 4  # tap1's irlen
-        assert tap2.ir_post == 0
-        assert tap2.dr_pre == 1
-        assert tap2.dr_post == 0
+        assert c2.ir_pre == 4
+        assert c2.ir_post == 0
+        assert c2.dr_pre == 1
+        assert c2.dr_post == 0
 
     def test_three_taps(self):
-        iface = MockInterface()
-        chain = Chain(iface)
-
+        chain = Chain()
         tap1 = chain.tap_add(0x11111111, irlen=4)
         tap2 = chain.tap_add(0x22222222, irlen=5)
         tap3 = chain.tap_add(0x33333333, irlen=6)
@@ -490,27 +465,24 @@ class TestChain:
         assert chain.total_irlen == 15
         assert chain.total_drlen == 3
 
-        # tap1: first in chain
-        assert tap1.ir_pre == 0
-        assert tap1.ir_post == 11  # 5 + 6
-        assert tap1.dr_pre == 0
-        assert tap1.dr_post == 2
+        c1, c2, c3 = chain.context(tap1), chain.context(tap2), chain.context(tap3)
+        assert c1.ir_pre == 0
+        assert c1.ir_post == 11
+        assert c1.dr_pre == 0
+        assert c1.dr_post == 2
 
-        # tap2: middle
-        assert tap2.ir_pre == 4
-        assert tap2.ir_post == 6
-        assert tap2.dr_pre == 1
-        assert tap2.dr_post == 1
+        assert c2.ir_pre == 4
+        assert c2.ir_post == 6
+        assert c2.dr_pre == 1
+        assert c2.dr_post == 1
 
-        # tap3: last
-        assert tap3.ir_pre == 9  # 4 + 5
-        assert tap3.ir_post == 0
-        assert tap3.dr_pre == 2
-        assert tap3.dr_post == 0
+        assert c3.ir_pre == 9
+        assert c3.ir_post == 0
+        assert c3.dr_pre == 2
+        assert c3.dr_post == 0
 
     def test_tap_is_child(self):
-        iface = MockInterface()
-        chain = Chain(iface)
+        chain = Chain()
         tap = chain.tap_add(0x12345678, irlen=4)
         assert tap in chain.children
 
@@ -522,57 +494,48 @@ class TestChain:
 
         Tap.db.register(0xdeadbeef)(SpecialTap)
         try:
-            iface = MockInterface()
-            chain = Chain(iface)
+            chain = Chain()
             tap = chain.tap_add(0xdeadbeef, irlen=4)
             assert isinstance(tap, SpecialTap)
             assert isinstance(tap.IDCODE, TapInstruction)
         finally:
-            # Clean up registration
             Tap.db._registry.clear()
 
     def test_repr(self):
-        iface = MockInterface()
-        chain = Chain(iface)
+        chain = Chain()
         assert "Chain" in repr(chain)
 
 
 class TestErrorCases:
     def test_read_no_dr_length(self):
-        """Instruction with no DR length can't determine read size."""
         class MyTap(Tap):
             NO_DR = Instruction(0x01)
 
-        iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
+        tap = _make_tap(MockInterface(), base=MyTap)
         with pytest.raises(ValueError, match="Cannot determine"):
             tap.NO_DR(read_tdo=True)
 
     def test_write_int_no_dr_length(self):
-        """Can't write int without knowing DR length."""
         class MyTap(Tap):
             NO_DR = Instruction(0x01)
 
-        iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
+        tap = _make_tap(MockInterface(), base=MyTap)
         with pytest.raises(ValueError, match="Cannot determine"):
             tap.NO_DR(42)
 
     def test_write_bad_type(self):
-        """tdi must be int, BitString, or None."""
         class MyTap(Tap):
             DATA_REG = Dr(length=8)
             DATA = Instruction(0x01, "DATA_REG")
 
-        iface = MockInterface()
-        tap = MyTap(iface, irlen=4)
+        tap = _make_tap(MockInterface(), base=MyTap)
         with pytest.raises(TypeError, match="tdi must be"):
             tap.DATA("bad")
 
     @pytest.mark.asyncio
     async def test_interface_error_propagates(self):
         """Errors from the interface propagate to Tap futures."""
-        class FailInterface(Batcher):
+        class FailInterface(JtagInterface):
             async def flush_ops(self, batch):
                 raise IOError("USB error")
 
@@ -580,14 +543,14 @@ class TestErrorCases:
             DATA_REG = Dr(length=8)
             DATA = Instruction(0x01, "DATA_REG")
 
-        tap = MyTap(FailInterface(), irlen=4)
+        tap = _make_tap(FailInterface(), base=MyTap)
         with pytest.raises(IOError, match="USB error"):
             await tap.DATA(0)
 
 
 # -- Chain Discover --
 
-class ChainSimulator(Batcher):
+class ChainSimulator(JtagInterface):
     """Simulates a JTAG chain for testing Chain.discover().
 
     Models a chain of devices with known IDCODEs and IR lengths.
@@ -596,10 +559,7 @@ class ChainSimulator(Batcher):
     """
 
     def __init__(self, devices):
-        """Args:
-            devices: list of (idcode, irlen) tuples.
-        """
-        super().__init__()
+        super().__init__(name="sim")
         self.devices = devices
         self._reg_val = 0
         self._reg_len = 0
@@ -658,7 +618,7 @@ class TestChainDiscover:
     @pytest.mark.asyncio
     async def test_single_device(self):
         sim = ChainSimulator([(0x24001093, 6)])
-        chain = Chain(sim)
+        chain = _make_chain(sim)
         await chain.discover()
 
         assert len(chain.children) == 1
@@ -669,7 +629,7 @@ class TestChainDiscover:
     @pytest.mark.asyncio
     async def test_two_devices(self):
         sim = ChainSimulator([(0x24001093, 6), (0x0ba00477, 4)])
-        chain = Chain(sim)
+        chain = _make_chain(sim)
         await chain.discover()
 
         assert len(chain.children) == 2
@@ -685,7 +645,7 @@ class TestChainDiscover:
             (0x22222223, 5),
             (0x33333333, 6),
         ])
-        chain = Chain(sim)
+        chain = _make_chain(sim)
         await chain.discover()
 
         assert len(chain.children) == 3
@@ -696,23 +656,24 @@ class TestChainDiscover:
     @pytest.mark.asyncio
     async def test_chain_geometry(self):
         sim = ChainSimulator([(0x11111111, 4), (0x22222223, 5)])
-        chain = Chain(sim)
+        chain = _make_chain(sim)
         await chain.discover()
 
         tap0, tap1 = chain.children
-        assert tap0.ir_pre == 0
-        assert tap0.ir_post == 5
-        assert tap0.dr_pre == 0
-        assert tap0.dr_post == 1
-        assert tap1.ir_pre == 4
-        assert tap1.ir_post == 0
-        assert tap1.dr_pre == 1
-        assert tap1.dr_post == 0
+        c0, c1 = chain.context(tap0), chain.context(tap1)
+        assert c0.ir_pre == 0
+        assert c0.ir_post == 5
+        assert c0.dr_pre == 0
+        assert c0.dr_post == 1
+        assert c1.ir_pre == 4
+        assert c1.ir_post == 0
+        assert c1.dr_pre == 1
+        assert c1.dr_post == 0
 
     @pytest.mark.asyncio
     async def test_unknown_device_generic_tap(self):
         sim = ChainSimulator([(0xdeadbeef, 5)])
-        chain = Chain(sim)
+        chain = _make_chain(sim)
         await chain.discover()
 
         tap = chain.children[0]
@@ -728,7 +689,7 @@ class TestChainDiscover:
         Tap.db.register(0xaabbccdd)(KnownTap)
         try:
             sim = ChainSimulator([(0xaabbccdd, 4)])
-            chain = Chain(sim)
+            chain = _make_chain(sim)
             await chain.discover()
             assert isinstance(chain.children[0], KnownTap)
         finally:
@@ -736,26 +697,32 @@ class TestChainDiscover:
 
     @pytest.mark.asyncio
     async def test_open_chain_stuck_low(self):
-        class StuckLow(Batcher):
+        class StuckLow(JtagInterface):
+            def __init__(self):
+                super().__init__(name="stuck-low")
+
             async def flush_ops(self, batch):
                 for op, future in batch:
                     if isinstance(op, Shift) and op.read_tdo:
                         op.tdo = BitString(0, len(op.tdi))
                     future.set_result(op)
 
-        chain = Chain(StuckLow())
+        chain = _make_chain(StuckLow())
         with pytest.raises(OpenChain, match="stuck low"):
             await chain.discover()
 
     @pytest.mark.asyncio
     async def test_open_chain_stuck_high(self):
-        class StuckHigh(Batcher):
+        class StuckHigh(JtagInterface):
+            def __init__(self):
+                super().__init__(name="stuck-high")
+
             async def flush_ops(self, batch):
                 for op, future in batch:
                     if isinstance(op, Shift) and op.read_tdo:
                         op.tdo = BitString(-1, len(op.tdi))
                     future.set_result(op)
 
-        chain = Chain(StuckHigh())
+        chain = _make_chain(StuckHigh())
         with pytest.raises(OpenChain, match="stuck high"):
             await chain.discover()

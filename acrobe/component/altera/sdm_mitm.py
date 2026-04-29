@@ -15,7 +15,6 @@ import sys
 
 from ...node import Node
 from ...db import NoMatch
-from ...engine import Batcher
 from ...protocol.jtag import CaptureIr, CaptureDr, Shift, Run, Reset, JtagInterface
 from .agilex5 import Agilex5
 from .sdm_jtag import SdmJtag
@@ -58,7 +57,7 @@ def _format_sdm_word(word, framing):
     return f"DATA {word:#010x} frame={framing:#04b}"
 
 @JtagInterface.db.register("sdm-mitm")
-class SdmMitm(JtagInterface, Batcher):
+class SdmMitm(JtagInterface):
     """MITM wrapper around a JTAG interface for SDM protocol analysis.
 
     Forwards all JTAG operations to the underlying interface while
@@ -66,8 +65,7 @@ class SdmMitm(JtagInterface, Batcher):
     """
 
     def __init__(self, interface, ir_width=10):
-        JtagInterface.__init__(self, "sdm-mitm")
-        Batcher.__init__(self)
+        super().__init__(name="sdm-mitm")
         self._interface = interface
         self._ir_width = ir_width
         self._current_ir = (1 << ir_width) - 1

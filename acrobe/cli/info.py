@@ -56,8 +56,6 @@ async def adapters():
 @click.option('-r', '--root', 'root_path', required=True,
               help="Component path (e.g. proby-9/jtag)")
 async def enumerate(root_path):
-    from ..protocol.jtag import Chain
-
     parts = root_path.strip("/").split("/")
     hw_root = _make_hw_root()
 
@@ -70,20 +68,6 @@ async def enumerate(root_path):
 
     click.echo("Node tree:")
     component_dump(leaf, "  ")
-
-    # If leaf is a raw JTAG interface (Batcher but not Component), discover chain
-    if hasattr(leaf, 'post') and not isinstance(leaf, Node):
-        chain = Chain(leaf)
-        click.echo("\nDiscovering JTAG chain...")
-        await chain.discover()
-        click.echo(f"Found {len(chain.children)} device(s):")
-        for tap in chain.children:
-            click.echo(
-                f"  {tap.name}  "
-                f"IDCODE=0x{tap.idcode:08x}  "
-                f"irlen={tap.irlen}  "
-                f"({type(tap).__name__})"
-            )
 
 
 @info.command(help="List loaded plugins")

@@ -13,6 +13,6 @@ _PARTS = {
 
 @Tap.db.register(*_PARTS.keys())
 class Spartan7(Series7):
-    def __init__(self, interface, idcode, **kw):
+    def __init__(self, idcode, **kw):
         name = "Spartan7-" + _PARTS.get(idcode, f"0x{idcode:08x}")
-        super().__init__(interface, idcode, name=name, **kw)
+        super().__init__(idcode=idcode, name=name, **kw)

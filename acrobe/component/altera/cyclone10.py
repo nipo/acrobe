@@ -117,6 +117,6 @@ _PARTS = {
 
 @Tap.db.register(*_PARTS.keys())
 class Cyclone10Lp(Cyclone10):
-    def __init__(self, interface, idcode, **kw):
+    def __init__(self, idcode, **kw):
         name = _PARTS.get(idcode, f"Cyclone10-0x{idcode:08x}")
-        super().__init__(interface, idcode, name=name, **kw)
+        super().__init__(idcode=idcode, name=name, **kw)
