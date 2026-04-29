@@ -1,41 +1,233 @@
-"""`acrobe loadable` — convert and inspect a single resource.
+"""`acrobe loadable` — VFS resource browsing and conversion.
 
-Each command takes one resource path. Multi-source aggregation
-(merging multiple files) is deferred — see docs/vfs-plan.md.
+Each command takes one resource path. Paths are filesystem prefix +
+optional VFS sub-children (e.g. ``file.sof/bootloader``). See
+``docs/vfs-design.md``.
+
+Subcommands:
+
+- ``info``    — class, mixins, addresses, metadata, children, memory map.
+- ``ls``      — list pre-populated children at a path.
+- ``tree``    — recursive ``ls`` with box-drawing.
+- ``cp``      — copy bytes from a Readable node to a file (``-`` for stdout).
+- ``hexdump`` — formatted hex dump (whole memory map, or a Readable subset
+  via ``--offset/--size``).
+- ``to-bin``, ``to-hex``, ``to-c-blob``, ``to-vhdl-blob`` — converters
+  driven by the resource's MemoryMap.
 """
 
+import os
 import re
+import sys
+
 import asyncclick as click
 
 from . import base
+from ..node import Node, Readable, Addressable, Writable
+from ..vfs import FsRoot
 from ..memory_map import save_bin, save_hex
 
 
-@base.cli.group(help="Loadable manipulation (single-resource)")
+# --- Path resolution helpers (also used by base.ResourceRef) ---
+
+def _split_path(path):
+    """Split a VFS path into (root_dir, parts).
+
+    Heuristic: take the longest filesystem-existing prefix as the
+    FsRoot, then split the rest as VFS path components. ``root_dir``
+    is "" (cwd) or an absolute filesystem path / directory prefix.
+    """
+    norm = path.rstrip("/")
+    parts = norm.split("/")
+    root_parts = []
+    rest_parts = list(parts)
+    while rest_parts:
+        candidate = "/".join(root_parts + [rest_parts[0]]) if root_parts else rest_parts[0]
+        if not candidate:
+            rest_parts.pop(0)
+            root_parts.append("")
+            continue
+        if os.path.exists(candidate) or (
+                candidate.startswith("/") and os.path.isdir(
+                    "/".join(root_parts + [rest_parts[0]]))):
+            root_parts.append(rest_parts.pop(0))
+        else:
+            break
+    if root_parts:
+        root_dir = "/".join(root_parts)
+        if not os.path.isdir(root_dir):
+            parent = os.path.dirname(root_dir) or "."
+            base_name = os.path.basename(root_dir)
+            return parent, [base_name] + rest_parts
+        return root_dir, rest_parts
+    return ".", parts
+
+
+async def _summon(path):
+    root_dir, parts = _split_path(path)
+    root = FsRoot(root_dir)
+    await root.start_tree()
+    if not parts:
+        return root
+    return await root.child_summon(*parts)
+
+
+def _mixin_tag(node):
+    tags = []
+    if isinstance(node, Readable):
+        tags.append("R")
+    if isinstance(node, Writable):
+        tags.append("W")
+    if isinstance(node, Addressable):
+        tags.append("A")
+    return "".join(tags) or "-"
+
+
+def _format_long(node):
+    parts = [_mixin_tag(node)]
+    if isinstance(node, Readable):
+        parts.append(f"size={node.size}")
+    if isinstance(node, Addressable):
+        parts.append(f"@0x{node.load_address:x}")
+    parts.append(node.name)
+    return "  ".join(parts)
+
+
+# --- Group ---
+
+@base.cli.group(help="Resource browsing and conversion")
 async def loadable():
     pass
 
 
-@loadable.command(help="Dump file parsing results")
+# --- Inspection ---
+
+@loadable.command(help="Show metadata, children and memory map for a node")
 @click.argument("resource", type=base.RESOURCE)
-async def dump(resource):
-    m = await resource.memory_map()
-    p = m.simplified()
-    click.echo("MemoryMap:")
-    for k, v in sorted(p.info.items()):
-        click.echo(f"  {k}: {v}")
-    for addr, data in p:
-        click.echo(f"  <0x{addr:08x}:0x{addr + len(data):08x} ({len(data)} bytes)>")
+async def info(resource):
+    node = await resource.resolve()
+
+    click.echo(f"Path:    {node.path}")
+    click.echo(f"Class:   {type(node).__name__}")
+    click.echo(f"Mixins:  {_mixin_tag(node)}")
+    if isinstance(node, Readable):
+        click.echo(f"Size:    {node.size}")
+    if isinstance(node, Addressable):
+        click.echo(f"Address: 0x{node.load_address:x}")
+        for k, v in node.addresses.items():
+            if k == "load":
+                continue
+            click.echo(f"  {k}: 0x{v:x}")
+    md = node.metadata
+    if md:
+        click.echo("Metadata:")
+        for k, v in md.items():
+            click.echo(f"  {k}: {v!r}")
+    if node.children:
+        click.echo(f"Children ({len(node.children)}):")
+        for c in node.children:
+            click.echo(f"  {c.name}  [{_mixin_tag(c)}]")
+
+    m = (await resource.memory_map()).simplified()
+    if m.chunks:
+        click.echo("MemoryMap:")
+        for addr, data in m:
+            click.echo(
+                f"  <0x{addr:08x}:0x{addr + len(data):08x} "
+                f"({len(data)} bytes)>")
 
 
-@loadable.command(help="Hex dump image")
+@loadable.command(help="List children at a path")
 @click.argument("resource", type=base.RESOURCE)
-async def hexdump(resource):
+@click.option("-l", "long_format", is_flag=True,
+              help="Long format: mixin tags, size, load_address")
+@click.option("-r", "recursive", is_flag=True,
+              help="Recurse into children")
+@click.option("--depth", type=int, default=None,
+              help="Max recursion depth (with -r)")
+async def ls(resource, long_format, recursive, depth):
+    node = await resource.resolve()
+
+    def _walk(n, indent=0, current_depth=0):
+        for c in n.children:
+            line = _format_long(c) if long_format else c.name
+            click.echo(" " * indent + line)
+            if recursive and (depth is None or current_depth < depth - 1):
+                _walk(c, indent + 2, current_depth + 1)
+
+    _walk(node)
+
+
+@loadable.command(help="Recursive listing with box-drawing")
+@click.argument("resource", type=base.RESOURCE)
+@click.option("--depth", type=int, default=None, help="Max recursion depth")
+async def tree(resource, depth):
+    node = await resource.resolve()
+
+    def _walk(n, prefix="", current_depth=0):
+        kids = n.children
+        for i, c in enumerate(kids):
+            last = (i == len(kids) - 1)
+            connector = "└── " if last else "├── "
+            click.echo(prefix + connector + c.name + f"  [{_mixin_tag(c)}]")
+            if depth is None or current_depth < depth - 1:
+                ext = "    " if last else "│   "
+                _walk(c, prefix + ext, current_depth + 1)
+
+    click.echo(node.path)
+    _walk(node)
+
+
+@loadable.command(help="Copy bytes from a Readable node to a file")
+@click.argument("resource", type=base.RESOURCE)
+@click.argument("dst", default="-")
+@click.option("--offset", type=str, default="0",
+              help="Byte offset within source (decimal or 0x...)")
+@click.option("--size", type=str, default=None,
+              help="Bytes to copy (default: rest of source)")
+async def cp(resource, dst, offset, size):
+    node = await resource.resolve()
+    if not isinstance(node, Readable):
+        raise click.ClickException(
+            f"{resource.path}: node {type(node).__name__} is not Readable")
+    off = int(offset, 0)
+    n = node.size - off if size is None else int(size, 0)
+    data = await node.read(off, n)
+    if dst == "-":
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+    else:
+        with open(dst, "wb") as f:
+            f.write(data)
+        click.echo(f"Wrote {len(data)} bytes to {dst}", err=True)
+
+
+@loadable.command(help="Hex dump")
+@click.argument("resource", type=base.RESOURCE)
+@click.option("--offset", type=str, default=None,
+              help="Byte offset within source (decimal or 0x...)")
+@click.option("--size", type=str, default=None,
+              help="Bytes to dump (default: full)")
+async def hexdump(resource, offset, size):
     from ..util.hexdump import hexdump as do_hexdump
-    m = await resource.memory_map()
-    for addr, data in m:
-        do_hexdump(addr, data, printer=click.echo)
+    if offset is not None or size is not None:
+        # Single-Readable subset.
+        node = await resource.resolve()
+        if not isinstance(node, Readable):
+            raise click.ClickException(
+                f"{resource.path}: node {type(node).__name__} is not Readable")
+        off = int(offset or "0", 0)
+        n = int(size, 0) if size is not None else node.size - off
+        data = await node.read(off, n)
+        base_addr = node.load_address if isinstance(node, Addressable) else 0
+        do_hexdump(base_addr + off, data, printer=click.echo)
+    else:
+        m = await resource.memory_map()
+        for addr, data in m:
+            do_hexdump(addr, data, printer=click.echo)
 
+
+# --- Converters ---
 
 @loadable.command(name="to-bin", help="Convert resource to binary")
 @click.argument("resource", type=base.RESOURCE)
@@ -79,8 +271,7 @@ async def to_c_blob(resource, output, name, align, section, size,
                     static, extern):
     m = (await resource.memory_map()).simplified()
     if len(m) > 1:
-        raise click.ClickException(
-            "MemoryMap has more than one chunk")
+        raise click.ClickException("MemoryMap has more than one chunk")
     if len(m) == 0:
         raise click.ClickException("MemoryMap is empty")
     data = m[0][1]

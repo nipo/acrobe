@@ -64,7 +64,7 @@ class ResourceRef:
     async def resolve(self):
         """Walk the VFS and return the started leaf Node."""
         if self._node is None:
-            from .resource import _summon
+            from .loadable import _summon
             self._node = await _summon(self.path)
         return self._node
 
