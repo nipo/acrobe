@@ -50,6 +50,7 @@ class SofSection(enum.IntEnum):
     CHECKSUM = 0x15
     BOOT_INFO = 0x1a
     EMBEDDED = 0x24
+    BOOTLOADER_DATA = 0x3e  # HPS bootloader payload (Agilex+HPS designs)
 
 
 # --- Helpers ---
@@ -72,6 +73,91 @@ def _parse_sections(blob: bytes):
 
 def _decode_string(data: bytes) -> str:
     return data.rstrip(b"\x00").decode("ascii", errors="replace")
+
+
+def _decode_bootloader_data(section: bytes) -> bytes:
+    """Decode a SOF Bootloader Data section (tag 0x3e) to its original
+    payload bytes (typically the contents of an ihex file passed to
+    Quartus' `quartus_pfg -c X.sof Y.sof -o hps_path=Z.hex`).
+
+    Empirically reverse-engineered against quartus_pfg output; matches
+    the original ihex byte-for-byte.
+
+    Section layout
+    --------------
+    - 16-byte file-level header (opaque metadata).
+    - One or more blocks holding the payload. Each pair of consecutive
+      bytes encodes one payload byte: one of the two bytes is the
+      constant marker 0x11, the other is the data byte. Which slot
+      holds the data alternates per block; the parity is detected from
+      the first two words of the block.
+    - Block 0's first decoded byte is a 0x00 sentinel (stripped here).
+      To accommodate the sentinel, block 0 carries one extra payload
+      byte as a lone byte (no marker) right before the first
+      sub-header.
+    - 11-byte sub-header between blocks, signature
+      ``34 12 00 00 NN 00 12`` followed by a u32-LE giving the next
+      block's decoded-byte size. NN is a 1-based block index.
+    - Last block runs to the end of the section.
+    """
+    if len(section) < 16:
+        raise ValueError("bootloader-data section too short for 16-byte header")
+    body = section[16:]
+
+    # Locate sub-headers by signature.
+    sub_positions = []
+    i = 0
+    while i + 11 <= len(body):
+        if (body[i:i + 4] == b"\x34\x12\x00\x00"
+                and body[i + 5] == 0x00
+                and body[i + 6] == 0x12):
+            sub_positions.append(i)
+            i += 11
+        else:
+            i += 1
+
+    def detect_parity(off: int) -> int:
+        """Return 1 if data is at low byte (marker at high), 0 otherwise.
+        Uses two consecutive words at `off`."""
+        if off + 4 > len(body):
+            raise ValueError(f"can't detect parity at body[{off:#x}]: short")
+        a0, b0 = body[off], body[off + 1]
+        a1, b1 = body[off + 2], body[off + 3]
+        if b0 == 0x11 and b1 == 0x11:
+            return 1
+        if a0 == 0x11 and a1 == 0x11:
+            return 0
+        raise ValueError(f"can't detect parity at body[{off:#x}]")
+
+    out = bytearray()
+
+    def decode_words(start: int, end: int, parity: int) -> None:
+        for j in range(start, end - 1, 2):
+            a, b = body[j], body[j + 1]
+            if parity == 1 and b == 0x11:
+                out.append(a)
+            elif parity == 0 and a == 0x11:
+                out.append(b)
+            else:
+                raise ValueError(
+                    f"bootloader data: bad pair at body[{j:#x}]: "
+                    f"{a:#04x} {b:#04x} (parity {parity})")
+
+    cursor = 0
+    for idx, sub_pos in enumerate(sub_positions):
+        parity = detect_parity(cursor)
+        if idx == 0:
+            decode_words(cursor, sub_pos - 1, parity)
+            out.append(body[sub_pos - 1])  # lone byte (only after block 0)
+        else:
+            decode_words(cursor, sub_pos, parity)
+        cursor = sub_pos + 11
+    if cursor < len(body):
+        parity = detect_parity(cursor)
+        decode_words(cursor, len(body), parity)
+
+    # Drop the leading sentinel byte added by the encoder.
+    return bytes(out[1:])
 
 
 def _parse_boot_info(data: bytes):
@@ -285,6 +371,31 @@ class SofConfigData(Node, Readable):
         return await self._source.read(self._offset + offset, n)
 
 
+class SofBootloaderData(Node, Readable):
+    """Decoded HPS bootloader payload from a SOF Bootloader Data section.
+
+    Backed by an in-memory bytes buffer holding the framing-stripped
+    payload. The bytes match the original ihex input that was inserted
+    via ``quartus_pfg -c X.sof Y.sof -o hps_path=Z.hex``.
+    """
+
+    def __init__(self, name, data: bytes):
+        super().__init__(name)
+        self._data = data
+
+    @property
+    def size(self) -> int:
+        return len(self._data)
+
+    async def read(self, offset, size):
+        if offset < 0 or offset > len(self._data):
+            raise ValueError(f"offset {offset} out of range")
+        n = min(size, len(self._data) - offset)
+        if n <= 0:
+            return b""
+        return self._data[offset:offset + n]
+
+
 @register_format("altera_sof",
                  exts=["sof"],
                  mimes=["application/x-altera-sof"])
@@ -323,6 +434,7 @@ class Sof(FormatNode):
         idx = 12
         config_offset = None
         config_size = None
+        bootloader_bytes = None
         for tag, flags, data in _parse_sections(blob):
             if tag == SofSection.CONFIG_DATA:
                 config_offset = idx + 6
@@ -335,10 +447,11 @@ class Sof(FormatNode):
                 self.design = _decode_string(data)
             elif tag == SofSection.METADATA and len(data) >= 16:
                 self.usercode = struct.unpack_from("<I", data, 12)[0]
+            elif tag == SofSection.BOOTLOADER_DATA:
+                # Reconstruct the original bootloader payload (matches
+                # the ihex passed to `quartus_pfg -o hps_path=...`).
+                bootloader_bytes = _decode_bootloader_data(data)
             idx += 6 + len(data)
-
-        if config_offset is None:
-            raise ValueError(f"{self.fqdn}: SOF has no CONFIG_DATA section")
 
         self._metadata.update({
             "tool": self.tool,
@@ -347,8 +460,17 @@ class Sof(FormatNode):
             "usercode": self.usercode,
         })
 
-        cd = SofConfigData("config_data", backing, config_offset, config_size)
-        self._child_attach(cd)
+        # Older Quartus SOFs carry their bitstream data in CONFIG_DATA
+        # (tag 0x11); Agilex SOFs use EMBEDDED (tag 0x24) instead and
+        # have no CONFIG_DATA at all. Expose `config_data` only when
+        # present rather than failing parsing for the Agilex shape.
+        if config_offset is not None:
+            self._child_attach(SofConfigData(
+                "config_data", backing, config_offset, config_size))
+
+        if bootloader_bytes is not None:
+            self._metadata["bootloader_size"] = len(bootloader_bytes)
+            self._child_attach(SofBootloaderData("bootloader", bootloader_bytes))
 
 
 @register_magic
