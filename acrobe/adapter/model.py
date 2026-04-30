@@ -182,14 +182,21 @@ def make_hw_root():
     """Build an HwRoot wired with the standard set of enumerators.
 
     Always includes USB. Adds the TTY enumerator on platforms that
-    support it (POSIX); silently skipped elsewhere. This is the
-    canonical entry point for CLI commands that take a `-r` path.
+    support it (POSIX); silently skipped elsewhere. Adds the AJI
+    enumerator so paths starting with ``aji/<host>`` resolve to a
+    remote AJI server (e.g. Quartus jtagd). This is the canonical
+    entry point for CLI commands that take a `-r` path.
     """
     root = HwRoot()
     root.add_enumerator(UsbEnumerator())
     try:
         from .tty import TtyEnumerator
         root.add_enumerator(TtyEnumerator())
+    except ImportError:
+        pass
+    try:
+        from .aji import AjiEnumerator
+        root.add_enumerator(AjiEnumerator())
     except ImportError:
         pass
     return root
