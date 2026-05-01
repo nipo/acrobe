@@ -184,8 +184,10 @@ def make_hw_root():
     Always includes USB. Adds the TTY enumerator on platforms that
     support it (POSIX); silently skipped elsewhere. Adds the AJI
     enumerator so paths starting with ``aji/<host>`` resolve to a
-    remote AJI server (e.g. Quartus jtagd). This is the canonical
-    entry point for CLI commands that take a `-r` path.
+    remote AJI server (e.g. Quartus jtagd). Adds the XVC enumerator
+    for ``xvc/<host>[:port]/<chain>/...`` paths against a remote
+    Xilinx Virtual Cable server. This is the canonical entry point
+    for CLI commands that take a `-r` path.
     """
     root = HwRoot()
     root.add_enumerator(UsbEnumerator())
@@ -197,6 +199,11 @@ def make_hw_root():
     try:
         from .aji import AjiEnumerator
         root.add_enumerator(AjiEnumerator())
+    except ImportError:
+        pass
+    try:
+        from .xvc import XvcEnumerator
+        root.add_enumerator(XvcEnumerator())
     except ImportError:
         pass
     return root
