@@ -59,7 +59,7 @@ class JopSession:
         self._t2h = t2h
         self._mgmt_support = mgmt_support
 
-        self._walker = JtagTmsWalker(interface)
+        self._walker = JtagTmsWalker(interface, warn_bundled_entry=True)
         self._decoder = bs.JopDecoder()
         self._encoder = bs.JopEncoder()
         # Pending TDO-capture descriptors (FIFO depth 2 on-chip).

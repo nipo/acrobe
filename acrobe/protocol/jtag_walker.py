@@ -67,10 +67,18 @@ class JtagTmsWalker:
         (TLR, SEL_DR, SEL_IR, TLR, EXIT1, EXIT1, UPDATE, EXIT2, UPDATE, SEL_DR),
     )
 
-    def __init__(self, interface):
+    def __init__(self, interface, *, warn_bundled_entry: bool = False):
+        """``warn_bundled_entry``: log a warning when a Capture→Shift
+        edge bit is bundled with subsequent shift bits in the same
+        ``process()`` call. Real Quartus / etherlink traffic always
+        sends the entry edge as its own JoP command, and the session
+        layer's capture window would mis-align by one if the pattern
+        ever changed. Off by default — XVC and most other peers
+        legitimately bundle the entry edge with payload."""
         self._interface = interface
         self._state = self.TLR
         self._in_ir = False
+        self._warn_bundled_entry = warn_bundled_entry
 
     @property
     def state(self) -> int:
@@ -166,7 +174,7 @@ class JtagTmsWalker:
                 # capture window covering this command would mis-decrement
                 # by 1 at the entry bit's position. Flag it so a future
                 # tool that changes pattern is visible in logs.
-                if i + 1 < n:
+                if self._warn_bundled_entry and i + 1 < n:
                     _logger.warning(
                         "JoP shift command bundles a Cap→Shift / Ex2→Shift "
                         "entry edge with %d subsequent shift bit(s). "
