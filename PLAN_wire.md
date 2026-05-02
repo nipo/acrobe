@@ -3,6 +3,28 @@
 Concurrent multi-client service exposing acrobe Batcher nodes over the
 network, with friendly LAN-first ergonomics and seams for later authz.
 
+## Status
+
+Phases 1–5 plus follow-on polish are landed. Today the wire stack:
+
+* Carries `JtagInterface` end-to-end (REST enumeration + WS-transported
+  bit-level ops) through a hybrid local/remote tree.
+* Uses **cutoff-aware summon**: walking `wire/<server>/<path>` finds
+  the deepest segment whose `wire_uuid` matches a locally-registered
+  `@wire.node`, opens WS there, walks the remainder locally on a
+  proxy that IS-A the registered class (so subclass `child_spawn` /
+  `db` / instance methods all work via MRO).
+* Has a process-wide **lifecycle** registry (`acrobe.shutdown()`,
+  `acrobe.on_shutdown(cb)`) — wire client, USB context, FTDI
+  transport, AJI client and XVC client all register cleanup.
+* Configures servers via `~/.config/acrobe.conf` (YAML), exposed as
+  `wire.servers.<name>.base`, materialized as children of a
+  `WireEnumerator` that lives next to USB/AJI/XVC enumerators on
+  `HwRoot`.
+
+Test suite: 1029 passed. All wire layers covered by integration
+tests (synthetic JTAG over a real socket via aiohttp's TestServer).
+
 ## Goals
 
 * Remote adapter discovery (parity with `acrobe info enumerate`).
@@ -12,7 +34,7 @@ network, with friendly LAN-first ergonomics and seams for later authz.
   set of opened refs.
 * Same module is the client library and the server entry point.
 
-Non-goals for now: authn/authz enforcement, TLS, mDNS discovery,
+Non-goals for v1: authn/authz enforcement, TLS, mDNS discovery,
 remote enumeration triggering hardware probes from untrusted callers,
 plain (non-Batcher) Node transport.
 
@@ -247,25 +269,255 @@ acrobe/wire/
 * Connection string handling: bare URL, with `?token=` once auth
   is wired later.
 
-## Deferred (not in v1)
+## Deferred work
 
-* HmacAuthBackend with real token issuance/validation.
-* TLS/wss.
-* mDNS discovery (`_acrobe._tcp`).
-* Plain-Node transport (non-Batcher).
-* Server-pushed notifications and subscribe/unsubscribe.
-* Multi-tenant isolation, rate limiting, quotas.
-* Schema evolution / forward-compat. UUID mismatches stay hard errors.
-* Cross-batch result streaming. CBOR indefinite-length bstr is
-  available in the codec but ops are chunked at API design time.
+The pieces below are intentionally out of scope today. Each entry
+captures the rationale and a sketch of the design direction so we
+can resume without rebuilding context.
 
-## Open questions
+### Chain / Tap transport (blocked on dynamic geometry)
 
-* Catalog frame: standalone CBOR object or wrapped in the same frame
-  envelope as requests/responses? Probably standalone, distinct phase.
-* REST output format: full child objects vs. references-only with
-  follow-up GETs? Probably full for v1 to keep round trips down.
-* Error frame at the request level (`tag=err`) vs. always reporting
-  errors via `Response.errors`. Lean toward the latter for batch-level
-  errors; reserve `tag=err` for protocol-level failures (malformed
-  frame, unknown ref, etc).
+JtagInterface is the only `@wire.node` along the JTAG stack today.
+The natural extension is to also transport `Chain` and `Tap` so the
+cutoff lands deeper for cleaner per-tap operations and less
+client-side wire traffic for tap-level work. Initial sketch:
+
+* `@wire.op` on `_TapShift`, `_TapRun`, `_TapIrStatus`.
+* `Tap.__init__` populates `self._metadata = {idcode, irlen, ...}`
+  so REST surfaces the info needed to pick the subclass.
+* `_wire_proxy_spec(remote_info) -> (concrete_class, init_kwargs)`
+  hook on the `@wire.node` class. `Tap` overrides to look up the
+  right subclass through `Tap.db` from the IDCODE; the proxy is
+  then `make_remote_proxy(Agilex5E, ...)` not generic Tap.
+* Server-side: ops post to the real `Tap` subclass, which forwards
+  through its local `Chain` → `JtagInterface` → hardware exactly
+  as today.
+
+**Blocker — dynamic chain geometry.** Modern SoC/FPGA families
+(Agilex, Zynq, ZynqMP, …) reconfigure the JTAG chain at runtime:
+IR length, device count and the chain's logical topology shift as
+the SDM/PSU loads firmware. Today's `Chain.discover` runs once
+and caches geometry; the wire layer would inherit a stale view as
+soon as the chain changes.
+
+Until the local code has a clean answer for re-discovery (events?
+explicit refresh? continuous monitoring?), the wire layer can't
+faithfully expose Chain/Tap state. JtagInterface stays the only
+cutoff, and Chain+Tap remain locally instantiated on top of the
+JtagInterface proxy — which gracefully tolerates re-discovery on
+the client side.
+
+Resume condition: a design for tracking topology changes lands in
+the local Chain/Tap code. Then wire transport is a small follow-up.
+
+### Real authentication — `HmacAuthBackend`
+
+Seam is wired (`AuthBackend`, `Principal`, `Scope`, `audit_log`,
+`OpenAuthBackend` as the no-auth default). What's missing is a
+backend that actually mints and verifies credentials.
+
+Design sketch:
+
+* Capability URL pattern (already exposed in REST as `connect_url`):
+  `wss://host:port/v1/node/<path>?token=<HMAC-token>`.
+* Token format: `base64url(payload || HMAC_SHA256(payload, secret))`
+  where `payload` is CBOR `{node_path, scope, exp, issued_to}`.
+  Short-lived (~60s) — token's job is the WS upgrade handshake;
+  the connection itself outlives it.
+* `HmacAuthBackend.issue_connect_token` builds the URL; REST
+  enumeration calls it for every `@wire.node` it describes.
+  `validate_connect_token` does HMAC verify + path/exp check at
+  the WS upgrade.
+* Secret loading: pluggable, but a sensible default reads from
+  `~/.config/acrobe.conf` under `wire.auth.hmac_secret`.
+
+Server-side log hygiene matters: token query strings end up in
+HTTP access logs. The aiohttp app should redact the `token` param
+before logging (or skip access logs for the WS path entirely).
+
+Resume condition: a deployment outside the LAN-friendly trust
+boundary surfaces.
+
+### TLS / `wss://`
+
+aiohttp serves both HTTPS and `wss://` from the same port via
+`ssl_context=`. Wiring is mechanical:
+
+* `acrobe wire serve` accepts `--cert` / `--key` paths.
+* Certificate management out of scope — operators bring their own
+  (LE, internal CA, mTLS).
+* `RemoteServerRoot.base_url` already supports `https://`; the
+  REST `connect_url` derivation already picks `wss://` when the
+  inbound request is TLS.
+
+Trust boundaries: with TLS the WS endpoint is no longer
+trivially MITM-able, so capability tokens stop leaking on the
+wire. Combine with the auth backend above for a usable
+"production" mode.
+
+### mDNS discovery (`_acrobe._tcp`)
+
+Today users add `wire.servers.<name>.base` entries by hand.
+Auto-discovery lets the `WireNamespace` learn about LAN peers
+without config:
+
+* Server: announce `_acrobe._tcp` with TXT records carrying
+  `path=/v1/node`, `version=v1`, `tls=true|false`. `python-zeroconf`
+  is the obvious dep.
+* Client: `WireEnumerator` (or a sibling `MdnsWireEnumerator`)
+  browses for the same service type and yields ephemeral entries
+  alongside config-declared ones.
+* Naming: respect operator overrides — config-declared names win
+  if both sources advertise the same host.
+
+Resume condition: a multi-server LAN setup where hand-editing
+config becomes painful.
+
+### Server-pushed notifications & subscribe/unsubscribe
+
+Frame schema already has `Notification` reserved (frame kind 4).
+Use cases worth covering when they appear:
+
+* Hardware events (USB hot-plug, JTAG cable disconnect, fault).
+* Long-running command progress (programming, erase) without
+  polling.
+* Topology change events — the dependency above on Chain/Tap
+  re-discovery would consume these naturally.
+
+Design sketch:
+
+* New `Subscribe(event_kind: str)` and `Unsubscribe(...)` ops on
+  any node type that wants to publish.
+* Server-side dispatch table: `subscriptions: dict[ws, set[event_kind]]`.
+* Server pushes `Notification` frames; client's reader task
+  routes them to per-subscription queues exposed as async
+  iterators.
+* Out-of-order with respect to Request/Response — req_id
+  correlation already supports interleaving.
+
+### Plain-Node transport
+
+Today only Batchers are transportable (`@wire.node` enforces
+`Batcher` subclassing). Pure Nodes that expose state but no
+batch-able ops (configuration views, status snapshots) can't be
+opened over the wire — only enumerated via REST.
+
+Design path:
+
+* Drop the Batcher requirement on `@wire.node`.
+* For non-Batcher nodes, the WS protocol degenerates to one-shot
+  property reads / method calls without batching. Either
+  re-purpose the existing Request frame (single-op batches) or
+  add a `Call(method_name, args) -> Response` shape.
+* Methods must be explicitly marked transportable: a
+  `@wire.method` decorator on individual coroutines, similar in
+  spirit to `@wire.op` but for synchronous-style RPC rather than
+  batched ops.
+
+Resume condition: a real node type needs read-only remote access
+and the round-trip cost per call is acceptable.
+
+### Streaming response chunks within a batch
+
+Each batch today produces one Response with all results bundled.
+For very large reads (memory dumps, full-bitstream readback) this
+forces server-side buffering and a single big frame.
+
+CBOR has indefinite-length byte strings; the codec already uses
+`cbor2`. Streaming would mean breaking results into multiple
+frames keyed by req_id and chunk index, with a terminator.
+
+Today the JTAG ops are chunked at the API design level (`Shift`
+takes a bit-string of bounded size; large reads are issued as
+many small ops in a batch). That's enough for v1; revisit if a
+new op type wants megabyte-scale single results.
+
+### Multi-tenant isolation, rate limiting, quotas
+
+None of these have a use case yet. Pre-requisites:
+
+* Real authn (above) so requests are attributable.
+* `audit_log` becomes more than a no-op — counts, latency,
+  per-principal aggregates.
+* Decide whether per-server (single shared lock) or per-adapter
+  (today's choice) is the right rate-limit granularity.
+
+Resume condition: someone runs an acrobe server as a shared
+service.
+
+### Schema evolution / forward-compat
+
+UUID mismatches between client and server are hard errors today.
+That's correct: it's better to fail loudly than to silently
+deserialize wrong data. The cost is that adding a new op to a
+node forces client/server lockstep upgrades.
+
+Possible approaches when this becomes painful:
+
+* Per-class **schema version** in the registry. Catalog includes
+  versions; mismatched-but-compatible types use the older
+  schema's codec.
+* **Capability negotiation**: client advertises what it knows;
+  server filters its catalog to the intersection. Already partly
+  implemented (unknown UUIDs are silently skipped on the client
+  side); making it bidirectional means the server can advertise
+  ops the client doesn't know about and just not let them be
+  posted.
+
+Resume condition: in-place rolling upgrades become a deployment
+requirement.
+
+### `Node.child_hints` proper API
+
+The REST response includes a `hints` field, populated from
+`Node.child_hints() -> list[str]`. Default is empty; subclasses
+override with literal lists. Today there's no systematic source —
+the user explicitly flagged that the `Db`-driven approach is
+wrong (Db keys are an internal routing detail, not a user-facing
+contract).
+
+Design path: a separate Node-level mechanism that any subclass
+can populate at construction time, decoupled from any storage
+implementation. Possibly a `_child_hints: list[str]` instance
+attribute manipulated by `_child_hint_register("name")` — no
+code knows about Db.
+
+This is local-tree work, not wire-specific, but the wire layer
+benefits because the `hints` field becomes meaningfully populated
+for adapter roots and protocol-level Nodes.
+
+### CLI / library polish
+
+* `acrobe info enumerate` doesn't itself run `stop_tree` on the
+  hw_root; the lifecycle drain catches RemoteServerRoot's
+  `ClientSession`. A more principled pattern is for the CLI to
+  drive `start_tree` / `stop_tree` explicitly. Cosmetic; current
+  output is clean.
+* `Tap.db._registry.clear()` in `test_jtag.py`'s teardown wipes
+  global state and breaks test ordering. Pre-existing; harmless
+  in default ordering. Better fix is for the test to save/restore
+  the dict.
+* CBOR over REST (`Accept: application/cbor`) was scoped in the
+  original plan but skipped — JSON is enough for the debug
+  interface, CBOR is a polish item.
+
+## Open questions resolved during implementation
+
+* **Catalog frame**: standalone CBOR object, distinct from the
+  request/response envelopes. Decoded without a Session.
+* **REST output format**: full child objects (one level deep).
+  HATEOAS link to deeper paths; no separate "expand" round trip
+  needed for the common browse case.
+* **Error frame at request level vs `Response.errors`**: both —
+  application-level errors (raised by an op) live in
+  `Response.errors` keyed by batch index; protocol-level failures
+  (malformed frame, dispatch crash) use the standalone
+  `ProtocolError` frame.
+* **WS routing**: REST and WS share the same URL space; a
+  unified handler dispatches on the `Upgrade` header.
+* **Subclass identity for proxies**: WS handler walks MRO to find
+  the deepest `@wire.node` ancestor. REST `describe()` does the
+  same so concrete adapter subclasses (`JtagMpsse`, `Agilex5E`,
+  …) report their parent's wire identity. The cutoff scanner
+  consumes this and the proxy is built via `types.new_class` as
+  a subclass of the registered ancestor — full MRO preserved.
