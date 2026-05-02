@@ -92,9 +92,13 @@ class EnumerationServer:
 
     def describe(self, node: Node, request: web.Request,
                  *, include_children: bool = True) -> dict:
-        """Render `node` as the REST JSON response body."""
-        entry = self.registry.try_lookup_by_class(type(node))
-        is_node_kind = entry is not None and entry.kind == "node"
+        """Render `node` as the REST JSON response body.
+
+        Walks MRO to find a registered @wire.node ancestor — concrete
+        adapter subclasses (JtagMpsse, JtagBitbang, ...) report their
+        parent's wire identity so clients can recognize them as
+        transport cutoffs."""
+        entry = self._lookup_node_entry(type(node))
 
         out = {
             "path":        self.canonical_path(node),
@@ -103,7 +107,7 @@ class EnumerationServer:
             "metadata":    dict(node.metadata) if hasattr(node, "metadata") else {},
             "is_batcher":  isinstance(node, Batcher),
             "wire_uuid":   str(entry.type_uuid) if entry else None,
-            "connect_url": self._connect_url(node, request) if is_node_kind else None,
+            "connect_url": self._connect_url(node, request) if entry else None,
         }
         if include_children:
             out["children"] = [
@@ -112,6 +116,15 @@ class EnumerationServer:
             ]
             out["hints"] = list(node.child_hints())
         return out
+
+    def _lookup_node_entry(self, cls: type):
+        """Return the registry entry for the deepest @wire.node ancestor
+        of `cls`, or None. Mirrors the WS upgrade handler's logic."""
+        for base in cls.__mro__:
+            candidate = self.registry.try_lookup_by_class(base)
+            if candidate is not None and candidate.kind == "node":
+                return candidate
+        return None
 
     def _connect_url(self, node: Node, request: web.Request) -> str:
         """Build the WS connect URL for a registered @wire.node.
