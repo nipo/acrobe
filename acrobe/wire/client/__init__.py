@@ -1,12 +1,18 @@
 """Client-side wire entry points.
 
-`rest` is the REST enumeration client. `ws` (added in phase 4) opens
-WebSocket sessions and drives the proxy.
+`rest` is the REST enumeration client. `ws` opens WebSocket sessions
+and exposes a low-level `WireClient`. `proxy` wraps a `WireClient`
+in a `RemoteBatcher` that mimics the local Batcher API.
 """
 
+from .proxy import RemoteBatcher
 from .rest import EnumerationClient, NodeNotFound
+from .ws import WireClient, WireClientError
 
 __all__ = [
     "EnumerationClient",
     "NodeNotFound",
+    "RemoteBatcher",
+    "WireClient",
+    "WireClientError",
 ]

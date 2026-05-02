@@ -140,7 +140,8 @@ def _encode_path(path: str) -> str:
     return "/".join(quote(seg, safe="") for seg in path.split("/"))
 
 
-async def _enumerate_handler(request: web.Request) -> web.Response:
+async def handle_enumerate(request: web.Request) -> web.Response:
+    """REST enumeration — `GET /v1/node/<path>` returning JSON."""
     server: EnumerationServer = request.app[WIRE_SERVER_KEY]
 
     raw_path = request.match_info.get("path", "")
@@ -169,19 +170,8 @@ async def _enumerate_handler(request: web.Request) -> web.Response:
     return web.json_response(server.describe(node, request))
 
 
-def make_app(hw_root: Node, auth_backend=None,
-             registry: Registry | None = None) -> web.Application:
-    """Build an aiohttp Application carrying the REST enumeration route.
-
-    The same Application will gain the WS upgrade route in phase 4 —
-    one app, one server, two route families.
-    """
-    app = web.Application()
-    server = EnumerationServer(hw_root, auth_backend=auth_backend,
-                               registry=registry)
-    app[WIRE_SERVER_KEY] = server
-    # Match the bare prefix and any sub-path including empty ("/v1/node",
-    # "/v1/node/", "/v1/node/foo/bar").
-    app.router.add_get(REST_PATH_PREFIX, _enumerate_handler)
-    app.router.add_get(REST_PATH_PREFIX + "/{path:.*}", _enumerate_handler)
-    return app
+def encode_canonical_url(canonical: str) -> str:
+    """Build a `/v1/node/...` URL from a canonical (root-relative) path."""
+    if not canonical:
+        return REST_PATH_PREFIX
+    return REST_PATH_PREFIX + "/" + _encode_path(canonical)
