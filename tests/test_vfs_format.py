@@ -9,7 +9,6 @@ from acrobe.vfs import (
     AsNode,
     register_format,
     register_magic,
-    auto_detect,
     detect_by_extension,
     detect_by_mime,
     populate_format,
@@ -90,9 +89,9 @@ def _make_stub_bytes(*sections):
 
 class TestRegistryDetection:
     def test_detect_by_extension(self):
-        assert detect_by_extension("foo.stub") == "stubfmt"
-        assert detect_by_extension("FOO.STUB") == "stubfmt"
-        assert detect_by_extension("foo.bin") is None
+        assert detect_by_extension("foo.stub") == ["stubfmt"]
+        assert detect_by_extension("FOO.STUB") == ["stubfmt"]
+        assert detect_by_extension("foo.bin") == []
 
     def test_detect_by_mime(self):
         assert detect_by_mime("application/x-stub") == "stubfmt"

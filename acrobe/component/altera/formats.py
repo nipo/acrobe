@@ -37,6 +37,18 @@ from ...vfs import (
 POF_MAGIC = b"POF\x00"
 SOF_MAGIC = b"SOF\x00"
 
+# Classic RBF sync (Cyclone / older Stratix / Arria). Streams in either
+# canonical or bit-reversed byte form; the parser picks whichever it
+# spots in the head of the file.
+RBF_SYNC = bytes([0x6a, 0xf7, 0xf7, 0xf7])
+RBF_SYNC_SWAPPED = bitswap8(RBF_SYNC)
+
+# Agilex / SDM-class devices use the CMF (Configuration Management
+# Firmware) framing, whose stream sync is distinct from classic RBF.
+# Same swap-tolerant detection.
+RBF_SYNC_AGILEX = bytes([0x95, 0x48, 0x29, 0x62])
+RBF_SYNC_AGILEX_SWAPPED = bitswap8(RBF_SYNC_AGILEX)
+
 # --- Section tags shared by POF and SOF ---
 
 class SofSection(enum.IntEnum):
@@ -539,11 +551,9 @@ class Rbf(FormatNode):
     right format or pass `swap=` to bypass detection.
     """
 
-    # Cyclone-classic / older Stratix / Arria sync.
-    RBF_SYNC = bytes([0x6a, 0xf7, 0xf7, 0xf7])
     _RBF_SYNCS = [
         (RBF_SYNC, False),
-        (bitswap8(RBF_SYNC), True),
+        (RBF_SYNC_SWAPPED, True),
     ]
 
     def __init__(self, name, source):
@@ -642,12 +652,10 @@ class Cmf(FormatNode):
     right format or pass `swap=` to bypass detection.
     """
 
-    # Agilex / SDM sync — appears at offset 0 of Agilex CMFs.
-    CMF_SYNC = bytes([0x95, 0x48, 0x29, 0x62])
     _CMF_SYNCS = [
-        (CMF_SYNC, False),
-        (bitswap8(CMF_SYNC), True),
-        ]
+        (RBF_SYNC_AGILEX, False),
+        (RBF_SYNC_AGILEX_SWAPPED, True),
+    ]
 
     def __init__(self, name, source):
         super().__init__(name, source)
