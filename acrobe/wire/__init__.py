@@ -45,6 +45,12 @@ from .session import Session, SessionError
 from .errors import InternalError  # noqa: E402  (registers in default registry)
 from .dispatch import handle_request  # noqa: E402
 from . import values  # noqa: E402,F401  (registers BitString)
+from .enumerator import (  # noqa: E402
+    RemoteProxyNode,
+    RemoteServerRoot,
+    WireEnumerator,
+    WireNamespace,
+)
 
 __all__ = [
     "AuthBackend",
@@ -76,6 +82,10 @@ __all__ = [
     "handle_request",
     "node",
     "op",
+    "RemoteProxyNode",
+    "RemoteServerRoot",
+    "WireEnumerator",
+    "WireNamespace",
     "to_bytes",
     "value",
 ]

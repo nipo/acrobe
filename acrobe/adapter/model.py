@@ -206,6 +206,11 @@ def make_hw_root():
         root.add_enumerator(XvcEnumerator())
     except ImportError:
         pass
+    try:
+        from ..wire.enumerator import WireEnumerator
+        root.add_enumerator(WireEnumerator())
+    except ImportError:
+        pass
     return root
 
 

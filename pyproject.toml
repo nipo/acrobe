@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "acrobe"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["libusb1", "asyncclick", "ausb"]
+dependencies = ["libusb1", "asyncclick", "ausb", "pyyaml", "aiohttp", "cbor2"]
 
 [project.scripts]
 acrobe = "acrobe.cli.console:main"
