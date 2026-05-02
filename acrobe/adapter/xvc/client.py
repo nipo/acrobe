@@ -62,8 +62,12 @@ class XvcClient(jtag.JtagInterface):
         # added to the tree before start_tree() reached us), push it now.
         if self.freq is not None:
             await self._do_settck(max(1, int(round(1e9 / self.freq))))
+        from ...lifecycle import on_shutdown
+        on_shutdown(self.stop)
 
     async def stop(self) -> None:
+        from ...lifecycle import cancel_shutdown
+        cancel_shutdown(self.stop)
         writer = self._writer
         self._writer = None
         self._reader = None

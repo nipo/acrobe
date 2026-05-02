@@ -62,7 +62,12 @@ class AjiHost(Node):
                 name = f"{name}-{hw.chain_id:x}"
             self.child_add(AjiHardware(name=name, hw=hw))
 
+        from ...lifecycle import on_shutdown
+        on_shutdown(self.stop)
+
     async def stop(self) -> None:
+        from ...lifecycle import cancel_shutdown
+        cancel_shutdown(self.stop)
         client = self._client
         if client is None:
             return
