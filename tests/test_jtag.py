@@ -12,8 +12,8 @@ from acrobe.bitstring import BitString
 # -- Mock Interfaces --
 
 class MockInterface(JtagInterface):
-    """Records all bit-level ops posted to it. Resolves Shift.tdo with
-    zero data so Tap-level reads see all-zero TDO."""
+    """Records all bit-level ops posted to it. Resolves Shift futures
+    with zero-filled BitStrings so Tap-level reads see all-zero TDO."""
 
     def __init__(self):
         super().__init__(name="mock")
@@ -23,8 +23,9 @@ class MockInterface(JtagInterface):
         for op, future in batch:
             self.ops.append(op)
             if isinstance(op, Shift) and op.read_tdo:
-                op.tdo = BitString(0, len(op.tdi))
-            future.set_result(op)
+                future.set_result(BitString(0, len(op.tdi)))
+            else:
+                future.set_result(None)
 
 
 def _make_chain(iface):
@@ -568,6 +569,7 @@ class ChainSimulator(JtagInterface):
 
     async def flush_ops(self, batch):
         for op, future in batch:
+            tdo = None
             if isinstance(op, Reset):
                 self._bypass = False
                 self._in_ir = False
@@ -592,26 +594,28 @@ class ChainSimulator(JtagInterface):
                 self._reg_val = val
                 self._reg_len = pos
             elif isinstance(op, Shift):
-                self._do_shift(op)
-            future.set_result(op)
+                tdo = self._do_shift(op)
+            future.set_result(tdo)
 
     def _do_shift(self, op):
         L = self._reg_len
         N = len(op.tdi)
         tdi_val = int(op.tdi)
 
+        tdo = None
         if op.read_tdo:
             if N <= L:
-                op.tdo = BitString(self._reg_val & ((1 << N) - 1), N)
+                tdo = BitString(self._reg_val & ((1 << N) - 1), N)
             else:
                 tdo_val = (self._reg_val | (tdi_val << L)) & ((1 << N) - 1)
-                op.tdo = BitString(tdo_val, N)
+                tdo = BitString(tdo_val, N)
 
         if L > 0 and N >= L:
             new_val = (tdi_val >> (N - L)) & ((1 << L) - 1)
             self._reg_val = new_val
             if self._in_ir and new_val == (1 << L) - 1:
                 self._bypass = True
+        return tdo
 
 
 class TestChainDiscover:
@@ -704,8 +708,9 @@ class TestChainDiscover:
             async def flush_ops(self, batch):
                 for op, future in batch:
                     if isinstance(op, Shift) and op.read_tdo:
-                        op.tdo = BitString(0, len(op.tdi))
-                    future.set_result(op)
+                        future.set_result(BitString(0, len(op.tdi)))
+                    else:
+                        future.set_result(None)
 
         chain = _make_chain(StuckLow())
         with pytest.raises(OpenChain, match="stuck low"):
@@ -720,8 +725,9 @@ class TestChainDiscover:
             async def flush_ops(self, batch):
                 for op, future in batch:
                     if isinstance(op, Shift) and op.read_tdo:
-                        op.tdo = BitString(-1, len(op.tdi))
-                    future.set_result(op)
+                        future.set_result(BitString(-1, len(op.tdi)))
+                    else:
+                        future.set_result(None)
 
         chain = _make_chain(StuckHigh())
         with pytest.raises(OpenChain, match="stuck high"):

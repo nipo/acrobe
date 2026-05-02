@@ -47,7 +47,7 @@ class JtagPlayer(StaplPlayer):
         await self._iface.post(Run(1))
 
         if capture:
-            tdo_all = bytes(result.tdo.data[:((total + 7) // 8)])
+            tdo_all = bytes(result.data[:((total + 7) // 8)])
             tdo_bits = BitString(tdo_all, total)
             return bytes(tdo_bits[pre_bits:pre_bits + length])
         return None
@@ -71,7 +71,7 @@ class JtagPlayer(StaplPlayer):
         await self._iface.post(Run(1))
 
         if capture:
-            tdo_all = bytes(result.tdo.data[:((total + 7) // 8)])
+            tdo_all = bytes(result.data[:((total + 7) // 8)])
             tdo_bits = BitString(tdo_all, total)
             return bytes(tdo_bits[pre_bits:pre_bits + length])
         return None

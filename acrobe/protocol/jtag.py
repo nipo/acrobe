@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import math
+from dataclasses import dataclass, field
 
 from ..engine import Batcher
 from ..node import Node
@@ -10,88 +11,85 @@ from ..db import Db, NoMatch
 
 
 # JTAG Interface Operations
+#
+# All op classes are immutable. The future returned by Batcher.post()
+# resolves to the operation's natural result value:
+#   - Shift(read_tdo=True)  → BitString (captured TDO)
+#   - Shift(read_tdo=False) → None
+#   - CaptureDr/CaptureIr/Reset/Run/SwdToJtag → None
+# The legacy "result lives on op.tdo" pattern was removed when these
+# classes became transportable: mutation across the wire is meaningless,
+# and futures already carry the value cleanly.
 
+
+@dataclass(frozen=True)
 class Shift:
     """Shift data through TDI/TDO."""
 
-    def __init__(self, tdi, read_tdo=True):
-        self.tdi = tdi
-        self.read_tdo = read_tdo
-        self.tdo = None
-
-    def __repr__(self):
-        return f"Shift(tdi={self.tdi!r}, read_tdo={self.read_tdo})"
+    tdi: BitStringBase
+    read_tdo: bool = True
 
 
+@dataclass(frozen=True)
 class CaptureDr:
     """Transition FSM to Capture-DR."""
 
-    def __repr__(self):
-        return "CaptureDr()"
 
-
+@dataclass(frozen=True)
 class CaptureIr:
     """Transition FSM to Capture-IR."""
 
-    def __repr__(self):
-        return "CaptureIr()"
 
-
+@dataclass(frozen=True)
 class Reset:
-    """TAP reset via TMS."""
+    """TAP reset via TMS. `count` is clamped to a 5-cycle minimum."""
 
-    def __init__(self, count=5):
-        self.tms = BitString(-1, max(count, 5))
+    count: int = 5
 
-    def __repr__(self):
-        return f"Reset(count={len(self.tms)})"
+    @property
+    def tms(self) -> BitString:
+        return BitString(-1, max(self.count, 5))
 
 
+@dataclass(frozen=True)
 class Run:
     """Run TCK cycles in Run-Test/Idle."""
 
-    def __init__(self, cycles):
-        self.cycles = cycles
-
-    def __repr__(self):
-        return f"Run(cycles={self.cycles})"
+    cycles: int
 
 
+@dataclass(frozen=True)
 class SwdToJtag:
     """SWD-to-JTAG switch sequence."""
 
-    tms = BitString(-1, 50) + BitString(0xe73c, 16) + BitString(-1, 5)
+    # Class-level constant — same sequence for every instance.
+    TMS: BitString = field(default=BitString(-1, 50) + BitString(0xe73c, 16)
+                           + BitString(-1, 5),
+                           repr=False)
 
-    def __repr__(self):
-        return "SwdToJtag()"
+    @property
+    def tms(self) -> BitString:
+        return self.TMS
 
 
 # Internal Tap Operations
 
+
+@dataclass(frozen=True)
 class _TapShift:
-    def __init__(self, ir_value, tdi, read_tdo):
-        self.ir_value = ir_value
-        self.tdi = tdi
-        self.read_tdo = read_tdo
-        self.tdo = None
+    ir_value: int | None
+    tdi: BitStringBase | None
+    read_tdo: bool
 
-    def __repr__(self):
-        ir = "None" if self.ir_value is None else f"{self.ir_value:#x}"
-        return f"_TapShift(ir={ir}, tdi={self.tdi!r}, read_tdo={self.read_tdo})"
 
+@dataclass(frozen=True)
 class _TapRun:
-    def __init__(self, cycles):
-        self.cycles = cycles
+    cycles: int
 
-    def __repr__(self):
-        return f"_TapRun(cycles={self.cycles})"
 
+@dataclass(frozen=True)
 class _TapIrStatus:
-    def __init__(self):
-        self.tdo = None
-
-    def __repr__(self):
-        return "_TapIrStatus()"
+    """No fields — purely a marker requesting an IR-status capture."""
 
 
 # Tap → parent submission
@@ -102,7 +100,8 @@ class TapOp:
     The Tap is the source context; the parent (Chain, AjiHost, …) uses
     it to look up per-tap state (geometry, open_id, …) and translates
     the inner op accordingly. The parent resolves the future with the
-    inner op as the result, after populating tdo on shifts.
+    op's natural result value (BitString for shifts that read, None
+    otherwise).
     """
 
     def __init__(self, tap, op):
@@ -313,10 +312,9 @@ class Tap(Batcher, Node, InstructionRegistry):
     async def flush_ops(self, batch):
         """Forward each TAP-level op to the parent wrapped in a TapOp.
 
-        The parent populates tdo on the inner op (for shifts that read)
-        and resolves the parent-side future with the inner op. We map
-        that back to a per-call result: the captured tdo for shifts /
-        ir-status, None otherwise.
+        The parent's future already resolves to the natural result
+        value (BitString for reads, None otherwise); we just relay it
+        to the user-facing future.
         """
         if self._parent is None:
             raise RuntimeError(f"Tap {self.name!r} has no parent to forward to")
@@ -324,25 +322,17 @@ class Tap(Batcher, Node, InstructionRegistry):
         forwarded = []
         for op, future in batch:
             parent_future = self._parent.post(TapOp(self, op))
-            forwarded.append((op, parent_future, future))
+            forwarded.append((parent_future, future))
 
-        for op, parent_future, future in forwarded:
+        for parent_future, future in forwarded:
             try:
-                await parent_future
+                value = await parent_future
             except Exception as exc:
                 if not future.done():
                     future.set_exception(exc)
                 continue
-            # Map inner-op state to the user-facing result.
-            if isinstance(op, _TapShift):
-                if op.tdi is not None and op.read_tdo:
-                    future.set_result(op.tdo)
-                else:
-                    future.set_result(None)
-            elif isinstance(op, _TapIrStatus):
-                future.set_result(op.tdo)
-            else:
-                future.set_result(None)
+            if not future.done():
+                future.set_result(value)
 
     def __repr__(self):
         return f"<Tap {self._name} irlen={self.irlen}>"
@@ -459,8 +449,8 @@ class Chain(Batcher, Node):
         marker = 0xc05a5a03
         tdi = BitString(marker, 32) + BitString(0, max_length + 4)
         shift = Shift(tdi, read_tdo=True)
-        result = await self._parent.post(shift)
-        tdo = result.tdo[:max_length + 32]
+        captured = await self._parent.post(shift)
+        tdo = captured[:max_length + 32]
 
         if not int(tdo):
             raise OpenChain("TDO stuck low")
@@ -632,12 +622,10 @@ class Chain(Batcher, Node):
             raise RuntimeError(f"Chain {self.name!r} has no parent to forward to")
 
         bit_futures = []
-        # Records per top whose result depends on a captured Shift.
-        # (top_op, top_future, data_future) — data_future.result().tdo
-        # supplies the TDO bits.
+        # (top_future, data_future) — data_future.result() is the
+        # captured TDO BitString, forwarded as the top-future's value.
         tdo_extracts = []
-        # Records per top with no TDO to extract; resolved straight after the gather.
-        # (top_op, top_future)
+        # (top_future,) — no TDO to extract; resolved with None.
         plain_resolves = []
 
         for top, top_future in batch:
@@ -671,7 +659,7 @@ class Chain(Batcher, Node):
                     bit_futures.append(self._parent.post(
                         Shift(BitString(-1, ctx.ir_post), read_tdo=False)))
                 self._invalidate_ir_cache_for_shift(tap, bypass_val)
-                tdo_extracts.append((op, top_future, data_future))
+                tdo_extracts.append((top_future, data_future))
 
             elif isinstance(op, _TapShift):
                 if op.ir_value is not None and op.ir_value != ctx.current_ir:
@@ -695,15 +683,15 @@ class Chain(Batcher, Node):
                         bit_futures.append(self._parent.post(
                             Shift(BitString(0, ctx.dr_post), read_tdo=False)))
                     if op.read_tdo:
-                        tdo_extracts.append((op, top_future, data_future))
+                        tdo_extracts.append((top_future, data_future))
                     else:
-                        plain_resolves.append((op, top_future))
+                        plain_resolves.append(top_future)
                 else:
-                    plain_resolves.append((op, top_future))
+                    plain_resolves.append(top_future)
 
             elif isinstance(op, _TapRun):
                 bit_futures.append(self._parent.post(Run(op.cycles)))
-                plain_resolves.append((op, top_future))
+                plain_resolves.append(top_future)
 
             else:
                 exc = ValueError(f"Unknown tap op: {type(op).__name__}")
@@ -715,23 +703,21 @@ class Chain(Batcher, Node):
                 await asyncio.gather(*bit_futures)
             except Exception as exc:
                 # Bit-level failure: propagate to all unresolved top futures.
-                for op, top_future, _ in tdo_extracts:
+                for top_future, _ in tdo_extracts:
                     if not top_future.done():
                         top_future.set_exception(exc)
-                for op, top_future in plain_resolves:
+                for top_future in plain_resolves:
                     if not top_future.done():
                         top_future.set_exception(exc)
                 raise
 
-        for op, top_future, data_future in tdo_extracts:
-            shift_op = data_future.result()
-            op.tdo = shift_op.tdo
+        for top_future, data_future in tdo_extracts:
             if not top_future.done():
-                top_future.set_result(op)
+                top_future.set_result(data_future.result())
 
-        for op, top_future in plain_resolves:
+        for top_future in plain_resolves:
             if not top_future.done():
-                top_future.set_result(op)
+                top_future.set_result(None)
 
     def _invalidate_ir_cache_for_shift(self, tap, new_ir):
         """An IR shift just happened: this tap loaded `new_ir`, all

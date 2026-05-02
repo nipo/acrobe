@@ -149,17 +149,18 @@ class JtagMpsse(jtag.JtagInterface):
             await asyncio.gather(*futures)
 
         # Reconstruct TDO from MPSSE results
+        captured: dict[int, BitString] = {}
         for batch_idx, mpsse_start, mpsse_end in tdo_entries:
-            op = batch[batch_idx][0]
             tdo = BitString()
             for m_op in mpsse_ops[mpsse_start:mpsse_end]:
                 if hasattr(m_op, 'data') and m_op.data is not None:
                     tdo += m_op.data
-            op.tdo = tdo
+            captured[batch_idx] = tdo
 
-        # Resolve all batch futures
-        for op, future in batch:
-            future.set_result(op)
+        # Resolve futures with the captured TDO (or None for ops with
+        # no read).
+        for idx, (_, future) in enumerate(batch):
+            future.set_result(captured.get(idx))
 
     # --- State machine helpers ---
 

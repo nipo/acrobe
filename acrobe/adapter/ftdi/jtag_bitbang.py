@@ -208,14 +208,15 @@ class JtagBitbang(jtag.JtagInterface):
             rsp = b""
 
         # Extract TDO from read-back at rising-edge positions
+        captured: dict[int, BitString] = {}
         for batch_idx, indices in tdo_entries:
-            op = batch[batch_idx][0]
             tdo = BitString()
             for byte_idx in indices:
                 bit = 1 if (rsp[byte_idx] & self._tdo_mask) else 0
                 tdo.append(bit, 1)
-            op.tdo = tdo
+            captured[batch_idx] = tdo
 
-        # Resolve all batch futures
-        for op, future in batch:
-            future.set_result(op)
+        # Resolve futures with the captured BitString (or None for ops
+        # with no read).
+        for idx, (_, future) in enumerate(batch):
+            future.set_result(captured.get(idx))

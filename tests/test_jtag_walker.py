@@ -14,7 +14,7 @@ from acrobe.protocol.jtag_walker import JtagTmsWalker
 
 class _RecordingInterface(jtag.JtagInterface):
     """Minimal JtagInterface that records posted ops in order and
-    populates Shift.tdo with the bitwise complement of tdi."""
+    resolves Shift futures with the bitwise complement of tdi."""
 
     def __init__(self):
         super().__init__()
@@ -25,8 +25,9 @@ class _RecordingInterface(jtag.JtagInterface):
             self.ops.append(op)
             if isinstance(op, jtag.Shift):
                 inv = (1 << len(op.tdi)) - 1 - int(op.tdi)
-                op.tdo = BitString(inv, len(op.tdi))
-            future.set_result(op)
+                future.set_result(BitString(inv, len(op.tdi)))
+            else:
+                future.set_result(None)
 
 
 def _bs_from_bits(bits: list[int]) -> BitString:

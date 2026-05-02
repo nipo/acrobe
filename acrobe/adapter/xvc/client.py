@@ -175,14 +175,17 @@ class XvcClient(jtag.JtagInterface):
                     future.set_exception(exc)
             return
 
-        # Slot TDO bits back into the originating Shift ops.
+        # Slot TDO bits back, keyed by op identity. Ops that don't
+        # read get None.
+        captured: dict[int, BitString] = {}
         for shift_op, offset in slots:
             length = len(shift_op.tdi)
-            shift_op.tdo = tdo[offset:offset + length]
+            captured[id(shift_op)] = tdo[offset:offset + length]
 
         for op, future in batch:
-            if not future.done():
-                future.set_result(op)
+            if future.done():
+                continue
+            future.set_result(captured.get(id(op)))
 
     async def _wire_shift(self, tms: BitString, tdi: BitString
                            ) -> BitString:

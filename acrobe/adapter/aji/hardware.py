@@ -267,16 +267,18 @@ class AjiHardware(Batcher, Node, FreqCapper):
                                f"{self.name!r}"))
                 continue
             try:
-                await self._dispatch(client, tap, open_id, op)
+                value = await self._dispatch(client, tap, open_id, op)
             except Exception as e:
                 if not future.done():
                     future.set_exception(e)
                 continue
             if not future.done():
-                future.set_result(op)
+                future.set_result(value)
 
     async def _dispatch(self, client: AjiClient, tap: Tap,
-                        open_id: int, op) -> None:
+                        open_id: int, op):
+        """Execute one TapOp, returning the captured BitString (for
+        reading shifts and IR status) or None."""
         if isinstance(op, _TapShift):
             if op.ir_value is not None and op.ir_value != self._last_ir.get(tap):
                 await client.access_ir(open_id, op.ir_value)
@@ -292,18 +294,19 @@ class AjiHardware(Batcher, Node, FreqCapper):
                     read_length=length if op.read_tdo else 0,
                 )
                 if op.read_tdo:
-                    op.tdo = BitString(read_bytes, length)
-        elif isinstance(op, _TapRun):
+                    return BitString(read_bytes, length)
+            return None
+        if isinstance(op, _TapRun):
             await client.run_test_idle(open_id, op.cycles)
-        elif isinstance(op, _TapIrStatus):
+            return None
+        if isinstance(op, _TapIrStatus):
             captured = await client.access_ir(
                 open_id, instruction=(1 << tap.irlen) - 1,
                 flags=IR_FLAG_CAPTURE)
             self._last_ir[tap] = (1 << tap.irlen) - 1
-            op.tdo = BitString(captured if captured is not None else 0,
-                               tap.irlen)
-        else:
-            raise TypeError(f"Unknown tap op: {type(op).__name__}")
+            return BitString(captured if captured is not None else 0,
+                             tap.irlen)
+        raise TypeError(f"Unknown tap op: {type(op).__name__}")
 
     def __repr__(self) -> str:
         return (f"<AjiHardware {self._name} chain_id={self._hw.chain_id} "

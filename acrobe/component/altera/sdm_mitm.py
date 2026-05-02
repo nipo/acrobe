@@ -76,7 +76,12 @@ class SdmMitm(JtagInterface):
         self._is_first_rsp = True
         
     async def flush_ops(self, batch):
-        """Forward all operations, intercepting SDM traffic."""
+        """Forward all operations, intercepting SDM traffic.
+
+        Reads the captured TDO from the per-op future once the inner
+        interface has resolved it (ops are immutable; results live on
+        futures, not on the op objects).
+        """
 
         ret = await self._interface.flush_ops(batch)
 
@@ -98,8 +103,11 @@ class SdmMitm(JtagInterface):
             elif isinstance(op, Shift):
                 self._tdi += op.tdi
 
-                if op.read_tdo and op.tdo is not None:
-                    self._tdo += op.tdo
+                tdo_value = (future.result()
+                             if future.done() and not future.exception()
+                             else None)
+                if op.read_tdo and tdo_value is not None:
+                    self._tdo += tdo_value
                 else:
                     self._tdo += BitString(0, len(op.tdi))
 

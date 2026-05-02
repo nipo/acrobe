@@ -223,8 +223,7 @@ class JtagTmsWalker:
         for fut, start, end in slots:
             if start > cursor:
                 tdo += BitString(0, start - cursor)
-            shift_op = fut.result()
-            tdo += shift_op.tdo
+            tdo += fut.result()
             cursor = end
         if cursor < n:
             tdo += BitString(0, n - cursor)

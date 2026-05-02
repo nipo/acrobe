@@ -30,8 +30,9 @@ class _RecordingInterface(jtag.JtagInterface):
             self.ops.append(op)
             if isinstance(op, jtag.Shift):
                 inv = (1 << len(op.tdi)) - 1 - int(op.tdi)
-                op.tdo = BitString(inv, len(op.tdi))
-            future.set_result(op)
+                future.set_result(BitString(inv, len(op.tdi)))
+            else:
+                future.set_result(None)
 
 
 @pytest.fixture

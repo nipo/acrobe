@@ -429,14 +429,15 @@ class _GowinLoadMock(JtagInterface):
                 if len(op.tdi) == 32:
                     self._32bit_count += 1
                     if self._32bit_count == 1:
-                        op.tdo = BitString(0, 32)  # USERCODE=0
+                        future.set_result(BitString(0, 32))
                     elif self._32bit_count <= 4:
-                        op.tdo = BitString(0, 32)  # erase status: not done
+                        future.set_result(BitString(0, 32))
                     else:
-                        op.tdo = BitString(1 << self.DONE_BIT, 32)
+                        future.set_result(BitString(1 << self.DONE_BIT, 32))
                 else:
-                    op.tdo = BitString(0, len(op.tdi))
-            future.set_result(op)
+                    future.set_result(BitString(0, len(op.tdi)))
+            else:
+                future.set_result(None)
 
 
 class TestGowinChildSpawn:

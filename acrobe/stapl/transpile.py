@@ -2858,7 +2858,7 @@ def _emit_helpers(w):
     w.line('await iface.post(Run(0))')
     w.line('if capture:')
     w.indent()
-    w.line('return bytes(result.tdo.data[:((length + 7) // 8)])')
+    w.line('return bytes(result.data[:((length + 7) // 8)])')
     w.dedent()
     w.line('return None')
     w.dedent()

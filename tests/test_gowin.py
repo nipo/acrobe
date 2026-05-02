@@ -53,12 +53,11 @@ class GowinMockInterface(JtagInterface):
             if isinstance(op, Shift) and op.read_tdo:
                 self.shifts.append(op)
                 if len(op.tdi) == 32:
-                    # Could be STATUS_REGISTER or USERCODE_REG - both 32-bit.
-                    # We track by count: first 32-bit read per sequence.
-                    op.tdo = BitString(self._next_32bit_value(), 32)
+                    future.set_result(BitString(self._next_32bit_value(), 32))
                 else:
-                    op.tdo = BitString(0, len(op.tdi))
-            future.set_result(op)
+                    future.set_result(BitString(0, len(op.tdi)))
+            else:
+                future.set_result(None)
 
     def _next_32bit_value(self):
         # Alternate based on shift count: USERCODE first, then STATUS reads
@@ -79,10 +78,11 @@ class StatusOnlyMock(JtagInterface):
         for op, future in batch:
             if isinstance(op, Shift) and op.read_tdo:
                 if len(op.tdi) == 32:
-                    op.tdo = BitString(self.status, 32)
+                    future.set_result(BitString(self.status, 32))
                 else:
-                    op.tdo = BitString(0, len(op.tdi))
-            future.set_result(op)
+                    future.set_result(BitString(0, len(op.tdi)))
+            else:
+                future.set_result(None)
 
 
 # -- Basic Properties --
@@ -179,14 +179,14 @@ class TestLoad:
                     if isinstance(op, Shift) and op.read_tdo:
                         self.shifts.append(op)
                         if len(op.tdi) == 32:
-                            # First call: USERCODE, subsequent: STATUS
                             if len(self.shifts) == 1:
-                                op.tdo = BitString(0xDEADBEEF, 32)
+                                future.set_result(BitString(0xDEADBEEF, 32))
                             else:
-                                op.tdo = BitString(status_val, 32)
+                                future.set_result(BitString(status_val, 32))
                         else:
-                            op.tdo = BitString(0, len(op.tdi))
-                    future.set_result(op)
+                            future.set_result(BitString(0, len(op.tdi)))
+                    else:
+                        future.set_result(None)
 
         iface = SkipMock()
         tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
@@ -212,17 +212,15 @@ class TestLoad:
                         if len(op.tdi) == 32:
                             self._32bit_count += 1
                             if self._32bit_count == 1:
-                                # USERCODE read
-                                op.tdo = BitString(0x12345678, 32)
+                                future.set_result(BitString(0x12345678, 32))
                             elif self._32bit_count <= 4:
-                                # Status during erase: Done=0
-                                op.tdo = BitString(0, 32)
+                                future.set_result(BitString(0, 32))
                             else:
-                                # Status after configure: Done=1
-                                op.tdo = BitString(1 << DONE_BIT, 32)
+                                future.set_result(BitString(1 << DONE_BIT, 32))
                         else:
-                            op.tdo = BitString(0, len(op.tdi))
-                    future.set_result(op)
+                            future.set_result(BitString(0, len(op.tdi)))
+                    else:
+                        future.set_result(None)
 
         iface = ReloadMock()
         tap = _attach_tap(iface, GowinFpga, idcode=0x0001481b)
@@ -280,27 +278,30 @@ class ChainSimulator(JtagInterface):
                     pos += irlen
                 self._reg_val = val
                 self._reg_len = pos
-            elif isinstance(op, Shift):
-                self._do_shift(op)
-            future.set_result(op)
+            tdo = None
+            if isinstance(op, Shift):
+                tdo = self._do_shift(op)
+            future.set_result(tdo)
 
     def _do_shift(self, op):
         L = self._reg_len
         N = len(op.tdi)
         tdi_val = int(op.tdi)
 
+        tdo = None
         if op.read_tdo:
             if N <= L:
-                op.tdo = BitString(self._reg_val & ((1 << N) - 1), N)
+                tdo = BitString(self._reg_val & ((1 << N) - 1), N)
             else:
                 tdo_val = (self._reg_val | (tdi_val << L)) & ((1 << N) - 1)
-                op.tdo = BitString(tdo_val, N)
+                tdo = BitString(tdo_val, N)
 
         if L > 0 and N >= L:
             new_val = (tdi_val >> (N - L)) & ((1 << L) - 1)
             self._reg_val = new_val
             if self._in_ir and new_val == (1 << L) - 1:
                 self._bypass = True
+        return tdo
 
 
 class TestDeviceRegistration:

@@ -64,8 +64,9 @@ class FpgaMockInterface(JtagInterface):
         for op, future in batch:
             self.ops.append(op)
             if isinstance(op, Shift) and op.read_tdo:
-                op.tdo = BitString(self.ir_status_val, len(op.tdi))
-            future.set_result(op)
+                future.set_result(BitString(self.ir_status_val, len(op.tdi)))
+            else:
+                future.set_result(None)
 
 
 def _attach_tap(iface, base, idcode, irlen=None):
@@ -332,27 +333,30 @@ class ChainSimulator(JtagInterface):
                     pos += irlen
                 self._reg_val = val
                 self._reg_len = pos
-            elif isinstance(op, Shift):
-                self._do_shift(op)
-            future.set_result(op)
+            tdo = None
+            if isinstance(op, Shift):
+                tdo = self._do_shift(op)
+            future.set_result(tdo)
 
     def _do_shift(self, op):
         L = self._reg_len
         N = len(op.tdi)
         tdi_val = int(op.tdi)
 
+        tdo = None
         if op.read_tdo:
             if N <= L:
-                op.tdo = BitString(self._reg_val & ((1 << N) - 1), N)
+                tdo = BitString(self._reg_val & ((1 << N) - 1), N)
             else:
                 tdo_val = (self._reg_val | (tdi_val << L)) & ((1 << N) - 1)
-                op.tdo = BitString(tdo_val, N)
+                tdo = BitString(tdo_val, N)
 
         if L > 0 and N >= L:
             new_val = (tdi_val >> (N - L)) & ((1 << L) - 1)
             self._reg_val = new_val
             if self._in_ir and new_val == (1 << L) - 1:
                 self._bypass = True
+        return tdo
 
 
 class TestDeviceRegistration:
@@ -452,12 +456,12 @@ class TestSeries6LoadSequence:
             async def flush_ops(self, batch):
                 for op, future in batch:
                     if isinstance(op, Shift) and op.read_tdo:
-                        # For ir_status calls, return init=True first, then done=True
                         val = 0x10 if call_count[0] < 3 else 0x20
                         call_count[0] += 1
                         ir_status_responses.append(val)
-                        op.tdo = BitString(val, len(op.tdi))
-                    future.set_result(op)
+                        future.set_result(BitString(val, len(op.tdi)))
+                    else:
+                        future.set_result(None)
 
         iface = LoadMockInterface()
         tap = _attach_tap(iface, Series6, idcode=0x04001093)
@@ -483,13 +487,13 @@ class UseridMockInterface(JtagInterface):
         for op, future in batch:
             if isinstance(op, Shift) and op.read_tdo:
                 self.shifts.append(op)
-                # First read is USERCODE (32 bits), subsequent are ir_status (6 bits)
                 if len(op.tdi) == 32:
-                    op.tdo = BitString(self.usercode, 32)
+                    future.set_result(BitString(self.usercode, 32))
                 else:
-                    val = 0x20 if self.done else 0x00  # done bit
-                    op.tdo = BitString(val, len(op.tdi))
-            future.set_result(op)
+                    val = 0x20 if self.done else 0x00
+                    future.set_result(BitString(val, len(op.tdi)))
+            else:
+                future.set_result(None)
 
 
 class TestSeries6UseridSkip:
@@ -521,12 +525,13 @@ class TestSeries6UseridSkip:
                     if isinstance(op, Shift) and op.read_tdo:
                         self.shifts.append(op)
                         if len(op.tdi) == 32:
-                            op.tdo = BitString(0xDEADBEEF, 32)
+                            future.set_result(BitString(0xDEADBEEF, 32))
                         else:
                             val = 0x10 if call_count[0] < 3 else 0x20
                             call_count[0] += 1
-                            op.tdo = BitString(val, len(op.tdi))
-                    future.set_result(op)
+                            future.set_result(BitString(val, len(op.tdi)))
+                    else:
+                        future.set_result(None)
 
         iface = ReloadMockInterface()
         tap = _attach_tap(iface, Series6, idcode=0x04001093)
@@ -553,8 +558,9 @@ class TestSeries6UseridSkip:
                         self.shifts.append(op)
                         val = 0x10 if call_count[0] < 3 else 0x20
                         call_count[0] += 1
-                        op.tdo = BitString(val, len(op.tdi))
-                    future.set_result(op)
+                        future.set_result(BitString(val, len(op.tdi)))
+                    else:
+                        future.set_result(None)
 
         iface = NoUseridMockInterface()
         tap = _attach_tap(iface, Series6, idcode=0x04001093)
@@ -580,8 +586,9 @@ class TestSeries6UseridSkip:
                         self.shifts.append(op)
                         val = 0x10 if call_count[0] < 3 else 0x20
                         call_count[0] += 1
-                        op.tdo = BitString(val, len(op.tdi))
-                    future.set_result(op)
+                        future.set_result(BitString(val, len(op.tdi)))
+                    else:
+                        future.set_result(None)
 
         iface = NoCheckMockInterface()
         tap = _attach_tap(iface, Series6, idcode=0x04001093)
@@ -620,12 +627,13 @@ class TestSeries7UseridSkip:
                     if isinstance(op, Shift) and op.read_tdo:
                         self.shifts.append(op)
                         if len(op.tdi) == 32:
-                            op.tdo = BitString(0xDEADBEEF, 32)
+                            future.set_result(BitString(0xDEADBEEF, 32))
                         else:
                             val = 0x20 if call_count[0] >= 2 else 0x00
                             call_count[0] += 1
-                            op.tdo = BitString(val, len(op.tdi))
-                    future.set_result(op)
+                            future.set_result(BitString(val, len(op.tdi)))
+                    else:
+                        future.set_result(None)
 
         iface = ReloadMockInterface()
         tap = _attach_tap(iface, Series7, idcode=0x03631093)
@@ -648,11 +656,11 @@ class TestSeries7LoadSequence:
             async def flush_ops(self, batch):
                 for op, future in batch:
                     if isinstance(op, Shift) and op.read_tdo:
-                        # Return done=True after a few calls
                         val = 0x20 if call_count[0] >= 2 else 0x00
                         call_count[0] += 1
-                        op.tdo = BitString(val, len(op.tdi))
-                    future.set_result(op)
+                        future.set_result(BitString(val, len(op.tdi)))
+                    else:
+                        future.set_result(None)
 
         iface = LoadMockInterface()
         tap = _attach_tap(iface, Series7, idcode=0x03631093)
