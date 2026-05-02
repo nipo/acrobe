@@ -388,6 +388,18 @@ class Node:
         """
         raise ValueError(f"Unknown option: {key}={value!r}")
 
+    def child_hints(self) -> list[str]:
+        """Names of children that *could* be summoned but aren't
+        materialized yet.
+
+        Sync, no side effects — must not touch hardware. Subclasses
+        override to expose static manifests (a known list of protocol
+        names, etc.). Default returns []. Dynamic discovery (probing
+        a USB bus, scanning a JTAG chain) is a separate concern, not
+        covered by this method.
+        """
+        return []
+
     def child_lookup(self, name):
         """Find existing pre-populated child by name.
 

@@ -86,11 +86,16 @@ async def test_root_enumeration_shape():
 
     assert data["name"] == "root"
     assert data["type"] == "_Plain"
+    assert data["path"] == ""           # root maps to empty path
     assert data["is_batcher"] is False
     assert data["wire_uuid"] is None
     assert data["connect_url"] is None
     child_names = {c["name"] for c in data["children"]}
     assert child_names == {"plain-child", "remote"}
+    # Children paths are canonical (root prefix stripped).
+    for c in data["children"]:
+        assert not c["path"].startswith("root/")
+        assert c["path"] == c["name"]
 
 
 @pytest.mark.asyncio
@@ -105,16 +110,19 @@ async def test_nested_node_returns_metadata_and_children():
         data = await resp.json()
 
     assert data["name"] == "remote"
+    assert data["path"] == "remote"     # canonical, no "root/" prefix
     assert data["type"] == "_RemoteCapable"
     assert data["is_batcher"] is True
     assert data["wire_uuid"] == "40000000-0000-4000-8000-0000000000ff"
     assert data["connect_url"] is not None
     assert data["connect_url"].startswith("ws://")
-    assert "/v1/node/" in data["connect_url"]
-    assert "remote" in data["connect_url"]
+    assert data["connect_url"].split("?")[0].endswith("/v1/node/remote")
     assert "?token=" in data["connect_url"]
     child_names = {c["name"] for c in data["children"]}
     assert child_names == {"leaf"}
+    # Child path is canonical (remote/leaf, not root/remote/leaf).
+    leaf = next(c for c in data["children"] if c["name"] == "leaf")
+    assert leaf["path"] == "remote/leaf"
 
 
 @pytest.mark.asyncio
@@ -144,6 +152,71 @@ async def test_unknown_path_returns_404():
         assert resp.status == 404
         data = await resp.json()
         assert data["error"] == "node_not_found"
+
+
+@pytest.mark.asyncio
+async def test_shortcut_name_redirects_to_canonical():
+    """Substring-matched node names should 302 to the canonical URL."""
+    root, remote = _build_tree()
+    reg = _make_registry_and_register(type(remote))
+    app = make_app(root, registry=reg)
+
+    async with TestClient(TestServer(app)) as cli:
+        # "rem" uniquely matches "remote" via substring lookup.
+        resp = await cli.get("/v1/node/rem", allow_redirects=False)
+        assert resp.status == 302
+        assert resp.headers["Location"] == "/v1/node/remote"
+
+    # Following the redirect lands on the canonical resource.
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.get("/v1/node/rem")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["path"] == "remote"
+
+
+@pytest.mark.asyncio
+async def test_canonical_url_does_not_redirect():
+    root, remote = _build_tree()
+    reg = _make_registry_and_register(type(remote))
+    app = make_app(root, registry=reg)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.get("/v1/node/remote", allow_redirects=False)
+        assert resp.status == 200
+
+
+@pytest.mark.asyncio
+async def test_child_hints_exposed_in_response():
+    """Nodes that override child_hints() advertise potential children."""
+    class _Hinted(Node):
+        def __init__(self):
+            super().__init__("hinted-root")
+
+        def child_hints(self) -> list[str]:
+            return ["candidate-a", "candidate-b"]
+
+    reg = Registry()
+    app = make_app(_Hinted(), registry=reg)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.get("/v1/node")
+        data = await resp.json()
+
+    assert data["hints"] == ["candidate-a", "candidate-b"]
+
+
+@pytest.mark.asyncio
+async def test_default_child_hints_is_empty():
+    root, remote = _build_tree()
+    reg = _make_registry_and_register(type(remote))
+    app = make_app(root, registry=reg)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.get("/v1/node")
+        data = await resp.json()
+
+    assert data["hints"] == []
 
 
 # ----- Through the wire client -----

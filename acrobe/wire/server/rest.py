@@ -74,6 +74,22 @@ class EnumerationServer:
                 await node.start_tree()
             return node
 
+    def canonical_path(self, node: Node) -> str:
+        """Path of `node` relative to hw_root, matching the URL space.
+
+        `Node.path` carries the hw_root's name as a leading segment;
+        URLs do not. Strip it so REST `path` fields are walkable
+        programmatically by appending to the URL prefix.
+        """
+        full = node.path
+        root_name = self.hw_root.name
+        if full == root_name:
+            return ""
+        prefix = root_name + "/"
+        if full.startswith(prefix):
+            return full[len(prefix):]
+        return full  # node not under hw_root — leave as-is, surface oddly
+
     def describe(self, node: Node, request: web.Request,
                  *, include_children: bool = True) -> dict:
         """Render `node` as the REST JSON response body."""
@@ -81,7 +97,7 @@ class EnumerationServer:
         is_node_kind = entry is not None and entry.kind == "node"
 
         out = {
-            "path":        node.path,
+            "path":        self.canonical_path(node),
             "name":        node.name,
             "type":        type(node).__name__,
             "metadata":    dict(node.metadata) if hasattr(node, "metadata") else {},
@@ -94,6 +110,7 @@ class EnumerationServer:
                 self.describe(c, request, include_children=False)
                 for c in node.children
             ]
+            out["hints"] = list(node.child_hints())
         return out
 
     def _connect_url(self, node: Node, request: web.Request) -> str:
@@ -111,7 +128,10 @@ class EnumerationServer:
 
         scheme = "wss" if request.scheme == "https" else "ws"
         host = request.host
-        path = REST_PATH_PREFIX + "/" + _encode_path(node.path)
+        canonical = self.canonical_path(node)
+        path = REST_PATH_PREFIX
+        if canonical:
+            path = path + "/" + _encode_path(canonical)
         return f"{scheme}://{host}{path}?token={quote(token, safe='')}"
 
 
@@ -124,16 +144,27 @@ async def _enumerate_handler(request: web.Request) -> web.Response:
     server: EnumerationServer = request.app[WIRE_SERVER_KEY]
 
     raw_path = request.match_info.get("path", "")
-    parts = [p for p in raw_path.strip("/").split("/") if p]
+    requested = "/".join(p for p in raw_path.strip("/").split("/") if p)
+    parts = [p for p in requested.split("/") if p]
 
     try:
         node = await server.resolve_node(parts)
     except Exception as exc:
         return web.json_response(
             {"error": "node_not_found",
-             "path": "/".join(parts),
+             "path": requested,
              "detail": str(exc)},
             status=404)
+
+    # If the resolved node's canonical path differs from the requested
+    # one, the caller used a shortcut (substring/case-insensitive name).
+    # Redirect to the canonical URL so clients can keep stable refs.
+    canonical = server.canonical_path(node)
+    if canonical != requested:
+        location = REST_PATH_PREFIX
+        if canonical:
+            location = location + "/" + _encode_path(canonical)
+        raise web.HTTPFound(location=location)
 
     return web.json_response(server.describe(node, request))
 
