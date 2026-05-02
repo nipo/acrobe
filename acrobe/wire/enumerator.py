@@ -121,8 +121,14 @@ class RemoteServerRoot(Node):
         for child_info in self._info.get("children", []):
             child = _build_remote_child(self, child_info)
             self._child_attach(child)
+        # Catch the case where stop_tree() never gets called (CLI exit,
+        # crash, …): the lifecycle drains us at process shutdown.
+        from ..lifecycle import on_shutdown
+        on_shutdown(self.stop)
 
     async def stop(self):
+        from ..lifecycle import cancel_shutdown
+        cancel_shutdown(self.stop)
         if self._client is not None:
             await self._client.__aexit__(None, None, None)
             self._client = None

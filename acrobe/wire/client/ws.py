@@ -86,8 +86,12 @@ class WireClient:
                     f"first frame must be Catalog, got {type(catalog).__name__}")
             session = Session(registry)
             session.apply_catalog(catalog)
-            return cls(ws, session,
-                       http_session=session_to_use if owns_session else None)
+            instance = cls(ws, session,
+                           http_session=session_to_use if owns_session else None)
+            # Catch leaked clients at process shutdown.
+            from ...lifecycle import on_shutdown
+            on_shutdown(instance.close)
+            return instance
         except Exception:
             if owns_session:
                 await session_to_use.close()
@@ -138,6 +142,8 @@ class WireClient:
         if self._closed:
             return
         self._closed = True
+        from ...lifecycle import cancel_shutdown
+        cancel_shutdown(self.close)
         await self._ws.close()
         try:
             await self._reader_task

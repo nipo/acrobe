@@ -31,6 +31,15 @@ async def cli(verbose, quiet, timestamp, no_color, silent, silent_re, only_re):
     )
 
 
+@cli.result_callback()
+async def _drain_lifecycle(result, **kwargs):
+    """Drain anything still registered with acrobe.lifecycle after a
+    CLI command finishes. Library users call `acrobe.shutdown()`
+    themselves; for the CLI, this hook makes it automatic."""
+    from .. import lifecycle
+    await lifecycle.shutdown()
+
+
 # --- Custom param types ---
 
 class HexParamType(click.ParamType):
