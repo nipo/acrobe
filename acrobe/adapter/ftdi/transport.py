@@ -64,6 +64,12 @@ class FtdiTransport:
         self._interface_index = interface_index
         self._pair = pair
         self._max_packet_size = max_packet_size
+        if ctx is not None:
+            # Ctx-owning transports register a fallback close so the
+            # USB device handle is released even if .close() never
+            # runs (process exit, exception path).
+            from ...lifecycle import on_shutdown
+            on_shutdown(self.close)
 
     @staticmethod
     def _endpoint_mps(device, interface_index, ep_address):
@@ -303,6 +309,8 @@ class FtdiTransport:
         When created via from_device() (ctx=None), only releases the
         interface — the caller owns the device lifetime.
         """
+        from ...lifecycle import cancel_shutdown
+        cancel_shutdown(self.close)
         idx = self._interface_index + 1
         await self._device.vendor_control(
             SIO_SET_BITMODE, BITMODE_RESET << 8, idx, b'')
@@ -310,3 +318,4 @@ class FtdiTransport:
         if self._ctx is not None:
             self._device.handle.close()
             self._ctx.close()
+            self._ctx = None

@@ -84,6 +84,17 @@ class UsbEnumerator:
         if self._ctx is None:
             import ausb
             self._ctx = ausb.Context(enable_hotplug=False)
+            # Hook the context's close into the lifecycle so it
+            # doesn't leak when the process exits without a tree-level
+            # teardown. The context persists for the process lifetime
+            # otherwise.
+            from ..lifecycle import on_shutdown
+            on_shutdown(self._close_ctx)
+
+    async def _close_ctx(self):
+        if self._ctx is not None:
+            self._ctx.close()
+            self._ctx = None
 
     def _iter_matches(self):
         """Yield (AdapterInfo, adapter_cls, descriptor) for static descriptor matches."""
