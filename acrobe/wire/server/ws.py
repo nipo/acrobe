@@ -47,8 +47,16 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     except Exception as exc:
         raise web.HTTPNotFound(reason=f"node not found: {exc}")
 
-    entry = server.registry.try_lookup_by_class(type(node))
-    if entry is None or entry.kind != "node":
+    # Walk MRO so subclasses of a registered @wire.node are openable
+    # too (concrete adapters like JtagMpsse subclass the registered
+    # JtagInterface; the wire contract belongs to the parent).
+    entry = None
+    for base in type(node).__mro__:
+        candidate = server.registry.try_lookup_by_class(base)
+        if candidate is not None and candidate.kind == "node":
+            entry = candidate
+            break
+    if entry is None:
         raise web.HTTPBadRequest(
             reason=f"{type(node).__name__} is not a registered "
                    f"@wire.node — cannot open over the wire")
@@ -63,7 +71,10 @@ async def handle_ws(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
 
     session = Session(server.registry)
-    catalog = session.build_catalog(type(node))
+    # Build the catalog from the registered ancestor class so the
+    # wire identity matches what the client knows (the abstract
+    # @wire.node, not a concrete adapter subclass).
+    catalog = session.build_catalog(entry.cls)
     await ws.send_bytes(encode_catalog(catalog))
 
     send_queue: asyncio.Queue = asyncio.Queue()
