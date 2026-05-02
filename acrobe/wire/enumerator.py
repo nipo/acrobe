@@ -2,10 +2,19 @@
 local subtree under `wire/`.
 
 Intent: `acrobe info enumerate -r wire/server0/ub3-/jtag/chain` walks
-the same hw_root.child_summon machinery as a local path, but the
-segments below `server0` are resolved by REST against the remote
-server. Each remote node is materialized as a `RemoteProxyNode`
-holding the JSON metadata returned by the server.
+the same hw_root.child_summon machinery as a local path. The
+walker decides per request whether each remote segment can be
+served by REST enumeration alone or whether it crosses a
+@wire.node boundary that needs WS transport.
+
+Cutoff rule: walk REST through the requested path; the deepest
+segment whose remote `wire_uuid` matches a locally-registered
+@wire.node is the wire cutoff. WS opens there; subsequent
+segments are walked locally on the proxy (which IS-A the
+registered class — child_spawn / db / subclass methods all
+work). Today only JtagInterface is @wire.node, so JTAG is the
+only cutoff option; when Chain/Tap join, the deepest wins
+automatically — no API change.
 
 Configuration shape (in `~/.config/acrobe.conf`):
 
@@ -14,12 +23,10 @@ Configuration shape (in `~/.config/acrobe.conf`):
         server0:
           base: http://10.0.4.9:1234
           # user, password, token: reserved for later; OpenAuth for now.
-
-Only enumeration is exposed here. Operating on a remote @wire.node
-(opening a WS, posting ops via RemoteBatcher) is a separate API on
-top of `acrobe.wire.client`.
 """
 
+import uuid as uuid_lib
+from dataclasses import dataclass
 from typing import Optional
 
 from ..configuration import Configuration, get_configuration
@@ -73,12 +80,28 @@ class WireNamespace(Node):
         return servers if isinstance(servers, dict) else {}
 
 
+@dataclass
+class _Cutoff:
+    """Deepest @wire.node found while REST-walking a requested path.
+
+    `depth` is the index into the segment list passed to
+    child_summon — segments 0..depth land on the remote @wire.node;
+    segments depth+1.. are walked locally on the proxy.
+    """
+    depth: int
+    target_class: type
+    remote_path: str
+    connect_url: str
+    name: str
+
+
 class RemoteServerRoot(Node):
     """One configured wire server. Holds an open EnumerationClient
     for the lifetime of the node (from start_tree to stop_tree).
 
     Children are pre-populated from a REST GET of the server's root
-    on start. `child_spawn` walks deeper paths via REST."""
+    on start. `child_summon` walks the requested path with
+    cutoff awareness — see module docstring."""
 
     def __init__(self, name: str, base_url: str):
         super().__init__(name)
@@ -108,6 +131,84 @@ class RemoteServerRoot(Node):
         if self._info is None:
             return []
         return list(self._info.get("hints", []))
+
+    async def child_summon(self, *parts):
+        """Resolve `parts` against the remote server.
+
+        Walks REST to find the deepest @wire.node along the path.
+        If found, opens a WS proxy there and walks the remaining
+        segments locally on it. Otherwise falls back to plain
+        REST proxy traversal.
+        """
+        if not parts:
+            return self
+
+        cutoff = await self._find_cutoff(parts)
+        if cutoff is None:
+            # No transportable node in the path — fall back to the
+            # standard one-segment-at-a-time walk via child_spawn,
+            # producing RemoteProxyNodes for enumeration.
+            return await super().child_summon(*parts)
+
+        proxy = await self._open_proxy(cutoff)
+        # Hook into the local tree under self so the proxy has a
+        # parent and is reachable for stop_tree.
+        if proxy._parent is None:
+            self._child_attach(proxy)
+        if not proxy._started:
+            await proxy.start()
+            proxy._started = True
+
+        remaining = parts[cutoff.depth + 1:]
+        if not remaining:
+            return proxy
+        return await proxy.child_summon(*remaining)
+
+    async def _find_cutoff(self, parts) -> Optional[_Cutoff]:
+        """REST-walk `parts`, return the deepest @wire.node along the
+        way or None. Stops walking as soon as a step's REST GET
+        fails — leaves fallback handling to the caller."""
+        from . import default_registry
+        registry = default_registry()
+        deepest: Optional[_Cutoff] = None
+        current = ""
+        for depth, segment in enumerate(parts):
+            current = f"{current}/{segment}".lstrip("/")
+            try:
+                info = await self._fetch(current)
+            except Exception:
+                return deepest
+
+            wire_uuid_str = info.get("wire_uuid")
+            if not wire_uuid_str:
+                continue
+            try:
+                entry = registry.lookup_by_uuid(uuid_lib.UUID(wire_uuid_str))
+            except (KeyError, ValueError):
+                continue
+            if entry.kind != "node":
+                continue
+            connect_url = info.get("connect_url")
+            if not connect_url:
+                continue
+            deepest = _Cutoff(
+                depth=depth,
+                target_class=entry.cls,
+                remote_path=info["path"],
+                connect_url=connect_url,
+                name=info["name"])
+        return deepest
+
+    async def _open_proxy(self, cutoff: _Cutoff):
+        """Open a WS to the cutoff and build a local proxy that
+        IS-A `cutoff.target_class`."""
+        from . import default_registry
+        from .client import WireClient, make_remote_proxy
+
+        wire_client = await WireClient.connect(
+            cutoff.connect_url, default_registry())
+        return make_remote_proxy(
+            cutoff.target_class, wire_client, name=cutoff.name)
 
     async def child_spawn(self, name: str):
         info = await self._fetch(name)

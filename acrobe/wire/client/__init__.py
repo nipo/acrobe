@@ -5,7 +5,7 @@ and exposes a low-level `WireClient`. `proxy` wraps a `WireClient`
 in a `RemoteBatcher` that mimics the local Batcher API.
 """
 
-from .proxy import RemoteBatcher
+from .proxy import RemoteBatcher, make_remote_proxy
 from .rest import EnumerationClient, NodeNotFound
 from .ws import WireClient, WireClientError
 
@@ -15,4 +15,5 @@ __all__ = [
     "RemoteBatcher",
     "WireClient",
     "WireClientError",
+    "make_remote_proxy",
 ]
