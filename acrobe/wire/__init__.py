@@ -42,7 +42,7 @@ from .registry import (
 from .session import Session, SessionError
 # errors imports session, so keep it last to avoid circulars.
 from .errors import InternalError  # noqa: E402  (registers in default registry)
-from .server import handle_request  # noqa: E402
+from .dispatch import handle_request  # noqa: E402
 
 __all__ = [
     "AuthBackend",
