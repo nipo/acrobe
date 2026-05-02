@@ -17,6 +17,18 @@ See PLAN_wire.md for the full design.
 from .auth import AuthBackend, OpenAuthBackend, audit_log
 from .codec import CodecError, from_bytes, to_bytes
 from .debug import dump_idl
+from .frame import (
+    Catalog,
+    FrameError,
+    ProtocolError,
+    Request,
+    Response,
+    decode_frame,
+    encode_catalog,
+    encode_protocol_error,
+    encode_request,
+    encode_response,
+)
 from .principal import Principal, Scope
 from .registry import (
     Registry,
@@ -27,21 +39,39 @@ from .registry import (
     node,
     op,
 )
+from .session import Session, SessionError
+# errors imports session, so keep it last to avoid circulars.
+from .errors import InternalError  # noqa: E402  (registers in default registry)
+from .server import handle_request  # noqa: E402
 
 __all__ = [
     "AuthBackend",
+    "Catalog",
     "CodecError",
+    "FrameError",
+    "InternalError",
     "OpenAuthBackend",
     "Principal",
+    "ProtocolError",
     "Registry",
     "RegistryEntry",
     "RegistryError",
+    "Request",
+    "Response",
     "Scope",
+    "Session",
+    "SessionError",
     "audit_log",
+    "decode_frame",
     "default_registry",
     "dump_idl",
+    "encode_catalog",
+    "encode_protocol_error",
+    "encode_request",
+    "encode_response",
     "error",
     "from_bytes",
+    "handle_request",
     "node",
     "op",
     "to_bytes",
