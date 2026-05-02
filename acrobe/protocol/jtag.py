@@ -3,11 +3,27 @@ import inspect
 import math
 from dataclasses import dataclass, field
 
+from .. import wire
 from ..engine import Batcher
 from ..node import Node
 from ..freq_capper import FreqCapper
 from ..bitstring import BitString, BitStringBase
 from ..db import Db, NoMatch
+
+
+# UUIDs for transportable JTAG types. Stable, hand-minted; new types
+# get fresh UUIDs without renumbering existing ones.
+SHIFT_UUID         = "00010001-0000-4000-8000-000000000001"
+CAPTURE_DR_UUID    = "00010001-0000-4000-8000-000000000002"
+CAPTURE_IR_UUID    = "00010001-0000-4000-8000-000000000003"
+RESET_UUID         = "00010001-0000-4000-8000-000000000004"
+RUN_UUID           = "00010001-0000-4000-8000-000000000005"
+SWD_TO_JTAG_UUID   = "00010001-0000-4000-8000-000000000006"
+OPEN_CHAIN_UUID    = "00010001-0000-4000-8000-0000000000fe"
+
+JTAG_INTERFACE_UUID = "00010001-0000-4000-8000-0000000000a0"
+CHAIN_UUID          = "00010001-0000-4000-8000-0000000000a1"
+TAP_UUID            = "00010001-0000-4000-8000-0000000000a2"
 
 
 # JTAG Interface Operations
@@ -22,24 +38,28 @@ from ..db import Db, NoMatch
 # and futures already carry the value cleanly.
 
 
+@wire.op(SHIFT_UUID)
 @dataclass(frozen=True)
 class Shift:
     """Shift data through TDI/TDO."""
 
-    tdi: BitStringBase
+    tdi: BitString
     read_tdo: bool = True
 
 
+@wire.op(CAPTURE_DR_UUID)
 @dataclass(frozen=True)
 class CaptureDr:
     """Transition FSM to Capture-DR."""
 
 
+@wire.op(CAPTURE_IR_UUID)
 @dataclass(frozen=True)
 class CaptureIr:
     """Transition FSM to Capture-IR."""
 
 
+@wire.op(RESET_UUID)
 @dataclass(frozen=True)
 class Reset:
     """TAP reset via TMS. `count` is clamped to a 5-cycle minimum."""
@@ -51,6 +71,7 @@ class Reset:
         return BitString(-1, max(self.count, 5))
 
 
+@wire.op(RUN_UUID)
 @dataclass(frozen=True)
 class Run:
     """Run TCK cycles in Run-Test/Idle."""
@@ -58,27 +79,32 @@ class Run:
     cycles: int
 
 
+# Class-level constant for SwdToJtag — the TMS sequence is fixed.
+# Kept off the dataclass fields so it doesn't bloat every wire message.
+_SWD_TO_JTAG_TMS = BitString(-1, 50) + BitString(0xe73c, 16) + BitString(-1, 5)
+
+
+@wire.op(SWD_TO_JTAG_UUID)
 @dataclass(frozen=True)
 class SwdToJtag:
     """SWD-to-JTAG switch sequence."""
 
-    # Class-level constant — same sequence for every instance.
-    TMS: BitString = field(default=BitString(-1, 50) + BitString(0xe73c, 16)
-                           + BitString(-1, 5),
-                           repr=False)
-
     @property
     def tms(self) -> BitString:
-        return self.TMS
+        return _SWD_TO_JTAG_TMS
 
 
 # Internal Tap Operations
+# Not @wire-decorated yet — Chain/Tap aren't transportable in v1
+# because TapOp envelopes carry Python object references that don't
+# serialize cleanly. Revisit when wire transport for Chain/Tap is in
+# scope.
 
 
 @dataclass(frozen=True)
 class _TapShift:
     ir_value: int | None
-    tdi: BitStringBase | None
+    tdi: BitString | None
     read_tdo: bool
 
 
@@ -340,6 +366,8 @@ class Tap(Batcher, Node, InstructionRegistry):
 
 # JTAG Interface
 
+@wire.node(JTAG_INTERFACE_UUID,
+           uses=[Shift, CaptureDr, CaptureIr, Reset, Run, SwdToJtag])
 class JtagInterface(Batcher, Node, FreqCapper):
     """Bit-level JTAG master interface.
 
@@ -373,9 +401,15 @@ class JtagInterface(Batcher, Node, FreqCapper):
 
 # Chain
 
+@wire.error(OPEN_CHAIN_UUID)
+@dataclass
 class OpenChain(Exception):
     """TDO line is stuck or disconnected."""
-    pass
+
+    detail: str = ""
+
+    def __post_init__(self):
+        super().__init__(self.detail)
 
 
 class ChainContext:

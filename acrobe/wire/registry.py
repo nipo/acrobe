@@ -81,7 +81,7 @@ class Registry:
         if kind == "node":
             uses_tuple = tuple(self._validate_node_use(cls, u) for u in uses)
             codec = None
-        elif kind in ("op", "error"):
+        elif kind in ("op", "error", "value"):
             if list(uses):
                 raise RegistryError(
                     f"{cls.__name__}: 'uses' is only valid on @wire.node")
@@ -151,6 +151,21 @@ def error(type_uuid: str):
     """
     def decorator(cls):
         _default_registry.register(cls, "error", type_uuid)
+        return cls
+    return decorator
+
+
+def value(type_uuid: str):
+    """Register a class as a Transportable value type.
+
+    Value types appear as field types inside @wire.op / @wire.error
+    payloads, but are not themselves posted as ops or raised as
+    errors. They do NOT belong in any node's `uses=[...]` — that list
+    is for ops and errors only. Value types still need a codec
+    (dataclass introspection or __cbor_encode__/__cbor_decode__).
+    """
+    def decorator(cls):
+        _default_registry.register(cls, "value", type_uuid)
         return cls
     return decorator
 

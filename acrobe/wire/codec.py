@@ -43,9 +43,16 @@ class CodecError(Exception):
 
 
 class _Codec:
-    """A codec attached to a registered class. Subclasses pick a strategy."""
+    """A codec attached to a registered class. Subclasses pick a strategy.
+
+    `referenced_types` is the set of registered Transportable classes
+    that this codec's encoded form references (directly or via nested
+    composite types). Used at catalog-build time to walk the
+    transitive closure of types a node needs in its tag table.
+    """
 
     cls: type
+    referenced_types: set
 
     def encode(self, instance) -> Any:
         """Return a cbor2-encodable Python object representing `instance`."""
@@ -61,6 +68,11 @@ class _CustomCodec(_Codec):
 
     def __init__(self, cls: type):
         self.cls = cls
+        # Custom codecs are opaque — they handle their own internal
+        # serialization. If they need to reference other Transportables,
+        # the developer must list those in some other way (not yet
+        # supported; add when needed).
+        self.referenced_types: set = set()
 
     def encode(self, instance) -> Any:
         return self.cls.__cbor_encode__(instance)
@@ -72,9 +84,11 @@ class _CustomCodec(_Codec):
 class _DataclassCodec(_Codec):
     """Codec generated from dataclass field annotations."""
 
-    def __init__(self, cls: type, fields: list["_FieldSchema"]):
+    def __init__(self, cls: type, fields: list["_FieldSchema"],
+                 referenced_types: set):
         self.cls = cls
         self.fields = fields
+        self.referenced_types = referenced_types
 
     def encode(self, instance) -> Any:
         return [f.encode(getattr(instance, f.name)) for f in self.fields]
@@ -108,11 +122,12 @@ class _FieldSchema:
 
 
 def _resolve_field_codec(annotation: Any, registry, owner: str, fname: str):
-    """Build (encode_fn, decode_fn) for a single field annotation.
+    """Build (encode_fn, decode_fn, referenced_types) for one field
+    annotation.
 
-    `registry` is the active Registry; lookups resolve nested
-    Transportable classes recursively. `owner` and `fname` are used
-    for error messages only.
+    `referenced_types` is the set of registered Transportable classes
+    this field's codec touches transitively — used at catalog build
+    time to compute the full type table the session needs.
     """
     if annotation is Any or annotation is None:
         raise CodecError(
@@ -120,7 +135,7 @@ def _resolve_field_codec(annotation: Any, registry, owner: str, fname: str):
             f"codec-supported. Use a concrete type.")
 
     if annotation in _PRIMITIVES:
-        return _identity, _identity
+        return _identity, _identity, set()
 
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
@@ -131,7 +146,7 @@ def _resolve_field_codec(annotation: Any, registry, owner: str, fname: str):
             raise CodecError(
                 f"{owner}.{fname}: only Optional[X] unions are "
                 f"supported, got {annotation!r}")
-        inner_enc, inner_dec = _resolve_field_codec(
+        inner_enc, inner_dec, refs = _resolve_field_codec(
             non_none[0], registry, owner, fname)
 
         def enc(v, _e=inner_enc):
@@ -140,48 +155,55 @@ def _resolve_field_codec(annotation: Any, registry, owner: str, fname: str):
         def dec(v, _d=inner_dec):
             return None if v is None else _d(v)
 
-        return enc, dec
+        return enc, dec, refs
 
     if origin is list:
         if len(args) != 1:
             raise CodecError(
                 f"{owner}.{fname}: list must be parameterized, got {annotation!r}")
-        inner_enc, inner_dec = _resolve_field_codec(
+        inner_enc, inner_dec, refs = _resolve_field_codec(
             args[0], registry, owner, fname)
         return (lambda v, _e=inner_enc: [_e(x) for x in v],
-                lambda v, _d=inner_dec: [_d(x) for x in v])
+                lambda v, _d=inner_dec: [_d(x) for x in v],
+                refs)
 
     if origin is dict:
         if len(args) != 2 or args[0] not in _PRIMITIVES:
             raise CodecError(
                 f"{owner}.{fname}: dict requires (primitive, V) parameters, "
                 f"got {annotation!r}")
-        v_enc, v_dec = _resolve_field_codec(args[1], registry, owner, fname)
+        v_enc, v_dec, refs = _resolve_field_codec(args[1], registry, owner, fname)
         return (lambda v, _e=v_enc: {k: _e(val) for k, val in v.items()},
-                lambda v, _d=v_dec: {k: _d(val) for k, val in v.items()})
+                lambda v, _d=v_dec: {k: _d(val) for k, val in v.items()},
+                refs)
 
     if origin is tuple:
         if not args:
             raise CodecError(
                 f"{owner}.{fname}: tuple must be parameterized, got {annotation!r}")
         if len(args) == 2 and args[1] is Ellipsis:
-            inner_enc, inner_dec = _resolve_field_codec(
+            inner_enc, inner_dec, refs = _resolve_field_codec(
                 args[0], registry, owner, fname)
             return (lambda v, _e=inner_enc: [_e(x) for x in v],
-                    lambda v, _d=inner_dec: tuple(_d(x) for x in v))
+                    lambda v, _d=inner_dec: tuple(_d(x) for x in v),
+                    refs)
         elem_codecs = [_resolve_field_codec(a, registry, owner, fname)
                        for a in args]
+        refs = set().union(*(r for _, _, r in elem_codecs))
         return (
             lambda v, _ec=elem_codecs:
-                [e(x) for (e, _), x in zip(_ec, v)],
+                [e(x) for (e, _, _), x in zip(_ec, v)],
             lambda v, _ec=elem_codecs:
-                tuple(d(x) for (_, d), x in zip(_ec, v)))
+                tuple(d(x) for (_, d, _), x in zip(_ec, v)),
+            refs)
 
     if isinstance(annotation, type):
         entry = registry.try_lookup_by_class(annotation)
         if entry is not None:
+            refs = {entry.cls} | entry.codec.referenced_types
             return (lambda v, _r=entry: _r.codec.encode(v),
-                    lambda v, _r=entry: _r.codec.decode(v))
+                    lambda v, _r=entry: _r.codec.decode(v),
+                    refs)
 
     raise CodecError(
         f"{owner}.{fname}: type {annotation!r} is not codec-supported. "
@@ -212,14 +234,16 @@ def build_codec(cls: type, registry) -> _Codec:
 
     hints = typing.get_type_hints(cls)
     schema = []
+    referenced: set = set()
     for f in dataclasses.fields(cls):
         if f.name not in hints:
             raise CodecError(
                 f"{cls.__name__}.{f.name}: missing type annotation.")
-        encode_fn, decode_fn = _resolve_field_codec(
+        encode_fn, decode_fn, refs = _resolve_field_codec(
             hints[f.name], registry, cls.__name__, f.name)
         schema.append(_FieldSchema(f.name, encode_fn, decode_fn))
-    return _DataclassCodec(cls, schema)
+        referenced |= refs
+    return _DataclassCodec(cls, schema, referenced)
 
 
 def to_bytes(instance, codec: _Codec) -> bytes:

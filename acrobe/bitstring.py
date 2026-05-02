@@ -40,6 +40,26 @@ class BitStringBase(ABC):
     def __hash__(self):
         return hash((len(self), bytes(self)))
 
+    @classmethod
+    def __cbor_encode__(cls, instance):
+        """Wire format: [bit_count, bytes_lsb_first].
+
+        Acrobe's BitString is LSB-first, which doesn't match the
+        standard CBOR bit-string convention. We use an app-specific
+        tag (registered in wire/values.py) to keep the semantics
+        explicit and avoid confusion with any future standard
+        bit-string encoding.
+        """
+        return [len(instance), bytes(instance)]
+
+    @classmethod
+    def __cbor_decode__(cls, data):
+        """Reverse of __cbor_encode__: rebuild a BitString from the
+        (bit_count, bytes) pair."""
+        from . import bitstring as _bs
+        length, raw = data
+        return _bs.BitString(raw, length)
+
     def reversed(self):
         """Return a new BitString with the bits in reverse order."""
         n = len(self)

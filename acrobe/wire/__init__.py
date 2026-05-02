@@ -38,11 +38,13 @@ from .registry import (
     error,
     node,
     op,
+    value,
 )
 from .session import Session, SessionError
 # errors imports session, so keep it last to avoid circulars.
 from .errors import InternalError  # noqa: E402  (registers in default registry)
 from .dispatch import handle_request  # noqa: E402
+from . import values  # noqa: E402,F401  (registers BitString)
 
 __all__ = [
     "AuthBackend",
@@ -75,4 +77,5 @@ __all__ = [
     "node",
     "op",
     "to_bytes",
+    "value",
 ]

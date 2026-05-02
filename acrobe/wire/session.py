@@ -110,11 +110,33 @@ class Session:
             self._install(type_entry.cls, session_tag)
 
     def _effective_uses(self, node_entry: RegistryEntry) -> list[uuid_lib.UUID]:
-        """The node's declared `uses` plus the always-on wire-level types
-        present in this Session's registry. Always-on types missing from
-        a (typically test-isolated) registry are silently skipped."""
-        seen = set(node_entry.uses)
-        result = list(node_entry.uses)
+        """The node's declared `uses` plus:
+        - value types referenced transitively by their codecs (so
+          BitString fields get a tag for response encoding);
+        - always-on wire-level types (InternalError, etc.) present in
+          this Session's registry.
+
+        Missing entries are silently skipped — keeps test-isolated
+        registries from needing to declare every dependency."""
+        seen: set[uuid_lib.UUID] = set()
+        result: list[uuid_lib.UUID] = []
+        queue: list[uuid_lib.UUID] = list(node_entry.uses)
+
+        while queue:
+            uid = queue.pop(0)
+            if uid in seen:
+                continue
+            try:
+                entry = self.registry.lookup_by_uuid(uid)
+            except KeyError:
+                continue
+            seen.add(uid)
+            result.append(uid)
+            for ref_cls in entry.codec.referenced_types:
+                ref_entry = self.registry.try_lookup_by_class(ref_cls)
+                if ref_entry is not None:
+                    queue.append(ref_entry.type_uuid)
+
         for uid in self.ALWAYS_ON:
             if uid in seen:
                 continue
@@ -122,8 +144,9 @@ class Session:
                 self.registry.lookup_by_uuid(uid)
             except KeyError:
                 continue
-            result.append(uid)
             seen.add(uid)
+            result.append(uid)
+
         return result
 
     def _allocate_tag(self, cls: type) -> int:
@@ -154,6 +177,11 @@ class Session:
         """Convert a Python value into a cbor2-encodable form,
         wrapping registered Transportables in CBOR tags by their
         session-local tag.
+
+        For class lookup we walk the MRO so subclasses of a
+        registered base type (e.g. BitStringSlice → BitString) share
+        the base's codec — the wire format is the same and slices
+        materialize on the receiving side as the base type.
         """
         if value is None or isinstance(value, (int, str, bytes, bool, float)):
             return value
@@ -162,17 +190,23 @@ class Session:
         if isinstance(value, dict):
             return {k: self.encode_value(v) for k, v in value.items()}
 
-        cls = type(value)
-        entry = self.registry.try_lookup_by_class(cls)
+        entry = self._lookup_with_mro(type(value))
         if entry is None:
             raise SessionError(
-                f"cannot encode {cls.__name__}: not a registered "
-                f"Transportable")
-        tag = self.class_to_tag.get(cls)
+                f"cannot encode {type(value).__name__}: not a "
+                f"registered Transportable")
+        tag = self.class_to_tag.get(entry.cls)
         if tag is None:
             raise SessionError(
-                f"cannot encode {cls.__name__}: not in session catalog")
+                f"cannot encode {entry.cls.__name__}: not in session catalog")
         return cbor2.CBORTag(tag, entry.codec.encode(value))
+
+    def _lookup_with_mro(self, cls: type):
+        for base in cls.__mro__:
+            entry = self.registry.try_lookup_by_class(base)
+            if entry is not None:
+                return entry
+        return None
 
     def decode_value(self, value: Any) -> Any:
         if isinstance(value, cbor2.CBORTag):
