@@ -508,8 +508,9 @@ class TestStart:
 
     @pytest.mark.asyncio
     async def test_start_no_debug_components(self):
+        # New-format BASE with P=0: 0x2 (FORMAT=1, P=0).
         dp = RecordingDp(ap_base=0)
-        responses = {MemAp.CFG: 0x0, MemAp.BASE_LO: 0x0}
+        responses = {MemAp.CFG: 0x0, MemAp.BASE_LO: 0x2}
         orig_flush = dp.flush_ops
 
         async def patched_flush(batch):
@@ -524,5 +525,47 @@ class TestStart:
         dp.flush_ops = patched_flush
 
         ap = _make_memap(dp, idr=0x04770001)
+        await ap.start()
+        assert ap.base_addr is None
+
+    @pytest.mark.asyncio
+    async def test_start_legacy_format_base(self):
+        # ADIv5.0 legacy BASE format: address in bits[31:12], bit 1=0,
+        # bit 0 RAZ. BASE != 0xFFFFFFFF means "present". Zynq-7's
+        # APB-AP returns 0x80000000 in this format.
+        dp = RecordingDp(ap_base=0)
+        responses = {MemAp.CFG: 0x0, MemAp.BASE_LO: 0x80000000}
+        orig_flush = dp.flush_ops
+
+        async def patched_flush(batch):
+            from acrobe.component.arm.dp import ApRead as ApR
+            for op, future in list(batch):
+                if isinstance(op, ApR) and op.addr in responses:
+                    future.set_result(responses[op.addr])
+                else:
+                    await orig_flush([(op, future)])
+        dp.flush_ops = patched_flush
+
+        ap = _make_memap(dp, idr=0x04770002)
+        await ap.start()
+        assert ap.base_addr == 0x80000000
+
+    @pytest.mark.asyncio
+    async def test_start_legacy_format_no_entry(self):
+        # Legacy "no entry" sentinel: 0xFFFFFFFF.
+        dp = RecordingDp(ap_base=0)
+        responses = {MemAp.CFG: 0x0, MemAp.BASE_LO: 0xFFFFFFFF}
+        orig_flush = dp.flush_ops
+
+        async def patched_flush(batch):
+            from acrobe.component.arm.dp import ApRead as ApR
+            for op, future in list(batch):
+                if isinstance(op, ApR) and op.addr in responses:
+                    future.set_result(responses[op.addr])
+                else:
+                    await orig_flush([(op, future)])
+        dp.flush_ops = patched_flush
+
+        ap = _make_memap(dp, idr=0x04770002)
         await ap.start()
         assert ap.base_addr is None

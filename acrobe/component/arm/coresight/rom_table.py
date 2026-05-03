@@ -47,6 +47,8 @@ class RomTable(MemoryMappedComponent):
     or the standard :class:`MemoryMappedComponent` lookup precedence.
     Failures install a :class:`PowerGate`."""
 
+    FRIENDLY_NAME = "ROM Table"
+
     # Per-SoC override registry keyed on (parent ROM PartId, child
     # absolute address). Lets vendors supply specific drivers for
     # generic components placed at well-known addresses.

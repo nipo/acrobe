@@ -161,15 +161,45 @@ class MemAp(Ap, Batcher):
         if self.cfg & self.CFG_LA:
             base_hi = await self.reg_read(self.BASE_HI)
 
-        # BASE encoding: bit[0] = P (present), bit[1] = format.
-        # When P=0, no debug components are accessible via this AP.
-        if not (base_lo & 0x1):
+        # BASE has two formats. The selector is bit[1] (FORMAT):
+        #
+        #   FORMAT = 1 (ADIv5.2 / ADIv6 format):
+        #     bit[0] = P  (1 = debug entry present, 0 = none)
+        #     bits[31:12] = ROM Table base address
+        #
+        #   FORMAT = 0 (legacy ADIv5.0 format):
+        #     bits[31:12] = ROM Table base address (unconditional)
+        #     bits[11:0] = RAZ
+        #     The whole register == 0xFFFFFFFF is the "no debug
+        #     entry" sentinel; any other value means present.
+        #
+        # We must accept both — Zynq-7's APB-AP uses the legacy
+        # format and reports BASE = 0x80000000, which the new-format
+        # check (bit 0) would mis-read as "P=0, no entry".
+        #
+        # 0xFFFFFFFF deserves a special case: it's the legacy
+        # "no entries" sentinel, and as a new-format value it
+        # would parse to P=1 / FORMAT=1 / address=0xFFFFF000 which
+        # is meaningless. Treat it as "no entries" regardless.
+        if base_lo == 0xFFFFFFFF:
             self.base_addr = None
-            self.logger.info("BASE: no debug components (P=0)")
+            self.logger.info("BASE 0xFFFFFFFF: no debug components (sentinel)")
+            return
+
+        new_format = bool(base_lo & 0x2)
+        present = bool(base_lo & 0x1) if new_format else True
+
+        if not present:
+            self.base_addr = None
+            self.logger.info(
+                "BASE 0x%08x: no debug components (new format, P=0)",
+                base_lo)
             return
 
         self.base_addr = ((base_hi & 0xffffffff) << 32) | (base_lo & 0xfffff000)
-        self.logger.info("BASE 0x%016x", self.base_addr)
+        self.logger.info(
+            "BASE 0x%016x (%s format)", self.base_addr,
+            "new" if new_format else "legacy")
 
         # Discover the component at BASE. Typically a ROM Table; can
         # also be a single CoreSight component (the spec permits
