@@ -72,6 +72,28 @@ class Run:
     cycles: int
 
 
+@dataclass(frozen=True)
+class ChipId:
+    """Best-available identifier for the chip behind a DP.
+
+    The fields mirror the JEP106 + part + revision shape used by both
+    TARGETID (DPv2+) and ROM Table PIDR (any ADI). ``source`` records
+    where the value came from so callers can adjust their expectations
+    (TARGETID is designed for this; ROM Table PIDR can be a debug
+    fabric IP block that's shared across chips, so it's a coarser
+    identifier)."""
+    jep106_continuation: int  # 4-bit JEP106 bank
+    jep106_id: int            # 7-bit JEP106 ID code
+    part_no: int              # part number (12 bits via PIDR, 16 via TARGETID)
+    revision: int             # revision (4 bits)
+    source: str               # "TARGETID" | "ROMTABLE@<addr>" | ...
+
+    def __str__(self):
+        return (f"jep{self.jep106_continuation}/0x{self.jep106_id:02x}"
+                f" part=0x{self.part_no:04x} rev={self.revision}"
+                f" ({self.source})")
+
+
 # --- Errors --------------------------------------------------------
 
 class DpAccessFailure(Exception):
@@ -224,7 +246,11 @@ class Dp(Batcher, Node):
         """Best-effort tree start: a single AP's failed ``start()``
         (e.g. a chip whose CFG/BASE is unresponsive on one AP) is
         logged but doesn't drop sibling APs from the tree. The failed
-        AP remains attached, just with an incomplete subtree."""
+        AP remains attached, just with an incomplete subtree.
+
+        After all children have been started (or failed), log the
+        chip identifier — by the time AP root ROM Tables are
+        discovered, ``chip_id()``'s fallback path is ready."""
         if not self._started:
             await self.start()
             self._started = True
@@ -235,10 +261,66 @@ class Dp(Batcher, Node):
                 self.logger.warning(
                     "Child %r start failed: %s. Subtree incomplete.",
                     child.name, exc, exc_info=True)
+        chip = self.chip_id()
+        if chip is not None:
+            self.logger.info("Chip ID: %s", chip)
+        else:
+            self.logger.info("Chip ID: unidentified")
 
     async def flush_ops(self, batch):
         raise NotImplementedError(
             f"{type(self).__name__} must implement flush_ops")
+
+    def chip_id(self) -> "ChipId | None":
+        """Return the best-available chip identifier, in this order
+        of preference:
+
+        1. **TARGETID** (DPv2+) when populated. TARGETID's bit[0] is
+           RES1 in spec, so a value with bit 0 cleared indicates the
+           manufacturer didn't populate it — fall through.
+        2. **Root ROM Table PIDR** discovered under any MEM-AP child.
+           This is the legacy place where chip identity has lived
+           since ADIv5.0 and is still where some manufacturers keep
+           it even on DPv2+ hardware.
+
+        Returns ``None`` when neither source is available — typical
+        only on chips that fail discovery entirely or have an empty
+        BASE on every AP."""
+        # 1. TARGETID — only meaningful when bit[0] (RES1) is actually 1.
+        if self.targetid is not None and (self.targetid & 0x1):
+            tdesigner = (self.targetid >> 1) & 0x7ff
+            return ChipId(
+                jep106_continuation=(tdesigner >> 7) & 0xf,
+                jep106_id=tdesigner & 0x7f,
+                part_no=(self.targetid >> 12) & 0xffff,
+                revision=(self.targetid >> 28) & 0xf,
+                source="TARGETID",
+            )
+
+        # 2. Root ROM Table PIDR. Look at each AP child and its first
+        # discovered child (typically the ROM Table at AP.BASE).
+        # Lazy imports avoid a circular dependency at module-load.
+        from .ap import Ap
+        from .coresight.model import MemoryMappedComponent
+
+        for ap in self._children:
+            if not isinstance(ap, Ap):
+                continue
+            for grandchild in ap._children:
+                if not isinstance(grandchild, MemoryMappedComponent):
+                    continue
+                if grandchild.cidr_class is None:
+                    continue
+                pid = grandchild.partid
+                return ChipId(
+                    jep106_continuation=pid.jep106_continuation,
+                    jep106_id=pid.jep106_id,
+                    part_no=pid.part_no,
+                    revision=grandchild.revision,
+                    source=f"ROMTABLE@0x{grandchild.base:x}",
+                )
+
+        return None
 
     def __repr__(self):
         return f"<{type(self).__name__} {self._name}>"
