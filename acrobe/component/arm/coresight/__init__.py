@@ -6,3 +6,5 @@ components against the relevant Dbs on `MemoryMappedComponent` and
 """
 
 from . import model  # noqa: F401
+from . import power_gate  # noqa: F401
+from . import rom_table  # noqa: F401

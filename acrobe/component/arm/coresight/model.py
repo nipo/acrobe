@@ -304,6 +304,23 @@ class MemoryMappedComponent(Node):
         registers, configure the component, etc."""
         pass
 
+    async def start_tree(self):
+        """Best-effort tree start. A single child's failed start()
+        is logged with a traceback but does not drop sibling children
+        or block their start. Matches the ARM-debug discovery
+        philosophy: surface as much of the tree as possible, even
+        when individual subtrees are unreachable."""
+        if not self._started:
+            await self.start()
+            self._started = True
+        for child in self._children:
+            try:
+                await child.start_tree()
+            except Exception as exc:
+                self.logger.warning(
+                    "Child %r start failed: %s. Subtree incomplete.",
+                    child.name, exc, exc_info=True)
+
     def __repr__(self):
         ids = self.ids
         return (f"<{type(self).__name__} {self._name} "
@@ -345,5 +362,9 @@ def _pick_class(ids: ComponentIds):
             return handlers[0]
         except NoMatch:
             pass
-    # 4. Fallback to the generic class.
+    # 4. Class 0x1 ROM Tables: lazy import to avoid circular dep.
+    if ids.cidr_class == MemoryMappedComponent.CLASS_ROM_TABLE:
+        from .rom_table import RomTable
+        return RomTable
+    # 5. Fallback to the generic class.
     return MemoryMappedComponent

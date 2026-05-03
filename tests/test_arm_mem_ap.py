@@ -454,6 +454,59 @@ class TestStart:
         assert ap.base_addr == 0xe0000000
 
     @pytest.mark.asyncio
+    async def test_start_with_valid_base_walks_rom_table(self):
+        # MemAp.start at an AP whose BASE points to a valid ROM Table
+        # should attach the ROM Table as a child after discovery.
+        from acrobe.component.arm.coresight.model import (
+            MemoryMappedComponent, PartId,
+        )
+        from acrobe.component.arm.coresight.rom_table import RomTable
+
+        dp = RecordingDp(ap_base=0)
+        # Place a Class 0x1 ROM Table at 0xE000_0000 in the AP's
+        # memory space. The CIDR preamble + class encoding plus the
+        # PIDR4 (size=0, jep106 cont=4) identify it as a ROM Table.
+        rom_base = 0xE000_0000
+        # PIDR0..3 — synthesize an ARM-designed component, part 0x100.
+        dp.install_word(rom_base + 0xFE0, 0x00)        # PIDR0 (part lo)
+        dp.install_word(rom_base + 0xFE4, 0xB1)        # PIDR1 (jep_id_lo<<4 | part_hi)
+        dp.install_word(rom_base + 0xFE8, 0x03)        # PIDR2 (rev<<4 | jedec | jep_id_hi)
+        dp.install_word(rom_base + 0xFEC, 0x00)        # PIDR3
+        dp.install_word(rom_base + 0xFD0, 0x04)        # PIDR4 (size_log2<<4 | jep_cont=4)
+        # CIDR preamble + class 0x1
+        dp.install_word(rom_base + 0xFF0, 0x0D)
+        dp.install_word(rom_base + 0xFF4, 0x10)        # class=1
+        dp.install_word(rom_base + 0xFF8, 0x05)
+        dp.install_word(rom_base + 0xFFC, 0xB1)
+        # ROM entry 0 = 0 → terminator (empty ROM).
+
+        # AP register file: CFG=0, BASE_LO=0xE000_0001 (P=1, addr=0xE000_0000).
+        responses = {
+            MemAp.CFG:    0x0,
+            MemAp.BASE_LO: 0xE000_0001,
+        }
+        orig_flush = dp.flush_ops
+
+        async def patched_flush(batch):
+            from acrobe.component.arm.dp import (
+                Abort, ApRead as ApR, Run,
+            )
+            for op, future in list(batch):
+                if isinstance(op, ApR) and op.addr in responses:
+                    future.set_result(responses[op.addr])
+                else:
+                    await orig_flush([(op, future)])
+        dp.flush_ops = patched_flush
+
+        ap = _make_memap(dp, idr=0x04770001)
+        await ap.start()
+
+        # MemAp should have a single child: the discovered RomTable.
+        rom_children = [c for c in ap.children if isinstance(c, RomTable)]
+        assert len(rom_children) == 1
+        assert rom_children[0].base == rom_base
+
+    @pytest.mark.asyncio
     async def test_start_no_debug_components(self):
         dp = RecordingDp(ap_base=0)
         responses = {MemAp.CFG: 0x0, MemAp.BASE_LO: 0x0}

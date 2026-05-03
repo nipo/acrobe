@@ -147,9 +147,9 @@ class MemAp(Ap, Batcher):
         }.get(type_field, "")
 
     async def start(self):
-        """Read CFG and BASE; log them. The BASE-pointed ROM Table is
-        walked by slice 5's CoreSight discovery — for slice 3 we
-        merely surface the value."""
+        """Read CFG and BASE; if BASE is valid, kick off CoreSight
+        discovery at that address by attaching the discovered
+        component (typically a ROM Table) as our child."""
         self.cfg = await self.reg_read(self.CFG)
         self.logger.info("CFG 0x%08x (LA=%d, LD=%d)",
                          self.cfg,
@@ -166,9 +166,50 @@ class MemAp(Ap, Batcher):
         if not (base_lo & 0x1):
             self.base_addr = None
             self.logger.info("BASE: no debug components (P=0)")
-        else:
-            self.base_addr = ((base_hi & 0xffffffff) << 32) | (base_lo & 0xfffff000)
-            self.logger.info("BASE 0x%016x", self.base_addr)
+            return
+
+        self.base_addr = ((base_hi & 0xffffffff) << 32) | (base_lo & 0xfffff000)
+        self.logger.info("BASE 0x%016x", self.base_addr)
+
+        # Discover the component at BASE. Typically a ROM Table; can
+        # also be a single CoreSight component (the spec permits
+        # APs with one accessible component and no ROM Table).
+        # Discovery is best-effort — a faulty BASE doesn't kill the
+        # AP: we install a PowerGate placeholder.
+        from .coresight.model import ComponentIds, MemoryMappedComponent
+        from .coresight.power_gate import FailureKind, PowerGate
+
+        try:
+            child = await MemoryMappedComponent.discover(self, self.base_addr)
+        except Exception as exc:
+            self.logger.warning(
+                "BASE component at 0x%x: discover failed: %s",
+                self.base_addr, exc, exc_info=True)
+            child = PowerGate(self, self.base_addr, FailureKind.FAULT)
+
+        if (isinstance(child, MemoryMappedComponent)
+                and child.cidr_class is None):
+            self.logger.info(
+                "BASE component at 0x%x: no CIDR preamble — installing PowerGate",
+                self.base_addr)
+            child = PowerGate(self, self.base_addr, FailureKind.EMPTY)
+
+        self.child_add(child)
+
+    async def start_tree(self):
+        """Best-effort tree start: a single child's failed start()
+        is logged but doesn't drop siblings or block a power-gated
+        sibling from later retry."""
+        if not self._started:
+            await self.start()
+            self._started = True
+        for child in self._children:
+            try:
+                await child.start_tree()
+            except Exception as exc:
+                self.logger.warning(
+                    "Child %r start failed: %s. Subtree incomplete.",
+                    child.name, exc, exc_info=True)
 
     # -- Op posting (Batcher API) -----------------------------------
 
