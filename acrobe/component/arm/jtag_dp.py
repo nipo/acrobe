@@ -100,13 +100,17 @@ class JtagDpTap(Tap):
 #   0x_BA00477  — JTAG-DPv0/v1 (ADIv5)
 #   0x_BA01477  — JTAG-DPv1 multidrop variant
 #   0x_BA02477  — JTAG-DPv2 (ADIv5 with multidrop)
-#   0x_BA05477  — JTAG-DPv5 (ADIv6, observed on Cortex-A devices)
+#
+# DPv3 (ADIv6) JTAG-DP uses "JTAG DP Protocol version 1" — different
+# OK/FAULT ACK encoding, different overrun semantics, and distinct
+# IDCODEs. It is NOT wire-compatible with this class. A separate
+# JtagDpV3Tap will register the DPv3 IDCODEs when ADIv6 hardware
+# support lands.
 
 JTAG_DP_IDCODES = (
     0x0BA00477,
     0x0BA01477,
     0x0BA02477,
-    0x0BA05477,
 )
 
 for _idcode in JTAG_DP_IDCODES:
@@ -130,18 +134,26 @@ class JtagDp(dpmod.Dp):
         self._select: int | None = None  # cached SELECT value
 
     def _select_for(self, op) -> int:
-        """Compute the SELECT value needed for ``op``. Bits 31:24 =
-        APSEL, bits 7:4 = APBANKSEL, bits 3:0 = DPBANKSEL."""
+        """Compute the SELECT value needed for ``op``, using ADIv6's
+        unified ADDR[31:4] view. SELECT[31:4] = ADDR[31:4],
+        SELECT[3:0] = DPBANKSEL.
+
+        For an ADIv5 chip with AP base ``apsel << 24`` and register
+        offset ``r``, this produces SELECT = (apsel << 24) |
+        (r & 0xf0) | dpbank — byte-identical to the legacy ADIv5
+        APSEL/APBANKSEL/DPBANKSEL packing.
+
+        SELECT1 (ADDR[63:32], DPv3+) is not handled here — slice 2
+        targets DPv0-v2 (ASIZE = 32)."""
         cur = 0 if self._select is None else self._select
         if isinstance(op, (dpmod.ApRead, dpmod.ApWrite)):
-            apsel = (op.ap >> 24) & 0xff
-            apbank = (op.addr >> 4) & 0xf
+            addr_high = ((op.ap + op.addr) & 0xFFFFFFF0)
             dpbank = cur & 0xf
+            return addr_high | dpbank
         else:
-            apsel = (cur >> 24) & 0xff
-            apbank = (cur >> 4) & 0xf
+            addr_high = cur & 0xFFFFFFF0
             dpbank = (op.addr >> 4) & 0xf
-        return (apsel << 24) | (apbank << 4) | dpbank
+            return addr_high | dpbank
 
     async def flush_ops(self, batch):
         tap = self._parent

@@ -417,12 +417,32 @@ JTAG transport.
   `JtagInterface`; we'll register caps from DP/AP `start()` once
   a chip surfaces the constraint. Until then, no caps; the
   enumeration runs at chain-discovery cap (1 MHz today).
-* **AP enumeration: ADIv6-only.** ADIv5's "AP index 0..255" is just
-  a degenerate case of ADIv6's AP-base-address scheme — ADIv5 APs sit
-  at addresses `index << 24` in the ADIv6 view. We implement ADIv6
-  discovery (architected pointer chain via SELECT/SELECT1) only; it
-  works against ADIv5 chips transparently, with the addresses falling
-  on `n << 24` boundaries.
+* **SELECT/SELECT1 lowering: ADIv6 view.** SELECT[31:4] = ADDR[31:4],
+  SELECT[3:0] = DPBANKSEL; SELECT1 holds ADDR[63:32] when ASIZE > 32.
+  An ADIv5 chip falls out as a degenerate case: AP at base `n << 24`
+  with register offset `r` produces SELECT = `(n<<24) | (r&0xf0) |
+  dpbank`, byte-identical to ADIv5's APSEL/APBANKSEL packing.
+  One unified math path for both worlds.
+
+* **AP enumeration: split by DP architecture version.** ADIv6 mandates
+  DPv3, which is *not* wire-compatible with DPv0-v2 (different
+  OK/FAULT ACK, different overrun, distinct IDCODEs). So the
+  enumeration mechanism is different too:
+  - **DPv0-v2 (ADIv5)**: walk APSEL = 0..15 + 240..255, read IDR at
+    each base = `apsel << 24`. APs with non-zero IDR materialize.
+  - **DPv3 (ADIv6)**: read DPIDR1.ASIZE + BASEPTR0 (+BASEPTR1 if
+    ASIZE > 32); walk the ROM Table at that address, treating each
+    entry as an AP base. **Lands in slice 5**, alongside the general
+    CoreSight ROM walker — the procedure is the same machinery.
+  Slice 2 implements the DPv0-v2 path (the immediate Zynq-7 target);
+  the DPv3 path is a TODO that asserts loudly until slice 5 lands.
+
+* **DPv3 JTAG-DP wire protocol** is also distinct from DPv0-v2 —
+  separate OK/FAULT ACKs, re-keyed sticky-error behavior. Out of
+  scope for slices 1-2; a separate `JtagDpV3Tap` will land when ADIv6
+  hardware shows up. The IDCODE `0x_BA05_477` was prematurely listed
+  in the slice-1 registration; it should NOT spawn the current
+  DPv0-v2 `JtagDpTap`. Removing it from the registration list.
 * **`PowerGate` retry from CLI.** Once Target framework lands, gates
   are walked by Target drivers. Pre-Target, an info subcommand
   `acrobe info gate retry <path>` is useful for debugging; ship it
