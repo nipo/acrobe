@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..cpuid import Cpuid
+from ..cpuid import Cpuid, FEATURE_REGISTERS
 from ..dp import DpAccessFailure
 from .model import DevArch, MemoryMappedComponent, PartId
 
@@ -163,13 +163,16 @@ class Scs(MemoryMappedComponent):
         values = await asyncio.gather(*(safe(o) for o in offsets))
         return CpuFeatures(**dict(zip(keys, values)))
 
-    async def dump_cpu(self) -> list[str]:
+    async def dump_cpu(self, *, verbose: bool = False) -> list[str]:
         """Return a multi-line, human-readable identification dump:
-        CPUID + the most useful feature flags. Each line is one
-        `key: value` entry; callers print or log them as they like.
+        CPUID, then a one-line summary of FPU / div / MAC / security
+        feature flags, and (when ``verbose`` is set) a fully
+        decoded breakdown of every implemented feature register
+        via :class:`acrobe.bitfield.Bitfield.dump_pretty`.
 
-        Slice 8's grand finale: the headline output of
-        ``acrobe info cpu``."""
+        Slice 8's headline output: the answer to "what core is on
+        the other end of this wire?" all the way down to which ISA
+        extensions, cache topology, and FP variants it implements."""
         lines: list[str] = []
         if self.cpuid is None:
             try:
@@ -182,86 +185,88 @@ class Scs(MemoryMappedComponent):
         lines.append(f"  implementer 0x{self.cpuid.implementer:02x}  "
                      f"{self.cpuid.implementer_name}")
         lines.append(f"  architecture 0x{self.cpuid.architecture:x}  "
-                     f"{self._architecture_name(self.cpuid.architecture)}")
+                     f"{self.cpuid.architecture_name}")
         lines.append(f"  part_no     0x{self.cpuid.part_no:03x}  "
                      f"{self.cpuid.part_name}")
         lines.append(f"  revision    {self.cpuid.revision_name}")
 
         feats = await self.read_features()
         self.features = feats
+        decoded = self._decode_features(feats)
 
-        # FPU support — derived from MVFR* (ARMv7-M / ARMv8-M only).
-        if feats.mvfr0 is not None:
-            mvfr0, mvfr1 = feats.mvfr0, feats.mvfr1 or 0
-            sp = ((mvfr0 >> 4) & 0xF) != 0
-            dp = ((mvfr0 >> 8) & 0xF) != 0
-            sqrt = ((mvfr0 >> 20) & 0xF) != 0
-            div  = ((mvfr0 >> 16) & 0xF) != 0
-            fmac = ((mvfr1 >> 28) & 0xF) != 0
-            half = ((mvfr1 >> 20) & 0xF) != 0
-            mve  = ((mvfr1 >> 8)  & 0xF)
+        # Headline summary derived from the decoded bitfields. Lets
+        # the common case ("does it have an FPU?") stay readable
+        # without forcing the verbose register dump.
+        if "mvfr0" in decoded:
+            mvfr0 = decoded["mvfr0"]
+            mvfr1 = decoded.get("mvfr1")
             details = []
-            if sp: details.append("SP")
-            if dp: details.append("DP")
-            if half: details.append("HP")
-            if sqrt: details.append("sqrt")
-            if div: details.append("div")
-            if fmac: details.append("fmac")
-            mve_name = {0: None, 1: "MVE-int", 2: "MVE-fp"}.get(mve)
-            if mve_name: details.append(mve_name)
-            lines.append(f"  fpu         {('yes — ' + ', '.join(details)) if details else 'no'}")
+            if mvfr0.FPSP != "No":     details.append("SP")
+            if mvfr0.FPDP != "No":     details.append("DP")
+            if mvfr0.FPSqrt == "Yes":  details.append("sqrt")
+            if mvfr0.FPDivide == "Yes": details.append("div")
+            if mvfr1 is not None:
+                if mvfr1.FMAC == "Implemented": details.append("fmac")
+                if mvfr1.FPHP not in ("Not implemented", 0):
+                    details.append("HP")
+                if mvfr1.MVE != "Not supported":
+                    details.append(str(mvfr1.MVE).split(" ")[0])
+            lines.append(f"  fpu         "
+                         f"{('yes — ' + ', '.join(details)) if details else 'no'}")
 
-        # ISA features summarised from ISAR0..5.
-        if feats.isar0 is not None:
-            isar0 = feats.isar0
-            isar2 = feats.isar2 or 0
-            divide = ((isar0 >> 24) & 0xF) != 0
-            mac = ((isar2 >> 12) & 0xF) >= 1
-            lines.append(f"  div         {'yes' if divide else 'no'}")
+        if "isar0" in decoded:
+            lines.append(f"  div         "
+                         f"{'yes' if decoded['isar0'].Divide else 'no'}")
+        if "isar2" in decoded:
+            mac = decoded["isar2"].Mult != "MUL"
             lines.append(f"  mac         {'yes' if mac else 'no'}")
+        if "pfr1" in decoded:
+            lines.append(f"  security    {decoded['pfr1'].Security}")
 
-        # Programmer's model from PFR1 (Security extension).
-        if feats.pfr1 is not None:
-            sec = (feats.pfr1 >> 4) & 0xF
-            sec_name = {0: "no", 1: "yes", 3: "yes (with state)"}.get(
-                sec, f"0x{sec:x}")
-            lines.append(f"  security    {sec_name}")
-
-        # Cache hierarchy — only on CM7 / ARMv8-M cores that
-        # populate CLIDR.
-        if feats.clidr:
-            lines.append(f"  clidr       0x{feats.clidr:08x}")
-            if feats.ctr is not None:
-                lines.append(f"  ctr         0x{feats.ctr:08x}")
-
-        # Raw register dump as a footer — useful when chasing chip
-        # quirks against the reference manual.
-        rawreg = []
-        for k, v in (
-                ("PFR0", feats.pfr0), ("PFR1", feats.pfr1),
-                ("DFR0", feats.dfr0), ("AFR0", feats.afr0),
-                ("MMFR0", feats.mmfr0), ("MMFR1", feats.mmfr1),
-                ("MMFR2", feats.mmfr2), ("MMFR3", feats.mmfr3),
-                ("ISAR0", feats.isar0), ("ISAR1", feats.isar1),
-                ("ISAR2", feats.isar2), ("ISAR3", feats.isar3),
-                ("ISAR4", feats.isar4), ("ISAR5", feats.isar5),
-                ("MVFR0", feats.mvfr0), ("MVFR1", feats.mvfr1),
-                ("MVFR2", feats.mvfr2),
-        ):
-            if v is None:
-                continue
-            rawreg.append(f"{k}=0x{v:08x}")
-        if rawreg:
-            lines.append("  raw         " + " ".join(rawreg))
+        if verbose:
+            # Full per-register pretty dump. Each register's
+            # dump_pretty emits one header line + one line per
+            # field, with bit-aligned mask + value columns —
+            # invaluable when chasing a chip quirk against the
+            # reference manual.
+            for name, bf in decoded.items():
+                lines.append("")
+                bf.dump_pretty(lines.append)
+        else:
+            rawreg = " ".join(
+                f"{k.upper()}=0x{v:08x}"
+                for k, v in (
+                    ("pfr0", feats.pfr0), ("pfr1", feats.pfr1),
+                    ("dfr0", feats.dfr0), ("afr0", feats.afr0),
+                    ("mmfr0", feats.mmfr0), ("mmfr1", feats.mmfr1),
+                    ("mmfr2", feats.mmfr2), ("mmfr3", feats.mmfr3),
+                    ("isar0", feats.isar0), ("isar1", feats.isar1),
+                    ("isar2", feats.isar2), ("isar3", feats.isar3),
+                    ("isar4", feats.isar4), ("isar5", feats.isar5),
+                    ("mvfr0", feats.mvfr0), ("mvfr1", feats.mvfr1),
+                    ("mvfr2", feats.mvfr2),
+                )
+                if v is not None
+            )
+            if rawreg:
+                lines.append(f"  raw         {rawreg}")
 
         return lines
 
     @staticmethod
-    def _architecture_name(arch: int) -> str:
-        return {
-            0xC: "ARMv6-M",
-            0xF: "ARMv7-M / ARMv8-M",
-        }.get(arch, f"unknown(0x{arch:x})")
+    def _decode_features(feats: "CpuFeatures") -> dict:
+        """Wrap each non-None raw value in its Bitfield class.
+
+        Skips registers the core leaves unread (read-faulted or
+        not implemented at all — Cortex-M0/M0+ don't carry the
+        full feature-ID block, M3/M4 lack CLIDR/CTR/CCSIDR, etc.)."""
+        out = {}
+        for name, cls in FEATURE_REGISTERS.items():
+            raw = getattr(feats, name)
+            if raw is None:
+                continue
+            out[name] = cls(raw)
+        return out
 
     # -- TRCENA ----------------------------------------------------
 

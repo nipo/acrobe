@@ -62,7 +62,11 @@ async def enumerate(root_path):
                     "(CPUID + feature registers) for each Cortex-M SCS")
 @click.option('-r', '--root', 'root_path', required=True,
               help="Component path (e.g. lpc-link2-A0/swd/dap)")
-async def cpu(root_path):
+@click.option('--full/--summary', 'full', default=False,
+              help="--full prints every feature register field by "
+                   "field via Bitfield.dump_pretty; default is a "
+                   "one-line headline summary")
+async def cpu(root_path, full):
     parts = root_path.strip("/").split("/")
     hw_root = make_hw_root()
     leaf = await hw_root.child_summon(*parts)
@@ -80,7 +84,7 @@ async def cpu(root_path):
         return
     for scs in found:
         click.echo(f"=== {scs.fqdn} @ 0x{scs.base:x}")
-        for line in await scs.dump_cpu():
+        for line in await scs.dump_cpu(verbose=full):
             click.echo(line)
 
 
