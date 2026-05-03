@@ -235,6 +235,12 @@ class MemoryMappedComponent(Node):
     db: Db = Db("CoreSight PartId")
     devarch_db: Db = Db("CoreSight DEVARCH", eq_func=_devarch_eq)
 
+    # Subclasses set this to a human-readable component name (e.g.
+    # "Trace Port Interface Unit"); the default name becomes
+    # "<FRIENDLY_NAME>@<base:08x>". When empty, the generic
+    # archid/part fallback is used.
+    FRIENDLY_NAME: str = ""
+
     def __init__(self, bus, base: int, ids: ComponentIds,
                  name: str | None = None):
         if name is None:
@@ -277,8 +283,9 @@ class MemoryMappedComponent(Node):
 
     # -- Friendly default naming ------------------------------------
 
-    @staticmethod
-    def _default_name(ids: ComponentIds, base: int) -> str:
+    def _default_name(self, ids: ComponentIds, base: int) -> str:
+        if self.FRIENDLY_NAME:
+            return f"{self.FRIENDLY_NAME}@{base:08x}"
         if ids.cidr_class is None:
             return f"unknown@{base:08x}"
         if ids.devarch is not None and ids.devarch.present:

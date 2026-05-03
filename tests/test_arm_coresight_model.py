@@ -238,7 +238,9 @@ class TestDiscover:
 
     @pytest.mark.asyncio
     async def test_devarch_registry(self):
-        archid = 0x4A13
+        # Sentinel ARCHID that doesn't match any real ARM-published
+        # architecture (avoid collisions with ETM / CTI / PMU / ...).
+        archid = 0xDEAD
         # We register on a DevArch with REVISION=0, PRESENT=1.
         # Lookup masks REVISION.
         key = DevArch(architect=0x23B, archid=archid,
@@ -282,7 +284,8 @@ class TestDiscover:
     @pytest.mark.asyncio
     async def test_lookup_precedence_devarch_beats_partid(self):
         partid = _arm_partid(0xABC)
-        archid = 0x6A15
+        # Sentinel ARCHID — see test_devarch_registry.
+        archid = 0xBEEF
         key = DevArch(architect=0x23B, archid=archid,
                       revision=0, present=True)
 
@@ -372,25 +375,29 @@ class TestDiscover:
 class TestDefaultName:
     @pytest.mark.asyncio
     async def test_class9_with_present_devarch_uses_archid(self):
+        # Sentinel ARCHID + part_no — neither matches any real
+        # registered driver, so the default name shows the archid.
         bus = FakeBus()
         bus.install_component_ids(
-            base=0xE000_1000, partid=_arm_partid(0x123),
+            base=0xE000_1000, partid=_arm_partid(0xFFD),
             cidr_class=MemoryMappedComponent.CLASS_CORESIGHT,
-            devarch_architect=0x23B, devarch_archid=0x4A13,
+            devarch_architect=0x23B, devarch_archid=0xCAFE,
             devarch_present=True)
         comp = await MemoryMappedComponent.discover(bus, 0xE000_1000)
-        assert "0x4a13" in comp.name
+        assert "0xcafe" in comp.name
         assert "e0001000" in comp.name
 
     @pytest.mark.asyncio
     async def test_class9_without_devarch_uses_partid(self):
+        # Sentinel PartId 0xFFE — not registered by any real
+        # component driver, so falls through to the generic name.
         bus = FakeBus()
         bus.install_component_ids(
-            base=0xE000_2000, partid=_arm_partid(0x002),
+            base=0xE000_2000, partid=_arm_partid(0xFFE),
             cidr_class=MemoryMappedComponent.CLASS_CORESIGHT,
             devarch_present=False)
         comp = await MemoryMappedComponent.discover(bus, 0xE000_2000)
-        assert "0x002" in comp.name
+        assert "0xffe" in comp.name
         assert "e0002000" in comp.name
 
     @pytest.mark.asyncio
