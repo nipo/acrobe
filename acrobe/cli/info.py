@@ -58,6 +58,32 @@ async def enumerate(root_path):
     component_dump(leaf, "  ")
 
 
+@info.command(help="Walk subtree, dump CPU identification "
+                    "(CPUID + feature registers) for each Cortex-M SCS")
+@click.option('-r', '--root', 'root_path', required=True,
+              help="Component path (e.g. lpc-link2-A0/swd/dap)")
+async def cpu(root_path):
+    parts = root_path.strip("/").split("/")
+    hw_root = make_hw_root()
+    leaf = await hw_root.child_summon(*parts)
+    if isinstance(leaf, Node):
+        await leaf.start_tree()
+
+    # Lazy import — keeps the CLI import-cheap when ARM components
+    # aren't loaded as a plugin.
+    from ..component.arm.coresight.scs import Scs
+
+    found = leaf.children_find(lambda n: isinstance(n, Scs),
+                               include_self=True) if isinstance(leaf, Node) else []
+    if not found:
+        click.echo(f"No SCS instances found under {leaf.fqdn}")
+        return
+    for scs in found:
+        click.echo(f"=== {scs.fqdn} @ 0x{scs.base:x}")
+        for line in await scs.dump_cpu():
+            click.echo(line)
+
+
 @info.command(help="List loaded plugins")
 async def plugins():
     import traceback
