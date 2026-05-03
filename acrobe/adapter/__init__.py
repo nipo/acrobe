@@ -7,3 +7,4 @@ from . import icepizero  # noqa: F401
 from . import sipeed  # noqa: F401
 from . import stlink  # noqa: F401
 from . import jlink  # noqa: F401
+from . import cmsisdap  # noqa: F401
