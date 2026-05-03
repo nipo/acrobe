@@ -26,9 +26,15 @@ from ...node import Node
 from . import dp as dpmod
 
 
+_IDR_MATCH_MASK = 0x0FFFE00F
+
+
 def _idr_eq(key: int, lookup: int) -> bool:
-    """IDR equality with REVISION (bits 31:28) masked off."""
-    return (key & 0x0FFFFFFF) == (lookup & 0x0FFFFFFF)
+    """IDR equality masking out REVISION (bits 31:28) and VARIANT
+    (bits 7:4). Match retains DESIGNER (27:17) + CLASS (16:13) +
+    TYPE (3:0). One registration per (designer, class, type) covers
+    every silicon revision and minor variant."""
+    return (key & _IDR_MATCH_MASK) == (lookup & _IDR_MATCH_MASK)
 
 
 class Ap(Node):

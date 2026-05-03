@@ -509,10 +509,21 @@ class TestEndToEnd:
         # skipped. The DP enumeration walks 0..15 + 240..255 and adds
         # the two real APs as children.
         from acrobe.component.arm.ap import Ap
+        from acrobe.component.arm.mem_ap import MemAp
 
         sim = _DpSim(idcode=0x4BA00477, dpidr=0x4BA02477)
-        sim.install_ap(base=0x00000000, registers={Ap.IDR: 0x04770001})
-        sim.install_ap(base=0x01000000, registers={Ap.IDR: 0x04770002})
+        # AHB-AP also needs CFG and BASE reads to succeed during
+        # MemAp.start; populate them with sensible defaults.
+        sim.install_ap(base=0x00000000, registers={
+            Ap.IDR: 0x04770001,
+            MemAp.CFG: 0x0,         # no LA/LD extensions
+            MemAp.BASE_LO: 0x0,     # P=0: no debug components
+        })
+        sim.install_ap(base=0x01000000, registers={
+            Ap.IDR: 0x04770002,
+            MemAp.CFG: 0x0,
+            MemAp.BASE_LO: 0x0,
+        })
 
         chain = Chain()
         sim.child_add(chain)
@@ -524,14 +535,16 @@ class TestEndToEnd:
 
         ap_children = [c for c in dp.children if isinstance(c, Ap)]
         assert len(ap_children) == 2
+        # Both APs are MemAps (registered against AHB-AP / APB-AP IDRs).
+        assert all(isinstance(ap, MemAp) for ap in ap_children)
         bases = sorted(ap.base for ap in ap_children)
         assert bases == [0x00000000, 0x01000000]
         idrs = sorted(ap.idr for ap in ap_children)
         assert idrs == [0x04770001, 0x04770002]
 
-        # Names use the apsel-style heuristic.
+        # IDR.TYPE-derived friendly names.
         names = sorted(ap.name for ap in ap_children)
-        assert names == ["ap0", "ap1"]
+        assert names == ["AHB-AP@0", "APB-AP@1"]
 
     @pytest.mark.asyncio
     async def test_ap_enumeration_with_no_aps(self):

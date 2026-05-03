@@ -167,22 +167,29 @@ class TestApDiscover:
             Ap.db._registry.pop(idr_match, None)
 
     @pytest.mark.asyncio
-    async def test_revision_masked_in_lookup(self):
-        # Registration at IDR=0x04770001; chip reports IDR=0x14770001
-        # (revision bumped). Same handler should be found.
-        idr_registered = 0x04770001
+    async def test_revision_and_variant_masked_in_lookup(self):
+        # IDR equality masks REVISION (31:28) and VARIANT (7:4): one
+        # registration covers all silicon revs and minor variants of
+        # a given (DESIGNER, CLASS, TYPE). Use a vendor-neutral IDR
+        # whose TYPE (0x3) is NOT covered by MemAp's registrations,
+        # so this test stays isolated.
+        idr_registered = 0x04770003
 
-        class FakeMemAp(Ap):
+        class FakeAp(Ap):
             def __init__(self, dp, base, idr, name=None):
                 super().__init__(dp, base, idr, name)
 
-        Ap.db.register(idr_registered)(FakeMemAp)
+        Ap.db.register(idr_registered)(FakeAp)
         try:
             dp = FakeDp()
-            dp.install_ap_reg(base=0, addr=Ap.IDR, value=0x14770001)
+            # Chip reports the same TYPE/CLASS/DESIGNER but with a
+            # bumped revision (0x1) and bumped variant (0x5).
+            chip_idr = 0x14770053
+            dp.install_ap_reg(base=0, addr=Ap.IDR, value=chip_idr)
             ap = await Ap.discover(dp, base=0)
-            assert isinstance(ap, FakeMemAp)
+            assert isinstance(ap, FakeAp)
             assert ap.revision == 0x1
+            assert ap.variant == 0x5
         finally:
             Ap.db._registry.pop(idr_registered, None)
 
