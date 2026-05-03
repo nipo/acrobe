@@ -156,6 +156,15 @@ class Dp(Batcher, Node):
     PWRUP_ACK_MASK = CDBGPWRUPACK | CSYSPWRUPACK
     PWRUP_REQ_MASK = CDBGPWRUPREQ | CSYSPWRUPREQ
 
+    # ABORT register bits.
+    DAPABORT     = 1 << 0  # cancel current AP transaction
+    STKCMPCLR    = 1 << 1  # clear CTRL/STAT.STICKYCMP
+    STKERRCLR    = 1 << 2  # clear CTRL/STAT.STICKYERR
+    WDERRCLR     = 1 << 3  # clear CTRL/STAT.WDATAERR
+    ORUNERRCLR   = 1 << 4  # clear CTRL/STAT.STICKYORUN
+    ABORT_ALL    = (DAPABORT | STKCMPCLR | STKERRCLR
+                    | WDERRCLR | ORUNERRCLR)
+
     def __init__(self, name: str = "dap"):
         Batcher.__init__(self)
         Node.__init__(self, name)
@@ -202,8 +211,10 @@ class Dp(Batcher, Node):
                 "TARGETID: not available (DPv%d, requires DPv2+)",
                 self.dp_version)
 
-        await self.post(Abort(self.STICKYORUN | self.STICKYCMP
-                              | self.STICKYERR | self.WDATAERR | 0x1))
+        # ABORT register layout (NOT the CTRL/STAT layout):
+        #   bit 0: DAPABORT, 1: STKCMPCLR, 2: STKERRCLR,
+        #   3: WDERRCLR,    4: ORUNERRCLR.
+        await self.post(Abort(self.ABORT_ALL))
         await self.post(DpWrite(self.CTRL_STAT, self.PWRUP_REQ_MASK))
 
         for _ in range(50):

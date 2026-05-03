@@ -87,6 +87,7 @@ class JLinkAdapter(Adapter):
         else:
             hardware_version = (0, 0, 0, 0)
 
+
         # JTAG_IO_V3 (with per-transaction status byte) is only
         # available on hardware major version ≥ 5; older OB
         # hardware uses V2 with a fixed-length TDO-only response.
@@ -125,6 +126,19 @@ class JLinkAdapter(Adapter):
             if protocol.has_cap(caps, bit):
                 cap_names.append(name_attr)
         logger.info("J-Link caps: %s", ", ".join(cap_names) or "(none)")
+
+        if protocol.has_cap(caps, protocol.CAP_SELECT_IF):
+            try:
+                avail = await transport.get_available_interfaces()
+                tifs = []
+                if avail & (1 << protocol.TIF_JTAG): tifs.append("JTAG")
+                if avail & (1 << protocol.TIF_SWD):  tifs.append("SWD")
+                if avail & (1 << protocol.TIF_BDM3): tifs.append("BDM3")
+                if avail & (1 << protocol.TIF_FINE): tifs.append("FINE")
+                logger.info("J-Link interfaces: 0x%08x (%s)",
+                            avail, ", ".join(tifs) or "?")
+            except Exception as exc:
+                logger.warning("get_available_interfaces failed: %s", exc)
 
         return cls(name, info, device, transport,
                    firmware_version, hardware_version, caps)

@@ -89,6 +89,19 @@ class FakeBus:
             future.set_result(self._mem.get(word_addr, 0))
         return future
 
+    def write32(self, addr: int, data: int):
+        import asyncio
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        word_addr = addr & ~3
+        if word_addr in self._faulting:
+            future.set_exception(DpAccessFailure(
+                f"simulated fault at 0x{addr:x}"))
+        else:
+            self._mem[word_addr] = data & 0xffffffff
+            future.set_result(None)
+        return future
+
 
 ARM = (4, 0x3B)
 

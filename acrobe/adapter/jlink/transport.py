@@ -178,6 +178,15 @@ class JLinkTransport:
             data = await self._read(4)
         return data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24)
 
+    async def get_available_interfaces(self) -> int:
+        """Returns the bitmap of supported interfaces (bit 0=JTAG,
+        bit 1=SWD, ...)."""
+        async with self._lock:
+            await self._write(bytes([protocol.CMD_SELECT_TIF,
+                                     protocol.TIF_GET_AVAILABLE]))
+            data = await self._read(4)
+        return data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24)
+
     async def set_speed_khz(self, speed_khz: int) -> None:
         """Set the JTAG/SWD clock speed in kHz."""
         async with self._lock:
@@ -186,6 +195,26 @@ class JLinkTransport:
                 speed_khz & 0xFF,
                 (speed_khz >> 8) & 0xFF,
             ]))
+
+    async def get_speeds(self) -> tuple[int, int]:
+        """Read the device's base frequency (Hz) and minimum
+        divider for the currently-selected target interface.
+
+        Some early OB firmwares apparently need this command to
+        commit interface-related state — e.g. on EFM32 OB after a
+        cold power-up, SWD bit-bang silently misbehaves until
+        GET_SPEEDS has been issued at least once. (JLinkExe always
+        runs it during init; we now do too.) Caller's responsibility
+        to gate on :data:`CAP_SPEED_INFO`."""
+        async with self._lock:
+            await self._write(bytes([protocol.CMD_GET_SPEEDS]))
+            data = await self._read(6)
+            self._logger.debug("GET_SPEEDS raw: %s (len=%d)",
+                               data.hex(), len(data))
+        base_freq = (data[0] | (data[1] << 8)
+                     | (data[2] << 16) | (data[3] << 24))
+        min_div = data[4] | (data[5] << 8)
+        return base_freq, min_div
 
     async def get_hw_status(self) -> dict:
         """Read the 8-byte hardware status block: target voltage in
@@ -200,14 +229,14 @@ class JLinkTransport:
         }
 
     async def assert_reset(self) -> None:
-        """Drive nRST low."""
+        """Drive nRST low (assert reset)."""
         async with self._lock:
-            await self._write(bytes([protocol.CMD_SET_RESET]))
+            await self._write(bytes([protocol.CMD_HW_RESET0]))
 
     async def deassert_reset(self) -> None:
-        """Release nRST."""
+        """Drive nRST high (release reset)."""
         async with self._lock:
-            await self._write(bytes([protocol.CMD_CLEAR_RESET]))
+            await self._write(bytes([protocol.CMD_HW_RESET1]))
 
     async def jtag_io(self, tms: bytes, tdi: bytes,
                       bit_count: int) -> bytes:
@@ -277,8 +306,8 @@ class JLinkTransport:
             # SWD_IO response: num_bytes of sampled SWDIO + 1 status.
             resp = await self._read(num_bytes + 1)
             self._logger.protocol(
-                "SWD_IO in=%s status=0x%02x",
-                resp[:8].hex(), resp[num_bytes] if len(resp) > num_bytes else 0xff)
+                "SWD_IO in=%s (got %d bytes)",
+                resp[:8].hex(), len(resp))
         if len(resp) < num_bytes + 1:
             raise protocol.JLinkError(
                 f"SWD_IO short response: got {len(resp)} bytes, "

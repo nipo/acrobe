@@ -96,9 +96,14 @@ class MemAp(Ap, Batcher):
     CSW_ADDRINC_OFF    = 0b00 << 4
     CSW_ADDRINC_SINGLE = 0b01 << 4
     CSW_ADDRINC_PACKED = 0b10 << 4
-    CSW_DEVICE_EN   = 1 << 6
-    CSW_TR_IN_PROG  = 1 << 7
-    CSW_DBGSWENABLE = 1 << 31
+    CSW_DEVICE_EN     = 1 << 6
+    CSW_TR_IN_PROG    = 1 << 7
+    # AHB-AP CSW upper bits — needed for Cortex-M PPB access via the
+    # system bus. OpenOCD writes these by default for AP type 1.
+    CSW_HPROT0_PRIV   = 1 << 24  # HPROT[0] = Privileged
+    CSW_HPROT1_BUFF   = 1 << 25  # HPROT[1] = Bufferable
+    CSW_MASTER_DEBUG  = 1 << 29  # MasterType = Debug
+    CSW_DBGSWENABLE   = 1 << 31
 
     # CFG bit fields (slim — only the ones we read at start).
     CFG_BIG_ENDIAN = 1 << 0  # Pre-ADIv5.2 (RAZ on modern chips)
@@ -460,10 +465,19 @@ class MemAp(Ap, Batcher):
         raise TypeError(f"Unhandled MEM-AP op: {type(op).__name__}")
 
     def _csw_with(self, size: int, addrinc: int) -> int:
-        """Build a CSW value with our standard PROT/Mode/etc.
-        cleared, the requested size + auto-increment, and
-        DbgSwEnable + DeviceEn set."""
+        """Build a CSW value: requested size + auto-increment, plus
+        the master-mode bits the AP needs for normal memory access.
+
+        For AHB-AP / AHB5-AP we set MasterType=Debug and
+        HPROT[0..1] (Privileged + Bufferable), matching OpenOCD's
+        default for Cortex-M debug. Without MasterType=Debug, the
+        Cortex-M's PPB region (0xE0000000-0xE00FFFFF) is unreachable
+        via the AP — accesses get FAULTed with STICKYERR set. APB-AP
+        and other types ignore those upper bits."""
         return (self.CSW_DBGSWENABLE
+                | self.CSW_MASTER_DEBUG
+                | self.CSW_HPROT1_BUFF
+                | self.CSW_HPROT0_PRIV
                 | self.CSW_DEVICE_EN
                 | (addrinc & 0b11_0000)
                 | (size & 0b111))

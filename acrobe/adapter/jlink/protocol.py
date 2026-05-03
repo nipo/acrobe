@@ -15,14 +15,16 @@ CMD_GET_VERSION         = 0x01  # firmware version string (length-prefixed)
 CMD_SET_SPEED           = 0x05  # JTAG/SWD clock speed in kHz (LE u16)
 CMD_GET_HW_STATUS       = 0x07  # 8-byte status struct
 CMD_SET_TARGET_POWER    = 0x08
-CMD_GET_SPEEDS          = 0xC0  # 6-byte: base_freq + min_div
+CMD_GET_SPEEDS          = 0xC0  # 6-byte: base_freq (u32 LE) + min_div (u16 LE)
 CMD_GET_HW_INFO         = 0xC1  # 4-byte hardware-info field bitmap arg
 CMD_SELECT_TIF          = 0xC7  # set/get target interface (JTAG / SWD / ...)
 CMD_JTAG_IO_V2          = 0xCE  # bit-bang JTAG (no status response)
 CMD_JTAG_IO_V3          = 0xCF  # bit-bang JTAG (with status byte)
                                 # 0xCF is also CMD_SWD_IO when TIF=SWD.
-CMD_CLEAR_RESET         = 0xDC  # deassert nRST
-CMD_SET_RESET           = 0xDD  # assert nRST
+# 0xDC drives nRST low (asserts), 0xDD drives nRST high (deasserts).
+# Crobe and libjaylink agree: HwReset0=0xDC, HwReset1=0xDD.
+CMD_HW_RESET0           = 0xDC  # drive nRST low (assert reset)
+CMD_HW_RESET1           = 0xDD  # drive nRST high (deassert reset)
 CMD_GET_CAPS            = 0xE8  # 32-bit capability bitfield
 CMD_GET_EXT_CAPS        = 0xED  # 256-bit extended capabilities
 CMD_GET_HW_VERSION      = 0xF0  # 4-byte hardware version (LE u32)
@@ -34,6 +36,8 @@ TIF_JTAG    = 0
 TIF_SWD     = 1
 TIF_BDM3    = 2
 TIF_FINE    = 3
+TIF_GET_SELECTED  = 0xFE
+TIF_GET_AVAILABLE = 0xFF
 
 _TIF_NAMES = {
     TIF_JTAG: "JTAG", TIF_SWD: "SWD",

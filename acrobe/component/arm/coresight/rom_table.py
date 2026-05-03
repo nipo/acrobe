@@ -73,8 +73,8 @@ class RomTable(MemoryMappedComponent):
     async def start(self):
         size = self.entry_size
         self.logger.info(
-            "ROM Table at 0x%x: cidr=%s, %d-bit entries",
-            self.base, self.cidr_class, size * 8)
+            "ROM Table at 0x%x: cidr=%s, %d-bit entries, partid=%s",
+            self.base, self.cidr_class, size * 8, self.partid.pretty())
         await self._walk(size)
 
     async def _walk(self, entry_size: int):
