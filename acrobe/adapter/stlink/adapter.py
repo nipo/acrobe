@@ -88,7 +88,12 @@ class StLinkAdapter(Adapter):
         return cls(name, info, device, transport, version)
 
     async def child_spawn(self, name):
-        # Phase 2 will return StLinkJtagDp / StLinkSwDp instances.
+        from .dp import StLinkJtagDp, StLinkSwDp
+
+        if name == "jtag":
+            return StLinkJtagDp(self._transport)
+        if name == "swd":
+            return StLinkSwDp(self._transport)
         raise NoMatch("interface", name)
 
     async def close(self):

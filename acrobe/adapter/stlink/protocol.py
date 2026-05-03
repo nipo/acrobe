@@ -20,14 +20,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-# Command-group prefixes (first byte of the 16-byte command frame).
+# Top-level command groups (first byte of the 16-byte command frame).
 CMD_GET_VERSION         = 0xF1
-CMD_GET_CURRENT_MODE    = 0x41
-CMD_DFU                 = 0xF3
 CMD_DEBUG               = 0xF2
+CMD_DFU                 = 0xF3
+CMD_SWIM                = 0xF4
+CMD_GET_CURRENT_MODE    = 0xF5
+CMD_GET_TARGET_VOLTAGE  = 0xF7
 CMD_GET_VERSION_EXT     = 0xFB  # ST-Link v3 only
 
-# DFU sub-commands (under CMD_DFU).
+# DFU sub-commands (group=CMD_DFU).
 DFU_EXIT                = 0x07
 
 # Current-mode return values.
@@ -50,30 +52,92 @@ def mode_name(mode: int) -> str:
     return _MODE_NAMES.get(mode, f"Unknown(0x{mode:02x})")
 
 
-# DEBUG sub-commands (second byte of the frame, group=CMD_DEBUG).
-# Phase-1 unused — listed here so phase 2 lands as a wiring change
-# rather than re-discovering opcodes.
-DEBUG_ENTER_JTAG_NORESET = 0xA4  # ST-Link v2/v3, no SRST asserted
-DEBUG_ENTER_SWD_NORESET  = 0xA3
-DEBUG_EXIT               = 0x21
-DEBUG_READ_COREID        = 0x22  # legacy IDCODE read
-DEBUG_GET_LAST_RW_STATUS = 0x3B
-DEBUG_DRIVE_NRST         = 0x3C
-DEBUG_APIV2_READ_DP_REG  = 0x45
-DEBUG_APIV2_WRITE_DP_REG = 0x46
-DEBUG_APIV2_READ_AP_REG  = 0x47
-DEBUG_APIV2_WRITE_AP_REG = 0x48
-DEBUG_APIV2_READ_MEM_32  = 0x07
-DEBUG_APIV2_WRITE_MEM_32 = 0x08
-DEBUG_APIV2_READ_MEM_16  = 0x47  # see notes — opcode varies by FW
-DEBUG_APIV2_INIT_AP      = 0x4B  # ST-Link v3
-DEBUG_APIV2_CLOSE_AP     = 0x4C  # ST-Link v3
+# DEBUG sub-commands (group=CMD_DEBUG).
+DEBUG_APIV2_ENTER          = 0x30
+DEBUG_APIV2_READ_IDCODES   = 0x31
+DEBUG_EXIT                 = 0x21
+DEBUG_GET_LAST_RW_STATUS   = 0x3B
+DEBUG_GET_LAST_RW_STATUS2  = 0x3E
+DEBUG_DRIVE_NRST           = 0x3C
+DEBUG_APIV2_READ_DAP_REG   = 0x45  # serves both DP and AP register reads
+DEBUG_APIV2_WRITE_DAP_REG  = 0x46  # serves both DP and AP register writes
+DEBUG_APIV2_INIT_AP        = 0x4B  # required before non-IDR AP access
+DEBUG_APIV2_CLOSE_AP       = 0x4C
+DEBUG_READMEM_32BIT        = 0x07  # bulk memory read through MEM-AP
+DEBUG_WRITEMEM_32BIT       = 0x08  # bulk memory write through MEM-AP
+DEBUG_READMEM_16BIT        = 0x47  # ST-Link v3 only
+DEBUG_WRITEMEM_16BIT       = 0x48  # ST-Link v3 only
+DEBUG_READMEM_8BIT         = 0x0C
+DEBUG_WRITEMEM_8BIT        = 0x0D
 
+# Mode-entry sub-commands (third byte after CMD_DEBUG / DEBUG_APIV2_ENTER).
+ENTER_JTAG_NO_RESET = 0xA4
+ENTER_SWD_NO_RESET  = 0xA3
 
-# DEBUG_DRIVE_NRST argument values.
+# DRIVE_NRST argument values.
 NRST_LOW   = 0x00
 NRST_HIGH  = 0x01
 NRST_PULSE = 0x02
+
+# DAP-port pseudo-value used with READ_DAP_REG / WRITE_DAP_REG to
+# address the DP itself (any other value is an AP index).
+DAP_PORT_DP = 0xFFFF
+
+
+# Status codes (response[0]) for DEBUG transactions.
+DEBUG_ERR_OK              = 0x80
+DEBUG_ERR_FAULT           = 0x81
+SWD_AP_WAIT               = 0x10
+SWD_AP_FAULT              = 0x11
+SWD_AP_ERROR              = 0x12
+SWD_AP_PARITY_ERROR       = 0x13
+JTAG_GET_IDCODE_ERROR     = 0x09
+JTAG_WRITE_ERROR          = 0x0c
+JTAG_WRITE_VERIF_ERROR    = 0x0d
+SWD_DP_WAIT               = 0x14
+SWD_DP_FAULT              = 0x15
+SWD_DP_ERROR              = 0x16
+SWD_DP_PARITY_ERROR       = 0x17
+SWD_AP_WDATA_ERROR        = 0x18
+SWD_AP_STICKY_ERROR       = 0x19
+SWD_AP_STICKYORUN_ERROR   = 0x1a
+BAD_AP_ERROR              = 0x1d
+
+
+_STATUS_NAMES = {
+    DEBUG_ERR_OK:              "OK",
+    DEBUG_ERR_FAULT:           "FAULT",
+    SWD_AP_WAIT:               "SWD_AP_WAIT",
+    SWD_AP_FAULT:              "SWD_AP_FAULT",
+    SWD_AP_ERROR:              "SWD_AP_ERROR",
+    SWD_AP_PARITY_ERROR:       "SWD_AP_PARITY_ERROR",
+    JTAG_GET_IDCODE_ERROR:     "JTAG_GET_IDCODE_ERROR",
+    JTAG_WRITE_ERROR:          "JTAG_WRITE_ERROR",
+    JTAG_WRITE_VERIF_ERROR:    "JTAG_WRITE_VERIF_ERROR",
+    SWD_DP_WAIT:               "SWD_DP_WAIT",
+    SWD_DP_FAULT:              "SWD_DP_FAULT",
+    SWD_DP_ERROR:              "SWD_DP_ERROR",
+    SWD_DP_PARITY_ERROR:       "SWD_DP_PARITY_ERROR",
+    SWD_AP_WDATA_ERROR:        "SWD_AP_WDATA_ERROR",
+    SWD_AP_STICKY_ERROR:       "SWD_AP_STICKY_ERROR",
+    SWD_AP_STICKYORUN_ERROR:   "SWD_AP_STICKYORUN_ERROR",
+    BAD_AP_ERROR:              "BAD_AP_ERROR",
+}
+
+
+def status_name(status: int) -> str:
+    return _STATUS_NAMES.get(status, f"Unknown(0x{status:02x})")
+
+
+class StLinkError(Exception):
+    """ST-Link returned a non-OK status for a DEBUG command."""
+
+    def __init__(self, status: int, context: str = ""):
+        self.status = status
+        msg = f"ST-Link status {status_name(status)} (0x{status:02x})"
+        if context:
+            msg = f"{msg}: {context}"
+        super().__init__(msg)
 
 
 @dataclass(frozen=True)
