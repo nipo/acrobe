@@ -224,6 +224,20 @@ class MemAp(Ap, Batcher):
                 self.base_addr)
             child = PowerGate(self, self.base_addr, FailureKind.EMPTY)
 
+        # The PIDR of the AP's root component — typically the top
+        # ROM Table — also serves as the chip identifier on older
+        # ADIs that don't implement TARGETID (DPv0 / DPv1). Log it
+        # here regardless of DP version so the chip identity is
+        # always visible at info level.
+        if (isinstance(child, MemoryMappedComponent)
+                and child.cidr_class is not None):
+            pid = child.partid
+            self.logger.info(
+                "BASE component: %s — jep%d/0x%02x part=0x%03x rev=%d",
+                type(child).__name__,
+                pid.jep106_continuation, pid.jep106_id,
+                pid.part_no, child.revision)
+
         self.child_add(child)
 
     async def start_tree(self):
