@@ -1,256 +1,159 @@
 """ARM Debug Port (DP).
 
-Provides AP read/write/run commands that cascade through the DP to the
-underlying protocol (SWD or JTAG).
+Abstract DP layer shared by JTAG-DP and SW-DP. Operations are frozen
+dataclasses; futures returned by ``Batcher.post`` resolve to the
+natural result value (int for register reads, None otherwise).
 
-SwDp handles SWD-specific pipelining: AP reads are deferred by one SWD
-transaction, requiring RDBUFF reads to capture data.
+The DP register addresses below are byte offsets; the upper nibble of
+``addr`` selects the DP-side bank (DPBANKSEL). Subclasses translate
+``ApRead/ApWrite`` and ``DpRead/DpWrite`` to wire-protocol shifts and
+manage SELECT/SELECT1 caching.
+
+Subclass contract:
+
+* Override ``flush_ops`` to lower batched ops to the wire layer.
+* Resolve each user-facing future with the natural result value (int
+  for ``ApRead``/``DpRead``; ``None`` otherwise).
+* Treat AP-read pipelining as part of the lowering: AP reads complete
+  via the *next* shift's response (or a forced RDBUFF flush at end of
+  batch).
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 
 from ...engine import Batcher
 from ...node import Node
-from ...protocol import swd
 
 
-# --- DP command objects ---
+# --- Op dataclasses (frozen, inputs only) --------------------------
 
+@dataclass(frozen=True)
 class ApRead:
-    """Read an AP register through the DP."""
-
-    def __init__(self, ap: int, addr: int):
-        self.ap = ap
-        self.addr = addr
-        self.data = None
-
-    def __repr__(self):
-        return f"<ApRead ap={self.ap} addr={self.addr:#x}>"
+    """Read AP register. ``ap`` is the AP base address (ADIv6 view;
+    ADIv5 indices fall on ``index << 24`` boundaries). ``addr`` is the
+    AP register byte offset; upper nibble selects APBANKSEL."""
+    ap: int
+    addr: int
 
 
+@dataclass(frozen=True)
 class ApWrite:
-    """Write an AP register through the DP."""
-
-    def __init__(self, ap: int, addr: int, data: int):
-        self.ap = ap
-        self.addr = addr
-        self.data = data
-
-    def __repr__(self):
-        return f"<ApWrite ap={self.ap} addr={self.addr:#x} data={self.data:#010x}>"
+    ap: int
+    addr: int
+    data: int
 
 
+@dataclass(frozen=True)
 class DpRead:
-    """Read a DP register."""
-
-    def __init__(self, addr: int):
-        self.addr = addr
-        self.data = None
-
-    def __repr__(self):
-        return f"<DpRead addr={self.addr:#x}>"
+    """Read DP register. ``addr`` is byte offset; upper nibble is
+    DPBANKSEL (which is loaded into SELECT before access)."""
+    addr: int
 
 
+@dataclass(frozen=True)
 class DpWrite:
-    """Write a DP register."""
-
-    def __init__(self, addr: int, data: int):
-        self.addr = addr
-        self.data = data
-
-    def __repr__(self):
-        return f"<DpWrite addr={self.addr:#x} data={self.data:#010x}>"
+    addr: int
+    data: int
 
 
+@dataclass(frozen=True)
+class Abort:
+    """Issue ABORT (clear sticky flags). On JTAG, lowered via the
+    dedicated ABORT IR; on SWD, lowered as a write to DP addr 0x00."""
+    what: int = 0x1f
+
+
+@dataclass(frozen=True)
 class Run:
-    """Idle clock cycles."""
-
-    def __init__(self, cycles: int):
-        self.cycles = cycles
-
-    def __repr__(self):
-        return f"<DpRun cycles={self.cycles}>"
+    """Idle clock cycles between transactions."""
+    cycles: int
 
 
-# --- DP Exceptions ---
+# --- Errors --------------------------------------------------------
 
 class DpAccessFailure(Exception):
-    """DP access failed (bad ACK, parity error, etc.)."""
-    pass
+    """DP/AP access failed (bad ACK, sticky error, parity, etc.)."""
 
 
-# --- SWD Debug Port ---
+# --- Abstract DP ---------------------------------------------------
 
-class SwDp(Batcher, Node):
-    """SWD Debug Port.
+class Dp(Batcher, Node):
+    """Abstract ARM Debug Port. Subclasses (JtagDp, SwDp) provide the
+    wire-specific lowering in ``flush_ops``."""
 
-    Translates AP/DP commands into SWD Read/Write operations,
-    handling SELECT register tracking and SWD read pipelining.
-    """
-
-    # DP register addresses (SWD encoding: addr bits [3:2])
-    IDCODE = 0x00
-    ABORT = 0x00
-    CTRL_STAT = 0x04
-    SELECT = 0x08
-    RDBUFF = 0x0c
+    # DP register byte offsets; (offset & 0xf0) selects DPBANKSEL.
+    DPIDR     = 0x00  # bank 0, R; W -> ABORT (SWD)
+    CTRL_STAT = 0x04  # bank 0
+    DLCR      = 0x14  # bank 1 (ADIv5)
+    DPIDR1    = 0x10  # bank 1 (ADIv6 / DPv3+)
+    BASEPTR0  = 0x20  # bank 2 (ADIv6)
+    TARGETID  = 0x24  # bank 2
+    BASEPTR1  = 0x30  # bank 3 (ADIv6)
+    DLPIDR    = 0x34  # bank 3
+    EVENTSTAT = 0x44  # bank 4
+    SELECT1   = 0x54  # bank 5 (ADIv6, W)
+    SELECT    = 0x08  # bank-agnostic, W
+    RDBUFF    = 0x0c  # bank-agnostic, R
+    TARGETSEL = 0x0c  # bank-agnostic, W (multidrop)
 
     # CTRL/STAT bits
-    ORUNDETECT = 1 << 0
+    ORUNDETECT   = 1 << 0
+    STICKYORUN   = 1 << 1
+    STICKYCMP    = 1 << 4
+    STICKYERR    = 1 << 5
+    READOK       = 1 << 6
+    WDATAERR     = 1 << 7
+    CDBGRSTREQ   = 1 << 26
+    CDBGRSTACK   = 1 << 27
     CDBGPWRUPREQ = 1 << 28
     CDBGPWRUPACK = 1 << 29
     CSYSPWRUPREQ = 1 << 30
     CSYSPWRUPACK = 1 << 31
 
-    def __init__(self, interface, name: str = "dp"):
+    PWRUP_ACK_MASK = CDBGPWRUPACK | CSYSPWRUPACK
+    PWRUP_REQ_MASK = CDBGPWRUPREQ | CSYSPWRUPREQ
+
+    def __init__(self, name: str = "dap"):
         Batcher.__init__(self)
         Node.__init__(self, name)
-        self._interface = interface
-        self._select = None  # tracked SELECT register value
+        self.dpidr: int | None = None
+        self.dpidr1: int | None = None
+        self.dp_version: int | None = None  # DPVER (0=DPv0, 1=DPv1, 2=DPv2, 3=DPv3=ADIv6)
+        self.adi_version: int | None = None  # 5 or 6
 
     async def start(self):
-        """Initialize DP: power up debug and system domains."""
-        # Read IDCODE to verify connectivity
-        idcode = await self._dp_read(self.IDCODE)
-        self.logger.info("DP IDCODE: 0x%08x", idcode)
+        """Read DPIDR, clear sticky flags, power up debug+system domains."""
+        self.dpidr = await self.post(DpRead(self.DPIDR))
+        self.dp_version = (self.dpidr >> 12) & 0xf
+        self.adi_version = 6 if self.dp_version >= 3 else 5
+        self.logger.info(
+            "DPIDR 0x%08x — DPv%d (ADIv%d)",
+            self.dpidr, self.dp_version, self.adi_version)
 
-        # Power up debug and system
-        await self._dp_write(self.CTRL_STAT,
-                             self.CDBGPWRUPREQ | self.CSYSPWRUPREQ)
+        if self.adi_version == 6:
+            self.dpidr1 = await self.post(DpRead(self.DPIDR1))
+            self.logger.info("DPIDR1 0x%08x", self.dpidr1)
 
-        # Poll until both power-up ACKs
-        for _ in range(100):
-            stat = await self._dp_read(self.CTRL_STAT)
-            if (stat & (self.CDBGPWRUPACK | self.CSYSPWRUPACK) ==
-                    self.CDBGPWRUPACK | self.CSYSPWRUPACK):
+        await self.post(Abort(self.STICKYORUN | self.STICKYCMP
+                              | self.STICKYERR | self.WDATAERR | 0x1))
+        await self.post(DpWrite(self.CTRL_STAT, self.PWRUP_REQ_MASK))
+
+        for _ in range(50):
+            stat = await self.post(DpRead(self.CTRL_STAT))
+            if (stat & self.PWRUP_ACK_MASK) == self.PWRUP_ACK_MASK:
+                self.logger.info("DP powered up (CTRL/STAT 0x%08x)", stat)
                 break
+            await asyncio.sleep(0.005)
         else:
-            raise DpAccessFailure("DP power-up timeout")
-
-        # Enable overrun detection
-        await self._dp_write(self.CTRL_STAT,
-                             self.CDBGPWRUPREQ | self.CSYSPWRUPREQ |
-                             self.ORUNDETECT)
-
-    async def _dp_read(self, addr: int) -> int:
-        """Direct DP register read (not batched)."""
-        f = self._interface.post(swd.Read(ap=False, addr=addr))
-        op = await f
-        return op.data
-
-    async def _dp_write(self, addr: int, data: int):
-        """Direct DP register write (not batched)."""
-        f = self._interface.post(swd.Write(ap=False, addr=addr, data=data))
-        await f
+            raise DpAccessFailure(
+                f"DP power-up timeout (CTRL/STAT 0x{stat:08x})")
 
     async def flush_ops(self, batch):
-        """Translate AP/DP commands into SWD operations.
-
-        Handles SELECT tracking and SWD read pipelining:
-        - AP reads are deferred: data arrives on the NEXT SWD read
-        - RDBUFF reads are inserted to capture final deferred data
-        - SELECT is updated when AP index or register bank changes
-        """
-        swd_futures = []
-        # Tracks (swd_future_that_captures_data, dp_future_to_resolve)
-        data_captures = []
-        # pending = (dp_op, dp_future) for deferred AP read
-        pending = None
-
-        for op, future in batch:
-            if isinstance(op, ApRead):
-                new_select = (op.ap << 24) | (op.addr & 0xf0)
-                self._update_select(new_select, swd_futures)
-
-                swd_f = self._interface.post(
-                    swd.Read(ap=True, addr=op.addr & 0x0c))
-                swd_futures.append(swd_f)
-
-                if pending is not None:
-                    # This read captures the previous pending read's data
-                    data_captures.append((swd_f, pending[1]))
-
-                pending = (op, future)
-
-            elif isinstance(op, ApWrite):
-                if pending is not None:
-                    rdbuff_f = self._interface.post(
-                        swd.Read(ap=False, addr=self.RDBUFF))
-                    swd_futures.append(rdbuff_f)
-                    data_captures.append((rdbuff_f, pending[1]))
-                    pending = None
-
-                new_select = (op.ap << 24) | (op.addr & 0xf0)
-                self._update_select(new_select, swd_futures)
-
-                swd_f = self._interface.post(
-                    swd.Write(ap=True, addr=op.addr & 0x0c, data=op.data))
-                swd_futures.append(swd_f)
-                future.set_result(None)
-
-            elif isinstance(op, DpRead):
-                if pending is not None:
-                    rdbuff_f = self._interface.post(
-                        swd.Read(ap=False, addr=self.RDBUFF))
-                    swd_futures.append(rdbuff_f)
-                    data_captures.append((rdbuff_f, pending[1]))
-                    pending = None
-
-                swd_f = self._interface.post(
-                    swd.Read(ap=False, addr=op.addr))
-                swd_futures.append(swd_f)
-                data_captures.append((swd_f, future))
-
-            elif isinstance(op, DpWrite):
-                if pending is not None:
-                    rdbuff_f = self._interface.post(
-                        swd.Read(ap=False, addr=self.RDBUFF))
-                    swd_futures.append(rdbuff_f)
-                    data_captures.append((rdbuff_f, pending[1]))
-                    pending = None
-
-                swd_f = self._interface.post(
-                    swd.Write(ap=False, addr=op.addr, data=op.data))
-                swd_futures.append(swd_f)
-                future.set_result(None)
-
-            elif isinstance(op, Run):
-                if pending is not None:
-                    rdbuff_f = self._interface.post(
-                        swd.Read(ap=False, addr=self.RDBUFF))
-                    swd_futures.append(rdbuff_f)
-                    data_captures.append((rdbuff_f, pending[1]))
-                    pending = None
-
-                swd_f = self._interface.post(swd.Run(op.cycles))
-                swd_futures.append(swd_f)
-                future.set_result(None)
-
-        # Final flush of pending AP read
-        if pending is not None:
-            rdbuff_f = self._interface.post(
-                swd.Read(ap=False, addr=self.RDBUFF))
-            swd_futures.append(rdbuff_f)
-            data_captures.append((rdbuff_f, pending[1]))
-
-        # Await all SWD operations
-        if swd_futures:
-            await asyncio.gather(*swd_futures)
-
-        # Resolve reads
-        for swd_f, dp_future in data_captures:
-            swd_op = swd_f.result()
-            dp_future.set_result(swd_op.data)
-
-    def _update_select(self, new_select, swd_futures):
-        """Insert a SELECT write if the value changed."""
-        if self._select != new_select:
-            swd_f = self._interface.post(
-                swd.Write(ap=False, addr=self.SELECT, data=new_select))
-            swd_futures.append(swd_f)
-            self._select = new_select
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement flush_ops")
 
     def __repr__(self):
-        return f"<SwDp {self._name}>"
+        return f"<{type(self).__name__} {self._name}>"

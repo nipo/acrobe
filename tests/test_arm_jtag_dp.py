@@ -1,0 +1,469 @@
+"""Tests for ARM JTAG-DP: Tap.db registration, JtagDp lowering,
+pending-read pipelining, end-of-batch RDBUFF flush, SELECT caching."""
+
+import pytest
+
+from acrobe.bitstring import BitString
+from acrobe.component.arm.dp import (
+    Abort, ApRead, ApWrite, Dp, DpAccessFailure, DpRead, DpWrite, Run,
+)
+from acrobe.component.arm.jtag_dp import (
+    JTAG_DP_IDCODES, JtagDp, JtagDpTap, _Wire,
+)
+from acrobe.protocol.jtag import (
+    Chain, JtagInterface, Reset, Run as JtagRun, Shift, CaptureDr,
+    CaptureIr, Tap, _TapRun, _TapShift,
+)
+
+
+# -- Recording fake tap: short-circuits flush_ops to capture what
+#    JtagDp posts at the Tap level, with a queue of canned TDO values.
+
+class RecordingDpTap(JtagDpTap):
+    """JtagDpTap subclass whose flush_ops records ``_TapShift`` /
+    ``_TapRun`` envelopes from a child JtagDp and resolves their
+    futures with canned TDO BitStrings — instead of forwarding to a
+    Chain.
+
+    Use ``queue_tdo(value)`` to schedule the next read_tdo shift's
+    35-bit response. Reads with no queued value return zero."""
+
+    def __init__(self):
+        super().__init__(idcode=0x0BA00477, irlen=4, name="rec")
+        self.shifts: list = []
+        self.runs: list[int] = []
+        self.tdo_queue: list[int] = []
+
+    def queue_tdo(self, value: int):
+        self.tdo_queue.append(value)
+
+    def queue_response(self, ack: int, data: int):
+        self.tdo_queue.append((data & 0xffffffff) << 3 | (ack & 0x7))
+
+    async def flush_ops(self, batch):
+        for op, future in batch:
+            if isinstance(op, _TapShift):
+                self.shifts.append({
+                    "ir": op.ir_value,
+                    "tdi": int(op.tdi) if op.tdi is not None else None,
+                    "len": len(op.tdi) if op.tdi is not None else 0,
+                    "read_tdo": op.read_tdo,
+                })
+                if op.read_tdo:
+                    bits = len(op.tdi) if op.tdi is not None else 35
+                    val = self.tdo_queue.pop(0) if self.tdo_queue else 0
+                    future.set_result(BitString(val, bits))
+                else:
+                    future.set_result(None)
+            elif isinstance(op, _TapRun):
+                self.runs.append(op.cycles)
+                future.set_result(None)
+            else:
+                future.set_result(None)
+
+
+def _make_dp() -> tuple[RecordingDpTap, JtagDp]:
+    """Build a recording tap with an attached JtagDp child, both
+    detached from any chain. The DP is not started — tests post ops
+    directly to exercise flush_ops in isolation."""
+    tap = RecordingDpTap()
+    dp = JtagDp()
+    tap._child_attach(dp)
+    return tap, dp
+
+
+# -- Tap.db registration --------------------------------------------
+
+class TestTapDbRegistration:
+    def test_idcode_resolves_to_jtag_dp_tap(self):
+        # All advertised JTAG-DP IDCODEs should spawn a JtagDpTap.
+        for idcode in JTAG_DP_IDCODES:
+            tap = Tap.db.call(idcode, idcode=idcode, irlen=4)
+            assert isinstance(tap, JtagDpTap)
+            assert tap.idcode == idcode
+
+    def test_idcode_revision_masked(self):
+        # Tap.db's eq func ignores bits 31:28 (revision).
+        # 0x4BA00477 should still hit the 0x0BA00477 registration.
+        tap = Tap.db.call(0x4BA00477, idcode=0x4BA00477, irlen=4)
+        assert isinstance(tap, JtagDpTap)
+
+
+# -- Wire packing ---------------------------------------------------
+
+class TestWirePacking:
+    def test_pack_read(self):
+        # RnW=1, addr=0x04 (CTRL_STAT, wire bits=0b01), data ignored.
+        # Expected low 3 bits: addr_bits<<1 | rnw = 0b01<<1 | 1 = 0b011.
+        v = _Wire.pack(rnw=True, addr=0x04, data=0)
+        assert v & 0x7 == 0b011
+
+    def test_pack_write(self):
+        # RnW=0, addr=0x08 (SELECT, wire bits=0b10), data=0x12345678.
+        v = _Wire.pack(rnw=False, addr=0x08, data=0x12345678)
+        assert v & 0x7 == 0b100
+        assert (v >> 3) & 0xffffffff == 0x12345678
+
+    def test_unpack_ok(self):
+        ack, data = _Wire.unpack(BitString((0xdeadbeef << 3) | 0b010, 35))
+        assert ack == _Wire.ACK_OK_FAULT
+        assert data == 0xdeadbeef
+
+    def test_unpack_wait(self):
+        ack, _ = _Wire.unpack(BitString(0b001, 35))
+        assert ack == _Wire.ACK_WAIT
+
+
+# -- Single DP read end-to-end --------------------------------------
+
+class TestDpRead:
+    @pytest.mark.asyncio
+    async def test_single_read_resolves_via_rdbuff_flush(self):
+        # On a fresh DP, reading CTRL_STAT should produce:
+        #   1. SELECT write (initial cache miss; non-capturing)
+        #   2. DPACC read of CTRL_STAT (captures previous garbage)
+        #   3. DPACC read of RDBUFF (carries CTRL_STAT response)
+        # The user future resolves with the response of shift #3.
+        tap, dp = _make_dp()
+
+        # Shift #1 is non-capturing; it doesn't pop the queue.
+        # Shift #2 captures (we ignore its TDO; queue any garbage).
+        # Shift #3 captures the actual CTRL_STAT response.
+        tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0xdeadbeef)  # shift#2
+        tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0xc0ffee01)  # shift#3
+
+        result = await dp.post(DpRead(Dp.CTRL_STAT))
+
+        assert result == 0xc0ffee01
+        # Shape: SELECT(W, no-cap), CTRL_STAT(R, cap), RDBUFF(R, cap).
+        assert len(tap.shifts) == 3
+        assert tap.shifts[0]["ir"] == JtagDpTap.DPACC.ir
+        assert tap.shifts[0]["read_tdo"] is False
+        assert tap.shifts[1]["ir"] == JtagDpTap.DPACC.ir
+        assert tap.shifts[1]["read_tdo"] is True
+        assert tap.shifts[2]["ir"] == JtagDpTap.DPACC.ir
+        assert tap.shifts[2]["read_tdo"] is True
+
+
+# -- AP read pipelining --------------------------------------------
+
+class TestApReadPipelining:
+    @pytest.mark.asyncio
+    async def test_consecutive_ap_reads_pipeline(self):
+        # Two ApReads at the same AP/bank: SELECT write once, two
+        # APACC reads, then a final RDBUFF flush carrying the second
+        # read's data. The first read's data rides on shift #3
+        # (the second APACC), the second's data rides on shift #4
+        # (the RDBUFF).
+        tap, dp = _make_dp()
+
+        tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0)            # shift#2 garbage
+        tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0xaaaa1111)  # shift#3 = read#1
+        tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0xbbbb2222)  # shift#4 = read#2
+
+        f1 = dp.post(ApRead(ap=0, addr=0x00))
+        f2 = dp.post(ApRead(ap=0, addr=0x00))
+
+        v1 = await f1
+        v2 = await f2
+
+        assert v1 == 0xaaaa1111
+        assert v2 == 0xbbbb2222
+        # Shape: SELECT(W), APACC(R), APACC(R), RDBUFF(R).
+        assert len(tap.shifts) == 4
+        assert tap.shifts[0]["ir"] == JtagDpTap.DPACC.ir   # SELECT
+        assert tap.shifts[1]["ir"] == JtagDpTap.APACC.ir
+        assert tap.shifts[2]["ir"] == JtagDpTap.APACC.ir
+        assert tap.shifts[3]["ir"] == JtagDpTap.DPACC.ir   # RDBUFF
+
+    @pytest.mark.asyncio
+    async def test_write_after_read_flushes_pending(self):
+        # ApRead followed by ApWrite: the write captures the read's
+        # response on its own TDO (no extra RDBUFF needed mid-batch).
+        tap, dp = _make_dp()
+
+        tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0)            # shift#2 garbage
+        tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0x12345678)  # shift#3 (write) = read's response
+
+        f1 = dp.post(ApRead(ap=0, addr=0x00))
+        f2 = dp.post(ApWrite(ap=0, addr=0x04, data=0xcafebabe))
+
+        assert await f1 == 0x12345678
+        assert await f2 is None
+        # Shape: SELECT(W), APACC-read(R, cap), APACC-write(R, cap).
+        # No RDBUFF needed.
+        assert len(tap.shifts) == 3
+
+
+# -- SELECT caching -------------------------------------------------
+
+class TestSelectCaching:
+    @pytest.mark.asyncio
+    async def test_repeated_same_bank_does_not_rewrite_select(self):
+        # First batch primes SELECT. Second batch with the same bank
+        # should not emit another SELECT write.
+        tap, dp = _make_dp()
+
+        tap.queue_response(_Wire.ACK_OK_FAULT, 0)
+        tap.queue_response(_Wire.ACK_OK_FAULT, 0x1)
+
+        await dp.post(DpRead(Dp.CTRL_STAT))
+
+        first_count = len(tap.shifts)
+        # SELECT(W) + DPACC-read(R) + RDBUFF(R) = 3
+        assert first_count == 3
+
+        tap.queue_response(_Wire.ACK_OK_FAULT, 0)
+        tap.queue_response(_Wire.ACK_OK_FAULT, 0x2)
+
+        await dp.post(DpRead(Dp.CTRL_STAT))
+        # Second read: no SELECT rewrite. Just DPACC-read + RDBUFF.
+        assert len(tap.shifts) == first_count + 2
+
+    @pytest.mark.asyncio
+    async def test_bank_change_emits_select_write(self):
+        # Reading from CTRL_STAT (bank 0) then DPIDR1 (bank 1) on an
+        # ADIv6-capable chip: bank change -> SELECT rewrite.
+        tap, dp = _make_dp()
+
+        for _ in range(6):
+            tap.queue_response(_Wire.ACK_OK_FAULT, 0)
+
+        await dp.post(DpRead(Dp.CTRL_STAT))
+        n_after_first = len(tap.shifts)
+
+        await dp.post(DpRead(Dp.DPIDR1))
+        # Second read across banks: SELECT(W) + DPACC-read(R) + RDBUFF(R).
+        assert len(tap.shifts) == n_after_first + 3
+
+    @pytest.mark.asyncio
+    async def test_ap_change_emits_select_write(self):
+        tap, dp = _make_dp()
+
+        for _ in range(8):
+            tap.queue_response(_Wire.ACK_OK_FAULT, 0)
+
+        await dp.post(ApRead(ap=0, addr=0))
+        n_after_first = len(tap.shifts)
+
+        await dp.post(ApRead(ap=1 << 24, addr=0))
+        # New AP base: SELECT(W) + APACC-read(R) + RDBUFF(R) = +3.
+        assert len(tap.shifts) == n_after_first + 3
+
+
+# -- Idle TCK insertion --------------------------------------------
+
+class TestIdleTcks:
+    @pytest.mark.asyncio
+    async def test_idle_run_after_each_shift(self):
+        # JTAG-DP needs idle TCKs between Update-DR and the next
+        # Capture-DR. JtagDp emits a Run between shifts.
+        tap, dp = _make_dp()
+
+        tap.queue_response(_Wire.ACK_OK_FAULT, 0)
+        tap.queue_response(_Wire.ACK_OK_FAULT, 0)
+
+        await dp.post(DpRead(Dp.CTRL_STAT))
+
+        # 3 shifts (SELECT-W, DPACC-R, RDBUFF-R) → 3 idle runs.
+        assert len(tap.runs) == 3
+        assert all(c == JtagDp.INTER_SHIFT_RUN for c in tap.runs)
+
+
+# -- Abort -----------------------------------------------------------
+
+class TestAbort:
+    @pytest.mark.asyncio
+    async def test_abort_uses_dedicated_ir(self):
+        tap, dp = _make_dp()
+
+        await dp.post(Abort(0x1f))
+
+        # Single shift via the ABORT instruction.
+        assert len(tap.shifts) == 1
+        assert tap.shifts[0]["ir"] == JtagDpTap.ABORT_IR.ir
+        # data 0x1f shifted left 3 into the 35-bit DR.
+        assert tap.shifts[0]["tdi"] == (0x1f << 3)
+
+
+# -- Errors ---------------------------------------------------------
+
+class TestAckErrors:
+    @pytest.mark.asyncio
+    async def test_wait_ack_raises(self):
+        tap, dp = _make_dp()
+
+        # All shifts return WAIT.
+        tap.queue_response(_Wire.ACK_WAIT, 0)
+        tap.queue_response(_Wire.ACK_WAIT, 0)
+
+        with pytest.raises(DpAccessFailure, match="WAIT"):
+            await dp.post(DpRead(Dp.CTRL_STAT))
+
+    @pytest.mark.asyncio
+    async def test_invalid_ack_raises(self):
+        tap, dp = _make_dp()
+
+        # ACK 0b111 is not a valid response.
+        tap.queue_response(0b111, 0)
+        tap.queue_response(0b111, 0)
+
+        with pytest.raises(DpAccessFailure, match="invalid ACK"):
+            await dp.post(DpRead(Dp.CTRL_STAT))
+
+
+# -- Integration via Chain + a full JTAG-DP simulator --------------
+
+class _DpSim(JtagInterface):
+    """JtagInterface that simulates a single-TAP JTAG chain whose
+    only device is a JTAG-DP.
+
+    Tracks IR, the current 35-bit DR, the most-recent transaction
+    response, and the SELECT register. Models DPIDR, CTRL/STAT,
+    SELECT, RDBUFF responses sufficient for ``Dp.start()``."""
+
+    IR_BYPASS = 0xf
+    IR_IDCODE = 0xe
+    IR_DPACC  = 0xa
+    IR_APACC  = 0xb
+    IR_ABORT  = 0x8
+
+    def __init__(self, idcode=0x0BA00477, dpidr=0x4BA02477):
+        super().__init__(name="dpsim")
+        self._idcode = idcode
+        self._dpidr = dpidr
+        self._ir = self.IR_IDCODE
+        self._dr_val = idcode
+        self._dr_len = 32
+        self._in_ir = False
+        self._select = 0
+        self._last_response = (_Wire.ACK_OK_FAULT, 0)
+        self._ctrl_stat = 0  # power-up bits set on CDBGPWRUPREQ/CSYSPWRUPREQ
+
+    async def flush_ops(self, batch):
+        for op, future in batch:
+            tdo = None
+            if isinstance(op, Reset):
+                self._ir = self.IR_IDCODE
+                self._dr_val = self._idcode
+                self._dr_len = 32
+                self._in_ir = False
+            elif isinstance(op, CaptureIr):
+                self._in_ir = True
+                # JTAG: low two bits of captured IR are 0b01 by spec.
+                self._dr_val = 0b01
+                self._dr_len = 4
+            elif isinstance(op, CaptureDr):
+                self._in_ir = False
+                self._dr_val = self._dr_value_for_ir()
+                self._dr_len = self._dr_len_for_ir()
+            elif isinstance(op, Shift):
+                tdo = self._do_shift(op)
+            elif isinstance(op, JtagRun):
+                pass
+            future.set_result(tdo)
+
+    def _dr_len_for_ir(self):
+        if self._ir == self.IR_IDCODE:
+            return 32
+        if self._ir == self.IR_BYPASS:
+            return 1
+        # DPACC / APACC / ABORT are 35-bit.
+        return 35
+
+    def _dr_value_for_ir(self):
+        if self._ir == self.IR_IDCODE:
+            return self._idcode
+        if self._ir in (self.IR_DPACC, self.IR_APACC):
+            ack, data = self._last_response
+            return ((data & 0xffffffff) << 3) | (ack & 0x7)
+        return 0
+
+    def _do_shift(self, op):
+        L = self._dr_len
+        N = len(op.tdi)
+        tdi_val = int(op.tdi)
+        tdo = None
+        if op.read_tdo:
+            if N <= L:
+                tdo = BitString(self._dr_val & ((1 << N) - 1), N)
+            else:
+                tdo_val = (self._dr_val | (tdi_val << L)) & ((1 << N) - 1)
+                tdo = BitString(tdo_val, N)
+        if L > 0 and N >= L:
+            new_val = (tdi_val >> (N - L)) & ((1 << L) - 1)
+            self._dr_val = new_val
+            if self._in_ir:
+                self._ir = new_val
+            else:
+                self._on_dr_update(new_val)
+        return tdo
+
+    def _on_dr_update(self, dr):
+        if self._ir == self.IR_DPACC:
+            rnw = dr & 1
+            addr = (dr >> 1) & 0x3
+            data = (dr >> 3) & 0xffffffff
+            wire_offset = addr << 2
+            if rnw:
+                self._last_response = (_Wire.ACK_OK_FAULT,
+                                       self._dp_read(wire_offset))
+            else:
+                self._dp_write(wire_offset, data)
+                self._last_response = (_Wire.ACK_OK_FAULT, 0)
+        elif self._ir == self.IR_APACC:
+            # Slice 1 doesn't drive AP shifts in start(); leave as no-op.
+            self._last_response = (_Wire.ACK_OK_FAULT, 0)
+        elif self._ir == self.IR_ABORT:
+            pass
+
+    def _dp_read(self, wire_offset: int) -> int:
+        bank = self._select & 0xf
+        if wire_offset == 0x00:
+            return self._dpidr
+        if wire_offset == 0x04 and bank == 0:
+            return self._ctrl_stat
+        if wire_offset == 0x0c:
+            # RDBUFF returns the most-recent AP read result; for DP
+            # accesses in slice 1 we just return the cached
+            # last-response data.
+            return self._last_response[1]
+        return 0
+
+    def _dp_write(self, wire_offset: int, data: int):
+        bank = self._select & 0xf
+        if wire_offset == 0x08:
+            self._select = data
+        elif wire_offset == 0x04 and bank == 0:
+            # Write to CTRL/STAT — set ACKs for any REQs immediately.
+            self._ctrl_stat = data
+            if data & Dp.CDBGPWRUPREQ:
+                self._ctrl_stat |= Dp.CDBGPWRUPACK
+            if data & Dp.CSYSPWRUPREQ:
+                self._ctrl_stat |= Dp.CSYSPWRUPACK
+
+
+class TestEndToEnd:
+    @pytest.mark.asyncio
+    async def test_dp_start_through_chain(self):
+        sim = _DpSim(idcode=0x4BA00477, dpidr=0x4BA02477)
+        chain = Chain()
+        sim.child_add(chain)
+
+        await chain.discover()
+
+        assert len(chain.children) == 1
+        tap = chain.children[0]
+        assert isinstance(tap, JtagDpTap)
+        assert tap.idcode == 0x4BA00477
+
+        await tap.start_tree()
+
+        # JtagDpTap.start adds a JtagDp child; that child's start
+        # reads DPIDR and powers up the DP.
+        dps = [c for c in tap.children if isinstance(c, JtagDp)]
+        assert len(dps) == 1
+        dp = dps[0]
+        assert dp.dpidr == 0x4BA02477
+        assert dp.dp_version == 2
+        assert dp.adi_version == 5

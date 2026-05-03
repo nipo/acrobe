@@ -192,7 +192,10 @@ async def fake_server_and_host():
                  port="USB-1234", chain_type=0, features=0x802),
         ],
         devices=[
-            dict(idcode=0x4ba00477, irlen=4, features=0x4, name="ARM-DAP"),
+            # Synthetic IDCODE — picked to NOT resolve to any
+            # registered Tap subclass (ARM JTAG-DP, etc.), so that
+            # discovery falls back to the generic Tap.
+            dict(idcode=0xdeadbeef, irlen=4, features=0x4, name="ARM-DAP"),
         ],
     )
     asyncio_server = await asyncio.start_server(
@@ -244,15 +247,16 @@ class TestEnumeration:
     async def test_taps_attached_under_hardware(self, fake_server_and_host):
         host, _ = fake_server_and_host
         hw_node = host.children[0]
-        # Idcode 0x4ba00477 is not in any acrobe Tap.db entry, so we
-        # get the generic Tap with positional fallback name.
+        # Synthetic IDCODE doesn't match any Tap.db registration,
+        # so discovery falls back to the generic Tap with the
+        # positional fallback name.
         assert [c.name for c in hw_node.children] == ["tap0"]
 
     @pytest.mark.asyncio
     async def test_tap_carries_metadata(self, fake_server_and_host):
         host, _ = fake_server_and_host
         tap = host.children[0].children[0]
-        assert tap.idcode == 0x4ba00477
+        assert tap.idcode == 0xdeadbeef
         assert tap.irlen == 4
 
 
