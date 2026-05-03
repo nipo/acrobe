@@ -106,7 +106,12 @@ class JLinkAdapter(Adapter):
                    firmware_version, hardware_version, caps)
 
     async def child_spawn(self, name):
-        # Phase 2: spawn JTAG / SWD interfaces here.
+        if name == "jtag":
+            from .jtag import JtagJlink
+            jtag = JtagJlink(self._transport, name="jtag")
+            await jtag.setup(freq_khz=1000)
+            return jtag
+        # Phase 3 will add "swd".
         raise NoMatch("interface", name)
 
     async def close(self):

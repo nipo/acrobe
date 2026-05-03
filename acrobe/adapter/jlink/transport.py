@@ -197,11 +197,20 @@ class JLinkTransport:
                      bit_count & 0xFF, (bit_count >> 8) & 0xFF])
         async with self._lock:
             await self._write(cmd + tms + tdi)
-            tdo = await self._read(num_bytes)
-            status = await self._read(1)
-        if status[0] != 0:
+            # The device returns TDO + status in a single bulk-IN
+            # transfer; reading the two in sequence trips
+            # USBErrorOverflow on macOS (the second read sees the
+            # leftover bytes from the first packet as overflow).
+            resp = await self._read(num_bytes + 1)
+        if len(resp) < num_bytes + 1:
             raise protocol.JLinkError(
-                f"JTAG_IO failed with status 0x{status[0]:02x}")
+                f"JTAG_IO short response: got {len(resp)} bytes, "
+                f"expected {num_bytes + 1}")
+        tdo = resp[:num_bytes]
+        status = resp[num_bytes]
+        if status != 0:
+            raise protocol.JLinkError(
+                f"JTAG_IO failed with status 0x{status:02x}")
         return tdo
 
     async def close(self) -> None:
