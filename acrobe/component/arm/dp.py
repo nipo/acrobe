@@ -151,6 +151,40 @@ class Dp(Batcher, Node):
             raise DpAccessFailure(
                 f"DP power-up timeout (CTRL/STAT 0x{stat:08x})")
 
+        await self._enumerate_aps()
+
+    # AP indices to probe on DPv0-v2. Crobe scans 0..15 + 240..255;
+    # APs at indices 16..239 are exceptionally rare. Cheap to widen
+    # if a real chip surfaces.
+    AP_PROBE_INDICES = list(range(16)) + list(range(240, 256))
+
+    async def _enumerate_aps(self):
+        """Discover APs and add them as children. DPv0-v2 walks
+        APSEL at fixed indices; DPv3 (ADIv6) walks the ROM Table at
+        BASEPTR0/1 — implemented in slice 5 alongside the general
+        CoreSight ROM walker."""
+        # Imported lazily to avoid a circular dependency at module-load.
+        from .ap import Ap
+
+        if self.adi_version >= 6:
+            self.logger.warning(
+                "ADIv6 (DPv3) AP enumeration via BASEPTR is not yet "
+                "implemented — slice 5 will land it. No APs added.")
+            return
+
+        # DPv0-v2: walk APSEL space, batch all the IDR reads at once.
+        futures = [
+            (apsel, Ap.discover(self, base=apsel << 24))
+            for apsel in self.AP_PROBE_INDICES
+        ]
+        for apsel, coro in futures:
+            ap = await coro
+            if ap is not None:
+                self.child_add(ap)
+                self.logger.info(
+                    "AP%d discovered: idr=0x%08x class=0x%x type=0x%x",
+                    apsel, ap.idr, ap.klass, ap.type)
+
     async def flush_ops(self, batch):
         raise NotImplementedError(
             f"{type(self).__name__} must implement flush_ops")

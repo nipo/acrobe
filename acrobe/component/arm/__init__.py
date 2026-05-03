@@ -5,4 +5,5 @@ TAPs (and, as later slices land, AP types and CoreSight
 components) in the relevant registries.
 """
 
+from . import ap  # noqa: F401
 from . import jtag_dp  # noqa: F401

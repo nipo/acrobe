@@ -1,0 +1,194 @@
+"""Tests for the ARM AP base class: IDR decoding, registry,
+discovery."""
+
+import pytest
+
+from acrobe.component.arm.ap import Ap
+from acrobe.component.arm.dp import (
+    ApRead, ApWrite, Dp, DpRead, DpWrite,
+)
+from acrobe.db import NoMatch
+
+
+# -- Fake DP for unit-testing Ap in isolation -----------------------
+
+class FakeDp(Dp):
+    """A Dp whose ``flush_ops`` resolves ApRead via a programmable
+    register file. ApWrite is recorded; DP/Run/Abort ops are no-ops.
+    Lets Ap-level tests exercise reg_read/reg_write/discover without
+    a JTAG-DP / Chain stack."""
+
+    def __init__(self):
+        super().__init__("fake")
+        self.ap_regs: dict[tuple[int, int], int] = {}
+        self.writes: list[tuple[int, int, int]] = []  # (ap, addr, data)
+        self.read_failure_at: tuple[int, int] | None = None
+
+    def install_ap_reg(self, base: int, addr: int, value: int):
+        self.ap_regs[(base, addr)] = value
+
+    async def flush_ops(self, batch):
+        from acrobe.component.arm.dp import (
+            Abort, DpAccessFailure, Run,
+        )
+        for op, future in batch:
+            if isinstance(op, ApRead):
+                if self.read_failure_at == (op.ap, op.addr):
+                    future.set_exception(DpAccessFailure("simulated"))
+                    continue
+                future.set_result(self.ap_regs.get((op.ap, op.addr), 0))
+            elif isinstance(op, ApWrite):
+                self.writes.append((op.ap, op.addr, op.data))
+                future.set_result(None)
+            elif isinstance(op, (DpRead,)):
+                future.set_result(0)
+            elif isinstance(op, (DpWrite, Abort, Run)):
+                future.set_result(None)
+            else:
+                future.set_exception(
+                    TypeError(f"FakeDp got {type(op).__name__}"))
+
+
+# -- Naming heuristic ----------------------------------------------
+
+class TestApNaming:
+    def test_adiv5_style_apsel(self):
+        # base = apsel << 24, low 24 bits zero → name "ap{apsel}".
+        assert Ap(dp=FakeDp(), base=0).name == "ap0"
+        assert Ap(dp=FakeDp(), base=1 << 24).name == "ap1"
+        assert Ap(dp=FakeDp(), base=15 << 24).name == "ap15"
+        assert Ap(dp=FakeDp(), base=0xff << 24).name == "ap255"
+
+    def test_adiv6_arbitrary_base(self):
+        # ADIv6 AP at non-(n<<24) address → "ap@{base:08x}".
+        # 0x80001000 has low 24 bits non-zero, falls into the @addr path.
+        ap = Ap(dp=FakeDp(), base=0x80001000)
+        assert ap.name == "ap@80001000"
+        ap = Ap(dp=FakeDp(), base=0x12345678)
+        assert ap.name == "ap@12345678"
+
+    def test_explicit_name_wins(self):
+        ap = Ap(dp=FakeDp(), base=0, name="custom")
+        assert ap.name == "custom"
+
+
+# -- IDR field accessors -------------------------------------------
+
+class TestIdrFields:
+    def test_revision(self):
+        # IDR[31:28] = 0xa.
+        ap = Ap(dp=FakeDp(), base=0, idr=0xA0000000)
+        assert ap.revision == 0xa
+
+    def test_designer_arm(self):
+        # IDR[27:17] = 0x23B (ARM JEP106 in 11-bit compressed form:
+        # bank 4, code 0x3B → 4*128 + 0x3B = 0x23B).
+        ap = Ap(dp=FakeDp(), base=0, idr=0x23B << 17)
+        assert ap.designer == 0x23B
+
+    def test_class_mem_ap(self):
+        # IDR[16:13] = 0b1000.
+        ap = Ap(dp=FakeDp(), base=0, idr=(0b1000 << 13))
+        assert ap.klass == Ap.CLASS_MEM_AP
+
+    def test_class_jtag_ap(self):
+        # IDR[16:13] = 0b0000.
+        ap = Ap(dp=FakeDp(), base=0, idr=0)
+        assert ap.klass == Ap.CLASS_NONE
+
+    def test_variant(self):
+        # IDR[7:4] = 0xc.
+        ap = Ap(dp=FakeDp(), base=0, idr=0xc0)
+        assert ap.variant == 0xc
+
+    def test_type(self):
+        # IDR[3:0] = 0x1 (AHB).
+        ap = Ap(dp=FakeDp(), base=0, idr=0x1)
+        assert ap.type == 0x1
+
+
+# -- Register access via DP ----------------------------------------
+
+class TestRegisterAccess:
+    @pytest.mark.asyncio
+    async def test_reg_read_posts_apread(self):
+        dp = FakeDp()
+        dp.install_ap_reg(base=0, addr=0x10, value=0xdeadbeef)
+        ap = Ap(dp=dp, base=0)
+
+        v = await ap.reg_read(0x10)
+        assert v == 0xdeadbeef
+
+    @pytest.mark.asyncio
+    async def test_reg_write_posts_apwrite(self):
+        dp = FakeDp()
+        ap = Ap(dp=dp, base=0x01000000)
+
+        await ap.reg_write(0x04, 0xc0ffee01)
+        assert (0x01000000, 0x04, 0xc0ffee01) in dp.writes
+
+
+# -- Discovery via Ap.db -------------------------------------------
+
+class TestApDiscover:
+    @pytest.mark.asyncio
+    async def test_no_ap_idr_zero(self):
+        dp = FakeDp()
+        # No installed register: IDR reads as 0.
+        ap = await Ap.discover(dp, base=0)
+        assert ap is None
+
+    @pytest.mark.asyncio
+    async def test_unregistered_idr_returns_base_ap(self):
+        dp = FakeDp()
+        dp.install_ap_reg(base=0, addr=Ap.IDR, value=0xdeadbeef)
+        ap = await Ap.discover(dp, base=0)
+        assert ap is not None
+        assert type(ap) is Ap
+        assert ap.idr == 0xdeadbeef
+        assert ap.base == 0
+
+    @pytest.mark.asyncio
+    async def test_registered_subclass_used(self):
+        idr_match = 0x12345678
+
+        class MyAp(Ap):
+            def __init__(self, dp, base, idr, name=None):
+                super().__init__(dp, base, idr, name)
+
+        Ap.db.register(idr_match)(MyAp)
+        try:
+            dp = FakeDp()
+            dp.install_ap_reg(base=0x02000000, addr=Ap.IDR, value=idr_match)
+            ap = await Ap.discover(dp, base=0x02000000)
+            assert isinstance(ap, MyAp)
+            assert ap.idr == idr_match
+        finally:
+            Ap.db._registry.pop(idr_match, None)
+
+    @pytest.mark.asyncio
+    async def test_revision_masked_in_lookup(self):
+        # Registration at IDR=0x04770001; chip reports IDR=0x14770001
+        # (revision bumped). Same handler should be found.
+        idr_registered = 0x04770001
+
+        class FakeMemAp(Ap):
+            def __init__(self, dp, base, idr, name=None):
+                super().__init__(dp, base, idr, name)
+
+        Ap.db.register(idr_registered)(FakeMemAp)
+        try:
+            dp = FakeDp()
+            dp.install_ap_reg(base=0, addr=Ap.IDR, value=0x14770001)
+            ap = await Ap.discover(dp, base=0)
+            assert isinstance(ap, FakeMemAp)
+            assert ap.revision == 0x1
+        finally:
+            Ap.db._registry.pop(idr_registered, None)
+
+    @pytest.mark.asyncio
+    async def test_dp_access_failure_returns_none(self):
+        dp = FakeDp()
+        dp.read_failure_at = (0x05000000, Ap.IDR)
+        ap = await Ap.discover(dp, base=0x05000000)
+        assert ap is None

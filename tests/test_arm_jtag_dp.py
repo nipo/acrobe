@@ -339,6 +339,13 @@ class _DpSim(JtagInterface):
         self._select = 0
         self._last_response = (_Wire.ACK_OK_FAULT, 0)
         self._ctrl_stat = 0  # power-up bits set on CDBGPWRUPREQ/CSYSPWRUPREQ
+        # AP register file: ap_regs[(base, register_offset)] -> value.
+        self._ap_regs: dict[tuple[int, int], int] = {}
+
+    def install_ap(self, base: int, registers: dict[int, int]):
+        """Place an AP at ``base`` with ``registers`` (offset -> value)."""
+        for off, val in registers.items():
+            self._ap_regs[(base, off)] = val
 
     async def flush_ops(self, batch):
         for op, future in batch:
@@ -412,8 +419,25 @@ class _DpSim(JtagInterface):
                 self._dp_write(wire_offset, data)
                 self._last_response = (_Wire.ACK_OK_FAULT, 0)
         elif self._ir == self.IR_APACC:
-            # Slice 1 doesn't drive AP shifts in start(); leave as no-op.
-            self._last_response = (_Wire.ACK_OK_FAULT, 0)
+            rnw = dr & 1
+            wire_addr = (dr >> 1) & 0x3
+            data = (dr >> 3) & 0xffffffff
+            # ADIv6 view: full system address = SELECT[31:4]<<0 | wire<<2.
+            full_addr = (self._select & 0xFFFFFFF0) | (wire_addr << 2)
+            # Locate the owning AP by base (lowest base <= full_addr that
+            # has any installed register; APs occupy a 4 KB region).
+            ap_base = self._ap_base_for(full_addr)
+            reg_off = full_addr - ap_base if ap_base is not None else None
+            if rnw:
+                if ap_base is None:
+                    self._last_response = (_Wire.ACK_OK_FAULT, 0)
+                else:
+                    val = self._ap_regs.get((ap_base, reg_off), 0)
+                    self._last_response = (_Wire.ACK_OK_FAULT, val)
+            else:
+                if ap_base is not None:
+                    self._ap_regs[(ap_base, reg_off)] = data
+                self._last_response = (_Wire.ACK_OK_FAULT, 0)
         elif self._ir == self.IR_ABORT:
             pass
 
@@ -429,6 +453,16 @@ class _DpSim(JtagInterface):
             # last-response data.
             return self._last_response[1]
         return 0
+
+    def _ap_base_for(self, full_addr: int) -> int | None:
+        """Return the base of the AP that owns ``full_addr`` (any AP
+        with at least one installed register within [base, base+0xFFC]).
+        Returns None if no AP matches."""
+        candidates = {base for (base, _) in self._ap_regs}
+        for base in candidates:
+            if base <= full_addr < base + 0x1000:
+                return base
+        return None
 
     def _dp_write(self, wire_offset: int, data: int):
         bank = self._select & 0xf
@@ -467,3 +501,91 @@ class TestEndToEnd:
         assert dp.dpidr == 0x4BA02477
         assert dp.dp_version == 2
         assert dp.adi_version == 5
+
+    @pytest.mark.asyncio
+    async def test_ap_enumeration_picks_up_installed_aps(self):
+        # Mirror the Zynq-7's first two APs: an AHB-AP at apsel 0 and
+        # an APB-AP at apsel 1. Other APSELs read IDR=0 and are
+        # skipped. The DP enumeration walks 0..15 + 240..255 and adds
+        # the two real APs as children.
+        from acrobe.component.arm.ap import Ap
+
+        sim = _DpSim(idcode=0x4BA00477, dpidr=0x4BA02477)
+        sim.install_ap(base=0x00000000, registers={Ap.IDR: 0x04770001})
+        sim.install_ap(base=0x01000000, registers={Ap.IDR: 0x04770002})
+
+        chain = Chain()
+        sim.child_add(chain)
+        await chain.discover()
+        tap = chain.children[0]
+        await tap.start_tree()
+
+        dp = [c for c in tap.children if isinstance(c, JtagDp)][0]
+
+        ap_children = [c for c in dp.children if isinstance(c, Ap)]
+        assert len(ap_children) == 2
+        bases = sorted(ap.base for ap in ap_children)
+        assert bases == [0x00000000, 0x01000000]
+        idrs = sorted(ap.idr for ap in ap_children)
+        assert idrs == [0x04770001, 0x04770002]
+
+        # Names use the apsel-style heuristic.
+        names = sorted(ap.name for ap in ap_children)
+        assert names == ["ap0", "ap1"]
+
+    @pytest.mark.asyncio
+    async def test_ap_enumeration_with_no_aps(self):
+        sim = _DpSim(idcode=0x4BA00477, dpidr=0x4BA02477)
+        chain = Chain()
+        sim.child_add(chain)
+        await chain.discover()
+        tap = chain.children[0]
+        await tap.start_tree()
+
+        dp = [c for c in tap.children if isinstance(c, JtagDp)][0]
+        from acrobe.component.arm.ap import Ap
+        assert [c for c in dp.children if isinstance(c, Ap)] == []
+
+    @pytest.mark.asyncio
+    async def test_high_apsel_is_probed(self):
+        # AP at APSEL 255 (high range probed by enumeration).
+        from acrobe.component.arm.ap import Ap
+
+        sim = _DpSim(idcode=0x4BA00477, dpidr=0x4BA02477)
+        sim.install_ap(base=0xff << 24, registers={Ap.IDR: 0x47700004})
+        chain = Chain()
+        sim.child_add(chain)
+        await chain.discover()
+        tap = chain.children[0]
+        await tap.start_tree()
+
+        dp = [c for c in tap.children if isinstance(c, JtagDp)][0]
+        ap_children = [c for c in dp.children if isinstance(c, Ap)]
+        assert len(ap_children) == 1
+        assert ap_children[0].base == 0xff000000
+        assert ap_children[0].name == "ap255"
+
+    @pytest.mark.asyncio
+    async def test_ap_reg_read_addresses_correctly(self):
+        # After enumeration, an AP can read its own registers.
+        # AP at apsel 1 with IDR=0x04770002 and a fake register at
+        # offset 0x10 = 0xcafebabe.
+        from acrobe.component.arm.ap import Ap
+
+        sim = _DpSim(idcode=0x4BA00477, dpidr=0x4BA02477)
+        sim.install_ap(base=0x01000000, registers={
+            Ap.IDR: 0x04770002,
+            0x10: 0xcafebabe,
+        })
+
+        chain = Chain()
+        sim.child_add(chain)
+        await chain.discover()
+        tap = chain.children[0]
+        await tap.start_tree()
+
+        dp = [c for c in tap.children if isinstance(c, JtagDp)][0]
+        ap = [c for c in dp.children if isinstance(c, Ap)][0]
+
+        v = await ap.reg_read(0x10)
+        assert v == 0xcafebabe
