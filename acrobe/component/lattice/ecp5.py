@@ -1,6 +1,7 @@
 import asyncio
 
 from ...protocol.jtag import Tap, Dr, Instruction
+from ...part_id import PartId
 from ..fpga import JtagSramFpga
 from ...bitstring import BitString
 from ...endian import bitswap8
@@ -39,7 +40,7 @@ class ECP5Status(Bitfield):
     ExecutionError  = BooleanField(26)
 
 
-@Tap.db.register(*_ECP5_PARTS.keys())
+@Tap.db.register(*map(PartId.from_idcode, _ECP5_PARTS.keys()))
 class ECP5(Tap, JtagSramFpga):
     irlen = 8
     max_freq = 25e6

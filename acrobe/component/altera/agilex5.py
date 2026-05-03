@@ -3,6 +3,7 @@ import enum
 import struct
 
 from ...protocol.jtag import Tap, Dr, Instruction
+from ...part_id import PartId
 from ..fpga import JtagSramFpga
 from ...bitstring import BitString
 from ...bitfield import *
@@ -222,7 +223,7 @@ _AGILEX5_PARTS = {
     0x0362c0dd: "A5EA013BB23B",
 }
 
-@Tap.db.register(*_AGILEX5_PARTS.keys())
+@Tap.db.register(*map(PartId.from_idcode, _AGILEX5_PARTS.keys()))
 class Agilex5E(Agilex5):
     """Agilex 5 E-series."""
 

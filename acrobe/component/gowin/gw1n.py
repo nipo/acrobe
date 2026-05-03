@@ -1,6 +1,7 @@
 import asyncio
 
 from ...protocol.jtag import Tap, Dr, Instruction
+from ...part_id import PartId
 from ..fpga import JtagSramFpga
 from ...endian import bitswap8
 from ...bitfield import Bitfield, BooleanField
@@ -235,17 +236,17 @@ async def _gowin_spi(tap):
     return jtag_spi_bridge(tap, base_freq=30e6)
 
 
-@Tap.db.register(*_part_ids("GW1"))
+@Tap.db.register(*map(PartId.from_idcode, _part_ids("GW1")))
 class Gw1n(GowinFpga):
     pass
 
 
-@Tap.db.register(*_part_ids("GW2A"))
+@Tap.db.register(*map(PartId.from_idcode, _part_ids("GW2A")))
 class Gw2a(GowinFpga):
     _status_type = Gw2aStatus
 
 
-@Tap.db.register(*_part_ids("GW5A"))
+@Tap.db.register(*map(PartId.from_idcode, _part_ids("GW5A")))
 class Gw5a(GowinFpga):
     max_freq = 30e6
     _status_type = Gw5aStatus

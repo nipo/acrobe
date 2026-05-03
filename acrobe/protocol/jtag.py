@@ -9,6 +9,7 @@ from ..node import Node
 from ..freq_capper import FreqCapper
 from ..bitstring import BitString, BitStringBase
 from ..db import Db, NoMatch
+from ..part_id import PartId
 
 
 # UUIDs for transportable JTAG types. Stable, hand-minted; new types
@@ -260,11 +261,6 @@ class _DynamicInstruction:
 
 # Tap
 
-def _idcode_eq(key, lookup):
-    """Compare IDCODEs ignoring the 4-bit revision field (bits 31:28)."""
-    return (key & 0x0FFFFFFF) == (lookup & 0x0FFFFFFF)
-
-
 class Tap(Batcher, Node, InstructionRegistry):
     """A single TAP. Batches TAP-level ops (_TapShift, _TapRun,
     _TapIrStatus) and forwards them to its tree parent (a Chain or any
@@ -278,7 +274,20 @@ class Tap(Batcher, Node, InstructionRegistry):
 
     irlen = None
     max_freq = None
-    db = Db("TAP idcode", eq_func=_idcode_eq)
+    # Db keyed on PartId. Equality is PartId.is_same_part: matches
+    # across silicon revisions but requires designer/part to be
+    # identical. Both registration and lookup transparently accept
+    # raw 32-bit IDCODEs — they're the wire form of a PartId, so we
+    # auto-convert via PartId.from_idcode in the eq function.
+    @staticmethod
+    def _partid_eq(key, lookup):
+        if isinstance(key, int):
+            key = PartId.from_idcode(key)
+        if isinstance(lookup, int):
+            lookup = PartId.from_idcode(lookup)
+        return key.is_same_part(lookup)
+
+    db = Db("TAP partid", eq_func=_partid_eq)
 
     def __init__(self, idcode=None, irlen=None, name=None):
         if irlen is not None:
@@ -590,7 +599,7 @@ class Chain(Batcher, Node):
         if idcode is None:
             return None
         try:
-            taps = Tap.db.get(idcode, allow_default=False)
+            taps = Tap.db.get(PartId.from_idcode(idcode), allow_default=False)
         except NoMatch:
             return None
         irlens = {t.irlen for t in taps if t.irlen is not None}
@@ -616,7 +625,8 @@ class Chain(Batcher, Node):
             tap = base(idcode=idcode, irlen=irlen)
         else:
             try:
-                tap = Tap.db.call(idcode, idcode=idcode, irlen=irlen)
+                tap = Tap.db.call(PartId.from_idcode(idcode),
+                                  idcode=idcode, irlen=irlen)
             except NoMatch:
                 tap = Tap(idcode=idcode, irlen=irlen)
 

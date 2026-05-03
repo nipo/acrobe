@@ -41,6 +41,7 @@ from ...db import NoMatch
 from ...engine import Batcher
 from ...freq_capper import FreqCapper
 from ...node import Node
+from ...part_id import PartId
 from ...protocol.jtag import (
     Tap, TapOp, _TapShift, _TapRun, _TapIrStatus,
 )
@@ -73,7 +74,7 @@ def _make_tap_for(device, position: int):
     generic fallback gets a positional ``tap<N>`` name.
     """
     try:
-        tap = Tap.db.call(device.idcode,
+        tap = Tap.db.call(PartId.from_idcode(device.idcode),
                           idcode=device.idcode,
                           irlen=device.irlen)
     except NoMatch:

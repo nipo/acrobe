@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 
 from ...bitstring import BitString
+from ...part_id import PartId
 from ...protocol.jtag import Dr, Instruction, Tap
 from . import dp as dpmod
 
@@ -114,7 +115,7 @@ JTAG_DP_IDCODES = (
 )
 
 for _idcode in JTAG_DP_IDCODES:
-    Tap.db.register(_idcode)(JtagDpTap)
+    Tap.db.register(PartId.from_idcode(_idcode))(JtagDpTap)
 
 
 # --- DP overlay ----------------------------------------------------

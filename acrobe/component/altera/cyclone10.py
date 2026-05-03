@@ -1,4 +1,5 @@
 from ...protocol.jtag import Tap, Dr, Instruction
+from ...part_id import PartId
 from ..fpga import JtagSramFpga
 from ...bitstring import BitString
 
@@ -115,7 +116,7 @@ _PARTS = {
 }
 
 
-@Tap.db.register(*_PARTS.keys())
+@Tap.db.register(*map(PartId.from_idcode, _PARTS.keys()))
 class Cyclone10Lp(Cyclone10):
     def __init__(self, idcode, **kw):
         name = _PARTS.get(idcode, f"Cyclone10-0x{idcode:08x}")
