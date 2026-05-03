@@ -1,139 +1,142 @@
+"""ARM Serial Wire Debug (SWD) protocol layer.
+
+Defines the bit-level SWD operations that an :class:`Interface`
+backend executes on the wire (Read/Write/Run/Wakeup plus the
+mode-switch sequences), and the abstract :class:`Interface` class
+itself. Adapter-specific subclasses (J-Link, CMSIS-DAP, FTDI-SWD,
+…) register against ``Interface.db`` and implement
+:meth:`flush_ops` to drive their own hardware.
+
+The DP layer (:class:`acrobe.component.arm.SwDp`) sits above this:
+it lowers DP/AP register accesses (``DpRead``/``ApRead``/…) into
+the swd ops below and posts them on its parent ``Interface``.
+SELECT-cache management lives there; AP-read pipelining (the
+"data lands on the next packet" SWD wire quirk) is the
+``Interface`` implementation's responsibility — callers post a
+:class:`Read` with ``ap=True`` and the future resolves with the
+real data once the implementation has flushed the trailing read."""
+
 from __future__ import annotations
 
-import asyncio
+from dataclasses import dataclass
 from enum import IntEnum
 
-from ..bitstring import BitString
+from ..db import Db
 from ..engine import Batcher
 from ..node import Node
 
 
 class Ack(IntEnum):
-    OK = 1
-    WAIT = 2
-    ERROR = 4
-    PARITY_ERR = 8
+    """SWD ACK encoding (ACK[0] is the first wire bit)."""
+
+    OK    = 0b001
+    WAIT  = 0b010
+    FAULT = 0b100
 
 
-# --- SWD Operations ---
+# --- Operation dataclasses --------------------------------------------
+#
+# Inputs only — the future returned by Batcher.post resolves to the
+# natural result value (int for Read, None otherwise).
 
+
+@dataclass(frozen=True)
 class Read:
-    """SWD read operation (DP or AP register)."""
+    """Read a DP or AP register.
 
-    def __init__(self, ap: bool, addr: int):
-        self.ap = bool(ap)
-        self.addr = addr & 0x0c
-        parity = int(self.ap) ^ ((self.addr >> 2) & 1) ^ ((self.addr >> 3) & 1) ^ 1
-        self.cmd = (int(self.ap) << 1) | (((self.addr >> 2) & 3) << 3) | (parity << 5) | 0x85
-        self.data = None
-        self.ack = None
+    ``addr`` is the byte offset; only A[3:2] (bits 2..3) make it onto
+    the wire — the bank field of ``addr`` is the Dp's responsibility
+    via SELECT.
 
-    def __repr__(self):
-        return f"<Read {'AP' if self.ap else 'DP'} addr={self.addr:#x}>"
+    AP reads have an inherent one-packet pipeline delay on the wire.
+    The Interface backend handles that internally; the future resolves
+    to the actual 32-bit data once the trailing read has been issued."""
+
+    ap: bool
+    addr: int
 
 
+@dataclass(frozen=True)
 class Write:
-    """SWD write operation (DP or AP register)."""
+    """Write a DP or AP register. Future resolves to ``None``."""
 
-    def __init__(self, ap: bool, addr: int, data: int):
-        self.ap = bool(ap)
-        self.addr = addr & 0x0c
-        self.data = data & 0xffffffff
-        parity = int(self.ap) ^ ((self.addr >> 2) & 1) ^ ((self.addr >> 3) & 1)
-        self.cmd = (int(self.ap) << 1) | (((self.addr >> 2) & 3) << 3) | (parity << 5) | 0x81
-        self.ack = None
-
-    def __repr__(self):
-        return f"<Write {'AP' if self.ap else 'DP'} addr={self.addr:#x} data={self.data:#010x}>"
+    ap: bool
+    addr: int
+    data: int
 
 
+@dataclass(frozen=True)
 class Run:
-    """Run idle cycles (SWCLK with SWDIO low)."""
+    """``cycles`` idle cycles with SWDIO held LOW.
 
-    def __init__(self, cycles: int):
-        self.cycles = cycles
+    Used to insert delays between AP transactions — most chips need
+    a handful of idles between back-to-back AP accesses or they
+    return WAIT/FAULT."""
 
-    def __repr__(self):
-        return f"<Run cycles={self.cycles}>"
+    cycles: int
 
 
+@dataclass(frozen=True)
 class Wakeup:
-    """Wake target from dormant (SWCLK with SWDIO high)."""
+    """``cycles`` cycles with SWDIO held HIGH (a partial line reset).
 
-    def __init__(self, cycles: int = 50):
-        self.cycles = cycles
+    Standalone primitive; :class:`LineReset` and :class:`JtagToSwd`
+    bundle it with idles for the full wire-mode setup."""
 
-    def __repr__(self):
-        return f"<Wakeup cycles={self.cycles}>"
+    cycles: int = 50
 
 
-# --- Protocol switch sequences ---
-
+@dataclass(frozen=True)
 class JtagToSwd:
-    """JTAG-to-SWD switch sequence."""
-    tms = BitString(-1, 50) + BitString(0xe73c, 16) + BitString(-1, 5)
-
-    def __repr__(self):
-        return "JtagToSwd()"
-
-
-class SwdToDormant:
-    """SWD-to-Dormant switch sequence."""
-    tms = BitString(-1, 50) + BitString(0xe3bc, 16)
-
-    def __repr__(self):
-        return "SwdToDormant()"
+    """JTAG-to-SWD switch sequence: line reset + 0x79E7 (MSB-first
+    on the wire) + line reset + idle. Idempotent on chips already
+    in SWD; doubles as the canonical "wake the SWD interface up"
+    primitive at adapter init."""
 
 
-class DormantToSwd:
-    """Dormant-to-SWD wake sequence."""
-    ALERT = 0x19bc0ea2e3ddafe986852d956209f392
-    ACTIVATION = 0x1a
-    tms = (BitString(-1, 50) +
-           BitString(ALERT, 128) +
-           BitString(0, 4) +
-           BitString(ACTIVATION, 8))
-
-    def __repr__(self):
-        return "DormantToSwd()"
-
-
+@dataclass(frozen=True)
 class LineReset:
-    """SWD line reset: 50+ SWCLK cycles with SWDIO high, then idle."""
-    tms = BitString(-1, 50) + BitString(0, 2)
-
-    def __repr__(self):
-        return "LineReset()"
+    """SWD line reset: ≥50 cycles SWDIO=1 followed by ≥2 idle
+    cycles. Resets the DP's SWD state machine and clears its
+    SELECT register."""
 
 
-# --- SWD Interface ---
+# --- Errors -----------------------------------------------------------
+
+
+class SwdAccessFailure(Exception):
+    """SWD transaction failed (FAULT, parity error, invalid ACK, …)."""
+
+
+class SwdWait(SwdAccessFailure):
+    """SWD ACK = WAIT. Caller should clear sticky bits via ABORT and
+    retry, or insert idle cycles and retry."""
+
+
+# --- Abstract Interface ------------------------------------------------
+
 
 class Interface(Batcher, Node):
-    """SWD wire interface. Forwards Read/Write/Run/Wakeup to adapter."""
+    """SWD wire interface.
 
-    def __init__(self, adapter, name="swd"):
+    Concrete subclasses (e.g. :class:`acrobe.adapter.jlink.swd.JLinkSwdInterface`,
+    :class:`acrobe.adapter.cmsisdap.swd.CmsisDapSwdInterface`) implement
+    :meth:`flush_ops` to translate batched swd ops into adapter-specific
+    USB transactions.
+
+    The canonical child is a :class:`SwDp` registered under ``"dap"`` in
+    :data:`db`; spawning happens via the standard ``child_summon``
+    machinery (``adapter/swd/dap``)."""
+
+    db: Db = Db("SWD interface handler")
+
+    def __init__(self, name="swd"):
         Batcher.__init__(self)
         Node.__init__(self, name)
-        self._adapter = adapter
 
     async def flush_ops(self, batch):
-        futures = []
-        for op, future in batch:
-            futures.append((self._adapter.post(op), future))
-        if futures:
-            await asyncio.gather(*[f for f, _ in futures])
-        for af, mf in futures:
-            mf.set_result(af.result())
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement flush_ops")
 
-    def __repr__(self):
-        return f"<swd.Interface {self._name}>"
-
-
-# --- DP register addresses ---
-
-DP_IDCODE = 0x00
-DP_ABORT = 0x00     # write-only
-DP_CTRL_STAT = 0x04
-DP_SELECT = 0x08
-DP_RDBUFF = 0x0c
-DP_TARGETSEL = 0x0c  # write-only (multidrop)
+    async def child_spawn(self, name):
+        return await self.db.acall(name, self)

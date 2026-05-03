@@ -1,199 +1,102 @@
-import asyncio
+"""Tests for the SWD protocol layer (frozen-dataclass ops + the
+abstract :class:`swd.Interface`). Backend-specific concerns (wire
+encoding, bit-bang, ACK extraction) live in their own tests."""
+
+import dataclasses
+
 import pytest
-from acrobe.protocol.swd import (
-    Ack, Read, Write, Run, Wakeup, Interface,
-    JtagToSwd, SwdToDormant, DormantToSwd, LineReset,
-    DP_IDCODE, DP_ABORT, DP_CTRL_STAT, DP_SELECT, DP_RDBUFF,
-)
-from acrobe.engine import Batcher
+
+from acrobe.protocol import swd
 
 
 class TestAck:
     def test_ok(self):
-        assert Ack.OK == 1
+        assert int(swd.Ack.OK) == 0b001
 
     def test_wait(self):
-        assert Ack.WAIT == 2
+        assert int(swd.Ack.WAIT) == 0b010
 
-    def test_error(self):
-        assert Ack.ERROR == 4
-
-    def test_parity_err(self):
-        assert Ack.PARITY_ERR == 8
+    def test_fault(self):
+        assert int(swd.Ack.FAULT) == 0b100
 
 
-class TestReadOp:
-    def test_dp_read(self):
-        op = Read(ap=False, addr=0x00)
-        assert not op.ap
-        assert op.addr == 0x00
-        assert op.data is None
-        assert op.ack is None
+class TestOpsAreFrozen:
+    """Ops are inputs only — futures carry results. Mutation is a bug."""
 
-    def test_ap_read(self):
-        op = Read(ap=True, addr=0x04)
-        assert op.ap
-        assert op.addr == 0x04
+    def test_read_frozen(self):
+        op = swd.Read(ap=False, addr=0x00)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            op.addr = 0x04
 
-    def test_cmd_byte_dp_idcode(self):
-        # DP IDCODE read: ap=0, addr=0x00
-        op = Read(ap=False, addr=0x00)
-        # parity = 0 ^ 0 ^ 0 ^ 1 = 1
-        # cmd = 0 | 0 | (1<<5) | 0x85 = 0xa5
-        assert op.cmd == 0xa5
+    def test_write_frozen(self):
+        op = swd.Write(ap=True, addr=0x04, data=0x12345678)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            op.data = 0xdeadbeef
 
-    def test_cmd_byte_ap_read(self):
-        # AP read addr=0x00: ap=1, addr=0x00
-        op = Read(ap=True, addr=0x00)
-        # parity = 1 ^ 0 ^ 0 ^ 1 = 0
-        # cmd = (1<<1) | 0 | 0 | 0x85 = 0x87
-        assert op.cmd == 0x87
+    def test_run_frozen(self):
+        op = swd.Run(cycles=10)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            op.cycles = 20
 
-    def test_addr_masked(self):
-        # Only bits [3:2] of addr matter
-        op = Read(ap=False, addr=0xff)
-        assert op.addr == 0x0c
+    def test_wakeup_frozen(self):
+        op = swd.Wakeup(cycles=100)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            op.cycles = 50
 
-    def test_repr(self):
-        assert "DP" in repr(Read(ap=False, addr=0))
-        assert "AP" in repr(Read(ap=True, addr=0))
+    def test_no_legacy_result_fields(self):
+        """The legacy `op.data` / `op.ack` slots from the
+        synchronous design were removed when these became frozen
+        inputs. Make sure they don't drift back."""
+        r = swd.Read(ap=False, addr=0)
+        w = swd.Write(ap=False, addr=0, data=0)
+        for legacy in ("data", "ack"):
+            assert not hasattr(r, legacy), f"Read.{legacy} reappeared"
+        for legacy in ("ack",):
+            assert not hasattr(w, legacy), f"Write.{legacy} reappeared"
 
 
-class TestWriteOp:
-    def test_dp_write(self):
-        op = Write(ap=False, addr=0x00, data=0xdeadbeef)
-        assert not op.ap
-        assert op.data == 0xdeadbeef
+class TestSequenceMarkers:
+    """JtagToSwd / LineReset are markers only — the actual bit
+    pattern is the backend's responsibility."""
 
-    def test_ap_write(self):
-        op = Write(ap=True, addr=0x04, data=0x12345678)
-        assert op.ap
-        assert op.data == 0x12345678
-
-    def test_cmd_byte_dp_abort(self):
-        # DP ABORT write: ap=0, addr=0x00
-        op = Write(ap=False, addr=0x00, data=0)
-        # parity = 0 ^ 0 ^ 0 = 0
-        # cmd = 0 | 0 | 0 | 0x81 = 0x81
-        assert op.cmd == 0x81
-
-    def test_data_masked_32bit(self):
-        op = Write(ap=False, addr=0, data=0x1ffffffff)
-        assert op.data == 0xffffffff
-
-    def test_repr(self):
-        assert "DP" in repr(Write(ap=False, addr=0, data=0))
-
-
-class TestRunOp:
-    def test_basic(self):
-        op = Run(10)
-        assert op.cycles == 10
-        assert "10" in repr(op)
-
-
-class TestWakeupOp:
-    def test_default(self):
-        op = Wakeup()
-        assert op.cycles == 50
-
-    def test_custom(self):
-        op = Wakeup(100)
-        assert op.cycles == 100
-
-
-class TestProtocolSequences:
     def test_jtag_to_swd(self):
-        s = JtagToSwd()
-        assert len(s.tms) == 71  # 50 + 16 + 5
-
-    def test_swd_to_dormant(self):
-        s = SwdToDormant()
-        assert len(s.tms) == 66  # 50 + 16
-
-    def test_dormant_to_swd(self):
-        s = DormantToSwd()
-        assert len(s.tms) == 190  # 50 + 128 + 4 + 8
+        # Just ensure the marker exists and is hashable (frozen).
+        a = swd.JtagToSwd()
+        b = swd.JtagToSwd()
+        assert a == b
+        assert hash(a) == hash(b)
 
     def test_line_reset(self):
-        r = LineReset()
-        assert len(r.tms) == 52  # 50 + 2
-        # First 50 bits should be all 1s
-        for i in range(50):
-            assert r.tms[i] == True
-        # Last 2 bits should be 0
-        assert r.tms[50] == False
-        assert r.tms[51] == False
+        a = swd.LineReset()
+        b = swd.LineReset()
+        assert a == b
 
 
-class MockSwdAdapter(Batcher):
-    """Records ops and populates Read.data."""
+class TestInterfaceAbstract:
+    def test_flush_not_implemented(self):
+        iface = swd.Interface(name="t")
+        import asyncio
+        with pytest.raises(NotImplementedError):
+            asyncio.run(iface.flush_ops([]))
 
-    def __init__(self):
-        super().__init__()
-        self.ops = []
+    def test_db_present(self):
+        # `swd.Interface.db` is the registry adapter-specific
+        # interfaces don't use directly, but the standard SwDp
+        # factory registers under "dap".
+        assert isinstance(swd.Interface.db, type(swd.Interface.db))
 
-    async def flush_ops(self, batch):
-        for op, future in batch:
-            self.ops.append(op)
-            if isinstance(op, Read):
-                op.data = 0x0ba00477
-                op.ack = Ack.OK
-            elif isinstance(op, Write):
-                op.ack = Ack.OK
-            future.set_result(op)
-
-
-class TestInterface:
-    @pytest.mark.asyncio
-    async def test_passthrough_read(self):
-        adapter = MockSwdAdapter()
-        iface = Interface(adapter)
-        op = Read(ap=False, addr=0x00)
-        result = await iface.post(op)
-        assert result is op
-        assert op.data == 0x0ba00477
-        assert len(adapter.ops) == 1
-
-    @pytest.mark.asyncio
-    async def test_passthrough_write(self):
-        adapter = MockSwdAdapter()
-        iface = Interface(adapter)
-        op = Write(ap=False, addr=0x00, data=0x12345678)
-        result = await iface.post(op)
-        assert result is op
-        assert op.ack == Ack.OK
-
-    @pytest.mark.asyncio
-    async def test_batching(self):
-        adapter = MockSwdAdapter()
-        iface = Interface(adapter)
-        r = Read(ap=False, addr=0x00)
-        w = Write(ap=False, addr=0x04, data=0)
-        f1 = iface.post(r)
-        f2 = iface.post(w)
-        await asyncio.gather(f1, f2)
-        assert len(adapter.ops) == 2
-
-    @pytest.mark.asyncio
-    async def test_run_forwarded(self):
-        adapter = MockSwdAdapter()
-        iface = Interface(adapter)
-        op = Run(10)
-        result = await iface.post(op)
-        assert result is op
-        assert adapter.ops[0].cycles == 10
-
-    def test_repr(self):
-        adapter = MockSwdAdapter()
-        iface = Interface(adapter, name="swd0")
-        assert "Interface" in repr(iface)
+    def test_dap_factory_registered(self):
+        # Importing the arm package wires SwDp into the registry.
+        import acrobe.component.arm  # noqa: F401
+        # Spawning "dap" should yield a SwDp.
+        from acrobe.component.arm.sw_dp import SwDp
+        iface = swd.Interface(name="t")
+        # db.acall("dap", iface) returns the SwDp from the factory.
+        import asyncio
+        result = asyncio.run(swd.Interface.db.acall("dap", iface))
+        assert isinstance(result, SwDp)
 
 
-class TestDpAddresses:
-    def test_constants(self):
-        assert DP_IDCODE == 0x00
-        assert DP_ABORT == 0x00
-        assert DP_CTRL_STAT == 0x04
-        assert DP_SELECT == 0x08
-        assert DP_RDBUFF == 0x0c
+class TestErrors:
+    def test_swd_wait_is_access_failure(self):
+        assert issubclass(swd.SwdWait, swd.SwdAccessFailure)

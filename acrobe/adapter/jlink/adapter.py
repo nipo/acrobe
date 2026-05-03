@@ -150,8 +150,8 @@ class JLinkAdapter(Adapter):
             await jtag.setup(freq_khz=1000)
             return jtag
         if name == "swd":
-            from .swd import JLinkSwDp
-            return JLinkSwDp(self._transport, name="swd")
+            from .swd import JLinkSwdInterface
+            return JLinkSwdInterface(self._transport, name="swd")
         raise NoMatch("interface", name)
 
     async def close(self):

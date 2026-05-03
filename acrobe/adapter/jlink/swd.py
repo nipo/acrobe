@@ -1,33 +1,33 @@
-"""J-Link SWD: a Dp variant that drives SWD packets directly via
-``CMD_SWD_IO`` bit-bang.
+"""J-Link SWD wire interface.
 
-Pragmatic shortcut while there's only one SWD backend: combines
-the wire-protocol layer (slice 7's SwDp role) and the bit-bang
-adapter into one class. When a second SWD adapter shows up
-(CMSIS-DAP, FTDI MPSSE in SWD mode, …) we can refactor to
-:class:`swd.Interface` + a generic SwDp(Dp).
+Implements :class:`acrobe.protocol.swd.Interface` on top of the
+J-Link's bit-bang ``CMD_SWD_IO`` (opcode 0xCF when TIF=SWD). One
+USB transaction per :meth:`flush_ops` batch — the underlying
+batcher accumulates enough work to amortise the round-trip cost.
 
-Owns:
+Wire-protocol notes
+-------------------
 
-* Wire-mode entry (line reset → JTAG-to-SWD switch → line reset →
-  idle), per ARM ADIv5/v6.
-* SELECT cache (APSEL + APBANKSEL + DPBANKSEL) so consecutive AP
-  accesses in the same bank don't trip extra DP-write packets.
-* AP-read data pipelining: an AP read's ACK lands on its own
-  packet, the data lands on the *next* packet (per spec). On
-  end-of-batch we drain any trailing pending read with a DP RDBUFF
-  read.
-"""
+The J-Link firmware exposes the SWD packet *minus* the TRN
+turnaround cycles: ACK starts at offset 8 (right after the 8 cmd
+bits), then 32 data bits, then parity, then a couple of trailing
+bits. OpenOCD's ``jlink_swd_queue_cmd`` reads ACK at the same
+offset; matching that convention avoids surprises.
+
+AP-read pipelining is part of the wire protocol: the data of an
+AP read packet lands in the data field of the *next* packet. We
+keep a ``pending`` slot for the in-flight AP read and fill its
+``data_offset`` when the next packet (read OR write) is queued. At
+end of batch we drain a trailing pending read with an explicit
+RDBUFF read."""
 
 from __future__ import annotations
 
-import asyncio
-
-from ...component.arm import dp as dpmod
+from ...protocol import swd
 from . import protocol
 
 
-# ---- Packing helpers (LSB-first byte streams) --------------------
+# ---- Bit-pack helpers (LSB-first) ---------------------------------
 
 def _pack_bits(bits) -> bytes:
     out = bytearray((len(bits) + 7) // 8)
@@ -41,36 +41,36 @@ def _unpack_bits(data: bytes, count: int):
     return [(data[i // 8] >> (i % 8)) & 1 for i in range(count)]
 
 
-# ---- SWD packet helpers ------------------------------------------
+# ---- SWD packet primitives ----------------------------------------
 #
-# Packet layout (46 bits):
-#   READ:   cmd[0..7]  TRN[8]  ACK[9..11]  data[12..43]  parity[44]  TRN[45]
-#   WRITE:  cmd[0..7]  TRN[8]  ACK[9..11]  TRN[12]       data[13..44] parity[45]
+#   READ:  cmd[0..7]  ACK[8..10]  data[11..42]  parity[43]
+#   WRITE: cmd[0..7]  ACK[8..10]  (TRN-padding)  data[..]  parity[..]
 #
-# ACK encoding: 0b001 = OK, 0b010 = WAIT, 0b100 = FAULT (LSB-first).
+# ACK encoding: ACK[0] is the bit at offset 8 — first bit on the wire.
 
-_SWD_PACKET_BITS = 46
-_ACK_OFFSET = 9
-_READ_DATA_OFFSET = 12
-_READ_PARITY_OFFSET = 44
+_ACK_OFFSET       = 8
+_READ_DATA_OFFSET = 11
 
-_ACK_OK    = 0b001
-_ACK_WAIT  = 0b010
-_ACK_FAULT = 0b100
+_ACK_OK    = swd.Ack.OK
+_ACK_WAIT  = swd.Ack.WAIT
+_ACK_FAULT = swd.Ack.FAULT
+
+# RDBUFF DP register — read here to drain a pending AP read at end
+# of batch.
+_RDBUFF_REG = 0x0c
 
 
 def _swd_cmd_byte(ap: bool, rnw: bool, addr: int) -> int:
-    """8-bit SWD request packet header.
+    """8-bit SWD request packet header (LSB-first wire order):
 
-    Bit layout (LSB-first wire):
-        0: start (1)
-        1: APnDP
-        2: RnW
-        3: A[2]
-        4: A[3]
-        5: parity (even over bits 1..4)
-        6: stop (0)
-        7: park (1)
+        bit 0: start (1)
+        bit 1: APnDP
+        bit 2: RnW
+        bit 3: A[2]
+        bit 4: A[3]
+        bit 5: parity (even over bits 1..4)
+        bit 6: stop (0)
+        bit 7: park (1)
     """
     a = (addr >> 2) & 0x3
     parity = (int(ap) ^ (a & 1) ^ ((a >> 1) & 1) ^ int(rnw)) & 1
@@ -91,23 +91,24 @@ def _data_parity(data: int) -> int:
     return x & 1
 
 
-def _emit_swd_read(direction: list[int], out: list[int],
-                   ap: bool, addr: int) -> int:
-    """Append a 46-bit SWD read packet. Returns its bit offset."""
+def _emit_swd_read(direction, out, ap: bool, addr: int) -> int:
+    """Append a 46-bit SWD read packet. Returns its bit offset.
+
+    8 cmd bits (host) + 38 in-bits (target) — same total as crobe and
+    OpenOCD's jlink_swd_queue_cmd. The 38 in-bits cover ACK + DATA +
+    PARITY + the trailing TRN/idle padding the firmware exposes."""
     start = len(direction)
     cmd = _swd_cmd_byte(ap, True, addr)
     for i in range(8):
         direction.append(1)
         out.append((cmd >> i) & 1)
-    # 1 TRN + 3 ACK + 32 data + 1 parity + 1 TRN — all target-side.
-    for _ in range(_SWD_PACKET_BITS - 8):
+    for _ in range(38):
         direction.append(0)
         out.append(0)
     return start
 
 
-def _emit_swd_write(direction: list[int], out: list[int],
-                    ap: bool, addr: int, data: int) -> int:
+def _emit_swd_write(direction, out, ap: bool, addr: int, data: int) -> int:
     """Append a 46-bit SWD write packet. Returns its bit offset."""
     start = len(direction)
     cmd = _swd_cmd_byte(ap, False, addr)
@@ -129,210 +130,118 @@ def _emit_swd_write(direction: list[int], out: list[int],
     return start
 
 
-def _extract_ack(in_bits, packet_offset: int) -> int:
-    return (in_bits[packet_offset + _ACK_OFFSET]
-            | (in_bits[packet_offset + _ACK_OFFSET + 1] << 1)
-            | (in_bits[packet_offset + _ACK_OFFSET + 2] << 2))
+# ---- The J-Link SWD interface -------------------------------------
 
 
-def _extract_read_data(in_bits, packet_offset: int) -> int:
-    val = 0
-    for i in range(32):
-        if in_bits[packet_offset + _READ_DATA_OFFSET + i]:
-            val |= 1 << i
-    return val
-
-
-# ---- The Dp variant ----------------------------------------------
-
-class JLinkSwDp(dpmod.Dp):
-    """ARM Debug Port over SWD via J-Link bit-bang."""
-
-    SELECT_REG = 0x08
-    RDBUFF_REG = 0x0c
-    ABORT_REG  = 0x00  # write-only
+class JLinkSwdInterface(swd.Interface):
+    """SWD wire interface over the J-Link's bit-bang SWD_IO command."""
 
     def __init__(self, transport, name: str = "swd"):
         super().__init__(name=name)
         self._transport = transport
-        self._select: int | None = None
 
     async def start(self):
+        """Switch the J-Link to SWD mode and bring the line up.
+
+        We deassert nRST eagerly (some adapters power up with reset
+        asserted, masking the target's SWDIO driver) and set a
+        sensible default speed. The chip-side wakeup (line reset +
+        JTAG-to-SWD switch + idle) is the SwDp's job — it posts
+        :class:`swd.JtagToSwd` from its own ``start()``."""
         await self._transport.select_interface(protocol.TIF_SWD)
         await self._transport.deassert_reset()
         await self._transport.set_speed_khz(1000)
-        await self._enter_swd()
-        await super().start()
-
-    async def _enter_swd(self):
-        """Drive the JTAG→SWD switch sequence robustly (mirrors
-        crobe's protocol/swd.py line_reset):
-
-        1. ≥250 SWCLK cycles with SWDIO high — line reset 1.
-        2. 16-bit switch word (0xE79E LSB-first).
-        3. 50 cycles SWDIO high.
-        4. ANOTHER 16-bit switch word (handles the case where the
-           DP was already in SWD; the second switch is a no-op then).
-        5. ≥200 cycles SWDIO high — line reset 2.
-        6. ≥1 idle cycle (SWDIO low).
-
-        After this the SW-DP is in the post-reset state and the
-        next transaction must be a DPIDR read (which Dp.start does).
-        """
-        direction = []
-        out = []
-
-        def emit(n, v):
-            for _ in range(n):
-                direction.append(1)
-                out.append(v)
-
-        def emit_switch():
-            switch = 0xE79E
-            for i in range(16):
-                direction.append(1)
-                out.append((switch >> i) & 1)
-
-        emit(250, 1)         # line reset 1
-        emit_switch()        # JTAG → SWD
-        emit(50, 1)
-        emit_switch()        # idempotent if already SWD
-        emit(200, 1)         # line reset 2
-        emit(8, 0)           # idle
-
-        await self._transport.swd_io(
-            _pack_bits(direction), _pack_bits(out), len(direction))
-
-        # Per ADIv5/v6: after the switch sequence the SW-DP's SELECT
-        # register is reset to 0. Pre-seed our cache so the first
-        # DpRead(DPIDR) doesn't trigger a redundant SELECT=0 write —
-        # which the freshly-reset DP rejects with invalid ACK
-        # (the FIRST post-switch transaction must be DPIDR read).
-        self._select = 0
-
-    async def _raw_dp_write(self, addr: int, data: int):
-        """Single-packet DP write that bypasses the full flush_ops
-        pipeline — used for the initial ABORT before Dp.start()."""
-        direction = []
-        out = []
-        offset = _emit_swd_write(direction, out, False, addr, data)
-        in_bytes = await self._transport.swd_io(
-            _pack_bits(direction), _pack_bits(out), len(direction))
-        in_bits = _unpack_bits(in_bytes, len(direction))
-        ack = _extract_ack(in_bits, offset)
-        if ack != _ACK_OK:
-            self.logger.warning(
-                "SWD initial ABORT got ACK=0b%03b (continuing)", ack)
-
-    def _select_for(self, op) -> int:
-        """SELECT value needed for this op (matches JtagDp's math)."""
-        cur = 0 if self._select is None else self._select
-        if isinstance(op, (dpmod.ApRead, dpmod.ApWrite)):
-            apsel = (op.ap >> 24) & 0xff
-            apbank = (op.addr >> 4) & 0xf
-            return (apsel << 24) | (apbank << 4) | (cur & 0xf)
-        # DP op — preserve AP fields, update DPBANKSEL.
-        return (cur & 0xFFFFFFF0) | ((op.addr >> 4) & 0xf)
 
     async def flush_ops(self, batch):
         direction: list[int] = []
         out: list[int] = []
-
-        # Per-op records:
-        # (kind, user_future, ack_offset, data_offset_or_None)
-        # kind ∈ { "dp_read", "dp_write", "ap_read", "ap_write" }
-        # data_offset is the bit offset of the data field that should
-        # resolve user_future. For DP reads it's in the same packet;
-        # for AP reads it's in the next packet (filled in later).
+        # Per-packet record: [user_future, kind, ack_offset,
+        #                     data_offset_or_None]
+        # Some entries have user_future=None (phantom RDBUFF).
         records: list[list] = []
-        # Pending AP read whose data lives in the next packet's data
-        # slot. We fill its data_offset when we emit that next packet.
+        # Pending AP read whose data lives in the *next* packet's
+        # data slot. When we emit a new read, we fill this entry's
+        # data_offset and clear pending.
         pending: list | None = None
-
-        select = self._select
 
         def flush_pending_with_rdbuff():
             nonlocal pending
             if pending is None:
                 return
-            offset = _emit_swd_read(direction, out, False, self.RDBUFF_REG)
+            offset = _emit_swd_read(direction, out, False, _RDBUFF_REG)
             pending[3] = offset + _READ_DATA_OFFSET
-            # The RDBUFF read itself doesn't have a user future
-            # waiting on its data — only on its ACK so we can detect
-            # errors. We piggyback on records via a phantom entry.
-            records.append(["rdbuff", None, offset + _ACK_OFFSET, None])
+            records.append([None, "rdbuff", offset + _ACK_OFFSET, None])
             pending = None
 
         for op, future in batch:
-            if isinstance(op, dpmod.Run):
+            if isinstance(op, swd.Run):
                 for _ in range(op.cycles):
                     direction.append(1)
                     out.append(0)
                 future.set_result(None)
                 continue
 
-            if isinstance(op, dpmod.Abort):
-                offset = _emit_swd_write(direction, out, False,
-                                         self.ABORT_REG, op.what)
-                records.append(["dp_write", future,
-                                offset + _ACK_OFFSET, None])
+            if isinstance(op, swd.Wakeup):
+                for _ in range(op.cycles):
+                    direction.append(1)
+                    out.append(1)
+                future.set_result(None)
                 continue
 
-            if not isinstance(op, (dpmod.DpRead, dpmod.DpWrite,
-                                   dpmod.ApRead, dpmod.ApWrite)):
-                future.set_exception(TypeError(
-                    f"JLinkSwDp can't lower {type(op).__name__}"))
+            if isinstance(op, swd.LineReset):
+                # 60 cycles SWDIO=1 + 8 idle cycles — comfortably
+                # over the spec minimum (50 + 2).
+                for _ in range(60):
+                    direction.append(1)
+                    out.append(1)
+                for _ in range(8):
+                    direction.append(1)
+                    out.append(0)
+                future.set_result(None)
                 continue
 
-            new_select = self._select_for(op)
-            if select != new_select:
-                # SELECT change breaks the AP read pipeline.
-                flush_pending_with_rdbuff()
-                offset = _emit_swd_write(direction, out, False,
-                                         self.SELECT_REG, new_select)
-                records.append(["dp_write", None,
-                                offset + _ACK_OFFSET, None])
-                select = new_select
+            if isinstance(op, swd.JtagToSwd):
+                self._emit_jtag_to_swd(direction, out)
+                future.set_result(None)
+                continue
 
-            wire_addr = op.addr & 0xc
+            if isinstance(op, swd.Read):
+                offset = _emit_swd_read(direction, out, op.ap, op.addr)
+                if op.ap:
+                    # AP read: ACK in this packet, data in NEXT packet.
+                    if pending is not None:
+                        # Previous AP read's data is in THIS packet's
+                        # data field.
+                        pending[3] = offset + _READ_DATA_OFFSET
+                        pending = None
+                    rec = [future, "ap_read", offset + _ACK_OFFSET, None]
+                    records.append(rec)
+                    pending = rec
+                else:
+                    # DP read: ACK + data both in this packet.
+                    if pending is not None:
+                        pending[3] = offset + _READ_DATA_OFFSET
+                        pending = None
+                    rec = [future, "dp_read",
+                           offset + _ACK_OFFSET,
+                           offset + _READ_DATA_OFFSET]
+                    records.append(rec)
+                continue
 
-            if isinstance(op, dpmod.DpRead):
-                offset = _emit_swd_read(direction, out, False, wire_addr)
-                records.append(["dp_read", future,
-                                offset + _ACK_OFFSET,
-                                offset + _READ_DATA_OFFSET])
+            if isinstance(op, swd.Write):
+                offset = _emit_swd_write(direction, out,
+                                         op.ap, op.addr, op.data)
+                kind = "ap_write" if op.ap else "dp_write"
+                # Writes don't update RDBUFF — pending stays.
+                records.append([future, kind, offset + _ACK_OFFSET, None])
+                continue
 
-            elif isinstance(op, dpmod.DpWrite):
-                offset = _emit_swd_write(direction, out, False,
-                                         wire_addr, op.data)
-                records.append(["dp_write", future,
-                                offset + _ACK_OFFSET, None])
+            future.set_exception(TypeError(
+                f"JLinkSwdInterface can't lower {type(op).__name__}"))
 
-            elif isinstance(op, dpmod.ApRead):
-                offset = _emit_swd_read(direction, out, True, wire_addr)
-                # Previous pending AP read's data is in THIS packet's
-                # data field.
-                if pending is not None:
-                    pending[3] = offset + _READ_DATA_OFFSET
-                    pending = None
-                # This op's ACK is in THIS packet; its data is in
-                # the NEXT packet (filled later).
-                this_record = ["ap_read", future,
-                               offset + _ACK_OFFSET, None]
-                records.append(this_record)
-                pending = this_record
-
-            else:  # ApWrite
-                offset = _emit_swd_write(direction, out, True,
-                                         wire_addr, op.data)
-                records.append(["ap_write", future,
-                                offset + _ACK_OFFSET, None])
-                # AP writes don't update RDBUFF — pending stays.
-
-        # End-of-batch: drain trailing pending AP read.
+        # Drain any trailing pending AP read with an explicit RDBUFF
+        # read so the caller's future resolves before this batch ends.
         flush_pending_with_rdbuff()
-
-        self._select = select
 
         if not direction:
             return
@@ -342,20 +251,21 @@ class JLinkSwDp(dpmod.Dp):
                 _pack_bits(direction), _pack_bits(out), len(direction))
         except Exception as exc:
             for rec in records:
-                if rec[1] is not None and not rec[1].done():
-                    rec[1].set_exception(exc)
+                if rec[0] is not None and not rec[0].done():
+                    rec[0].set_exception(exc)
             raise
 
         in_bits = _unpack_bits(in_bytes, len(direction))
 
-        for kind, fut, ack_offset, data_offset in records:
+        for fut, kind, ack_offset, data_offset in records:
             ack = (in_bits[ack_offset]
                    | (in_bits[ack_offset + 1] << 1)
                    | (in_bits[ack_offset + 2] << 2))
             if fut is None:
                 if ack != _ACK_OK:
                     self.logger.warning(
-                        "SWD %s packet ACK=0b%03b", kind, ack)
+                        "SWD %s packet ACK=0b%s",
+                        kind, format(ack, "03b"))
                 continue
             if fut.done():
                 continue
@@ -369,10 +279,39 @@ class JLinkSwDp(dpmod.Dp):
                             val |= 1 << i
                     fut.set_result(val)
             elif ack == _ACK_WAIT:
-                fut.set_exception(dpmod.DpAccessFailure(
-                    f"SWD WAIT (retry not implemented)"))
+                fut.set_exception(swd.SwdWait(
+                    f"WAIT on {kind} (retry not implemented)"))
             elif ack == _ACK_FAULT:
-                fut.set_exception(dpmod.DpAccessFailure("SWD FAULT"))
+                fut.set_exception(swd.SwdAccessFailure(f"FAULT on {kind}"))
             else:
-                fut.set_exception(dpmod.DpAccessFailure(
-                    f"SWD invalid ACK 0b{ack:03b}"))
+                fut.set_exception(swd.SwdAccessFailure(
+                    f"invalid ACK 0b{ack:03b} on {kind}"))
+
+    @staticmethod
+    def _emit_jtag_to_swd(direction, out):
+        """Append the JTAG→SWD switch sequence (matches crobe).
+
+            1. ≥250 cycles SWDIO=1 (line reset)
+            2. 16-bit switch (0xE79E LSB-first / 0x79E7 MSB-first)
+            3. ≥50 cycles SWDIO=1
+            4. Another 16-bit switch (no-op if already in SWD)
+            5. ≥200 cycles SWDIO=1 (line reset)
+            6. ≥2 idle cycles SWDIO=0
+        """
+        def emit(n, v):
+            for _ in range(n):
+                direction.append(1)
+                out.append(v)
+
+        def emit_switch():
+            sw = 0xE79E
+            for i in range(16):
+                direction.append(1)
+                out.append((sw >> i) & 1)
+
+        emit(250, 1)
+        emit_switch()
+        emit(50, 1)
+        emit_switch()
+        emit(200, 1)
+        emit(16, 0)
