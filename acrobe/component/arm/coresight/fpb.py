@@ -15,5 +15,5 @@ class Fpb(MemoryMappedComponent):
 for _part in (0x003,   # Cortex-M3 / M4 FPB
               0x00B):  # Cortex-M0+ BPU
     MemoryMappedComponent.db.register(
-        PartId(jep106_continuation=4, jep106_id=0x3B, part_no=_part)
+        PartId(jep106_bank=4, jep106_id=0x3B, part_no=_part)
     )(Fpb)

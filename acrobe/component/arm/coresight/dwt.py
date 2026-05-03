@@ -12,7 +12,7 @@ class Dwt(MemoryMappedComponent):
 
 
 MemoryMappedComponent.db.register(
-    PartId(jep106_continuation=4, jep106_id=0x3B, part_no=0x002)
+    PartId(jep106_bank=4, jep106_id=0x3B, part_no=0x002)
 )(Dwt)
 
 

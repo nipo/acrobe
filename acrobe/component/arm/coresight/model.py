@@ -41,25 +41,7 @@ from dataclasses import dataclass
 
 from ....db import Db, NoMatch
 from ....node import Node
-
-
-# --- Decoded ID values ---------------------------------------------
-
-@dataclass(frozen=True)
-class PartId:
-    """Compact JEP106 + part number identifier extracted from PIDR.
-
-    Excludes revision (PIDR2[7:4]), customer-mod (PIDR3[3:0]) and
-    RevAnd (PIDR3[7:4]) so registrations match across silicon revs.
-    """
-
-    jep106_continuation: int  # 4 bits — JEP106 bank (ARM = 4)
-    jep106_id: int            # 7 bits — JEP106 ID code (ARM = 0x3B)
-    part_no: int              # 12 bits — implementer-assigned part number
-
-    def __str__(self):
-        return (f"jep{self.jep106_continuation:x}/{self.jep106_id:#04x}"
-                f"-part{self.part_no:#05x}")
+from ....part_id import PartId  # noqa: F401 — re-exported for convenience
 
 
 def _devarch_eq(key: "DevArch", lookup: "DevArch") -> bool:
@@ -89,13 +71,16 @@ class ComponentIds:
     """All identification data extracted by reading PIDR/CIDR/DEVARCH/
     DEVTYPE/DEVID at a component's base address.
 
+    `partid.revision` carries PIDR2[7:4]; the `cmod` / `rev_and`
+    sibling fields hold the PIDR3 bytes that aren't part of the
+    canonical IDCODE-equivalent identity.
+
     `cidr_class` is None when the CIDR preamble doesn't match the
     expected (0x0D, 0x05, 0xB1) — i.e. there's no CoreSight component
     here (read garbage, power-gated, or the address doesn't host one)."""
 
     cidr_class: int | None
-    partid: PartId
-    revision: int     # PIDR2[7:4]
+    partid: PartId    # JEP106 + part_no + revision (PIDR2[7:4])
     cmod: int         # PIDR3[3:0]
     rev_and: int      # PIDR3[7:4]
     size_log2: int    # PIDR4[7:4] — component spans 2^size 4 KB blocks
@@ -144,11 +129,11 @@ class ComponentIds:
         cidr_class = (c1_lo >> 4) & 0xF
 
         partid = PartId(
-            jep106_continuation=p4 & 0xF,
+            jep106_bank=p4 & 0xF,
             jep106_id=((p2 & 0x7) << 4) | ((p1 >> 4) & 0xF),
             part_no=((p1 & 0xF) << 8) | (p0 & 0xFF),
+            revision=(p2 >> 4) & 0xF,
         )
-        revision = (p2 >> 4) & 0xF
         cmod = p3 & 0xF
         rev_and = (p3 >> 4) & 0xF
         size_log2 = (p4 >> 4) & 0xF
@@ -170,7 +155,6 @@ class ComponentIds:
         return cls(
             cidr_class=cidr_class,
             partid=partid,
-            revision=revision,
             cmod=cmod,
             rev_and=rev_and,
             size_log2=size_log2,
@@ -185,8 +169,8 @@ class ComponentIds:
         (preamble mismatch, all-zero reads, etc.)."""
         return cls(
             cidr_class=None,
-            partid=PartId(0, 0, 0),
-            revision=0, cmod=0, rev_and=0, size_log2=0,
+            partid=PartId(0, 0, 0, 0),
+            cmod=0, rev_and=0, size_log2=0,
             devarch=None, devtype=None, devid=None,
         )
 
@@ -232,7 +216,8 @@ class MemoryMappedComponent(Node):
     CLASS_GENERIC_IP   = 0xE
     CLASS_PRIMECELL    = 0xF
 
-    db: Db = Db("CoreSight PartId")
+    db: Db = Db("CoreSight PartId",
+                eq_func=lambda key, lookup: key.is_same_part(lookup))
     devarch_db: Db = Db("CoreSight DEVARCH", eq_func=_devarch_eq)
 
     # Subclasses set this to a human-readable component name (e.g.
@@ -262,7 +247,7 @@ class MemoryMappedComponent(Node):
 
     @property
     def revision(self) -> int:
-        return self.ids.revision
+        return self.ids.partid.revision
 
     @property
     def devarch(self) -> DevArch | None:

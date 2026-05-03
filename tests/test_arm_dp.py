@@ -128,7 +128,7 @@ class TestChipId:
         assert chip is not None
         assert isinstance(chip, ChipId)
         assert chip.source == "TARGETID"
-        assert chip.jep106_continuation == 4
+        assert chip.jep106_bank == 4
         assert chip.jep106_id == 0x3B
         assert chip.part_no == 0x1234
         assert chip.revision == 2
@@ -159,9 +159,9 @@ class TestChipId:
 
         ids = ComponentIds(
             cidr_class=MemoryMappedComponent.CLASS_ROM_TABLE,
-            partid=PartId(jep106_continuation=4,
-                          jep106_id=0x3B, part_no=0x4A9),
-            revision=2, cmod=0, rev_and=0, size_log2=0,
+            partid=PartId(jep106_bank=4, jep106_id=0x3B,
+                          part_no=0x4A9, revision=2),
+            cmod=0, rev_and=0, size_log2=0,
             devarch=None, devtype=None, devid=None,
         )
         rom = MemoryMappedComponent(bus=None, base=0x80000000, ids=ids)
@@ -172,7 +172,7 @@ class TestChipId:
         chip = d.chip_id()
         assert chip is not None
         assert chip.source.startswith("ROMTABLE@")
-        assert chip.jep106_continuation == 4
+        assert chip.jep106_bank == 4
         assert chip.jep106_id == 0x3B
         assert chip.part_no == 0x4A9
         assert chip.revision == 2
@@ -189,8 +189,8 @@ class TestChipId:
 
         ids = ComponentIds(
             cidr_class=MemoryMappedComponent.CLASS_ROM_TABLE,
-            partid=PartId(4, 0x3B, 0x4A9),
-            revision=0, cmod=0, rev_and=0, size_log2=0,
+            partid=PartId(4, 0x3B, 0x4A9, 0),
+            cmod=0, rev_and=0, size_log2=0,
             devarch=None, devtype=None, devid=None,
         )
         rom = MemoryMappedComponent(bus=None, base=0x80000000, ids=ids)

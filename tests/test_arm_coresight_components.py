@@ -49,7 +49,7 @@ class _MemBus:
 
 
 def _arm_partid(part_no: int) -> PartId:
-    return PartId(jep106_continuation=4, jep106_id=0x3B, part_no=part_no)
+    return PartId(jep106_bank=4, jep106_id=0x3B, part_no=part_no)
 
 
 def _install_component(bus, base, *, partid, cidr_class,
@@ -65,7 +65,7 @@ def _install_component(bus, base, *, partid, cidr_class,
     bus.install(base + MemoryMappedComponent.PIDR2,
                 (1 << 3) | ((partid.jep106_id >> 4) & 0x7))
     bus.install(base + MemoryMappedComponent.PIDR4,
-                partid.jep106_continuation & 0xF)
+                partid.jep106_bank & 0xF)
     bus.install(base + MemoryMappedComponent.CIDR0, 0x0D)
     bus.install(base + MemoryMappedComponent.CIDR1,
                 (cidr_class & 0xF) << 4)

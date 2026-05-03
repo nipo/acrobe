@@ -47,7 +47,7 @@ class FakeBus:
         self.install_word(base + MemoryMappedComponent.PIDR3, 0)
         self.install_word(base + MemoryMappedComponent.PIDR4,
                           ((size_log2 & 0xF) << 4)
-                          | (partid.jep106_continuation & 0xF))
+                          | (partid.jep106_bank & 0xF))
         self.install_word(base + MemoryMappedComponent.CIDR0, 0x0D)
         self.install_word(base + MemoryMappedComponent.CIDR1,
                           (cidr_class & 0xF) << 4)
@@ -94,7 +94,7 @@ ARM = (4, 0x3B)
 
 
 def _arm_partid(part_no: int) -> PartId:
-    return PartId(jep106_continuation=ARM[0],
+    return PartId(jep106_bank=ARM[0],
                   jep106_id=ARM[1], part_no=part_no)
 
 

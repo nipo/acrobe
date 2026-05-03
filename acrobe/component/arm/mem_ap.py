@@ -231,12 +231,9 @@ class MemAp(Ap, Batcher):
         # always visible at info level.
         if (isinstance(child, MemoryMappedComponent)
                 and child.cidr_class is not None):
-            pid = child.partid
             self.logger.info(
-                "BASE component: %s — jep%d/0x%02x part=0x%03x rev=%d",
-                type(child).__name__,
-                pid.jep106_continuation, pid.jep106_id,
-                pid.part_no, child.revision)
+                "BASE component: %s — %s",
+                type(child).__name__, child.partid.pretty())
 
         self.child_add(child)
 

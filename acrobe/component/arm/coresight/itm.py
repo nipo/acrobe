@@ -16,5 +16,5 @@ class Itm(CoresightComponent):
 # Cortex-M3 / M4 ITM as a class-0xE / class-0xF component identified
 # by its ARM PartId (no DEVTYPE).
 MemoryMappedComponent.db.register(
-    PartId(jep106_continuation=4, jep106_id=0x3B, part_no=0x001)
+    PartId(jep106_bank=4, jep106_id=0x3B, part_no=0x001)
 )(Itm)

@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 from ...engine import Batcher
 from ...node import Node
+from ...part_id import PartId
 
 
 # --- Op dataclasses (frozen, inputs only) --------------------------
@@ -76,22 +77,38 @@ class Run:
 class ChipId:
     """Best-available identifier for the chip behind a DP.
 
-    The fields mirror the JEP106 + part + revision shape used by both
-    TARGETID (DPv2+) and ROM Table PIDR (any ADI). ``source`` records
-    where the value came from so callers can adjust their expectations
-    (TARGETID is designed for this; ROM Table PIDR can be a debug
-    fabric IP block that's shared across chips, so it's a coarser
-    identifier)."""
-    jep106_continuation: int  # 4-bit JEP106 bank
-    jep106_id: int            # 7-bit JEP106 ID code
-    part_no: int              # part number (12 bits via PIDR, 16 via TARGETID)
-    revision: int             # revision (4 bits)
-    source: str               # "TARGETID" | "ROMTABLE@<addr>" | ...
+    Composes a :class:`PartId` (the JEP106 + part + revision payload
+    that's also used for component PIDR / TAP IDCODE) with a
+    ``source`` tag recording where the value came from. TARGETID is
+    designed for this and considered authoritative; ROM Table PIDR
+    can be a debug-fabric IP block that's shared across multiple
+    chips, so it's a coarser identifier."""
+    partid: PartId
+    source: str  # "TARGETID" | "ROMTABLE@<addr>" | ...
+
+    # Pass-through accessors for ergonomic field access.
+    @property
+    def jep106_bank(self) -> int:
+        return self.partid.jep106_bank
+
+    @property
+    def jep106_id(self) -> int:
+        return self.partid.jep106_id
+
+    @property
+    def part_no(self) -> int:
+        return self.partid.part_no
+
+    @property
+    def revision(self) -> int:
+        return self.partid.revision
+
+    @property
+    def manufacturer_name(self) -> str:
+        return self.partid.manufacturer_name
 
     def __str__(self):
-        return (f"jep{self.jep106_continuation}/0x{self.jep106_id:02x}"
-                f" part=0x{self.part_no:04x} rev={self.revision}"
-                f" ({self.source})")
+        return f"{self.partid.pretty()} via {self.source}"
 
 
 # --- Errors --------------------------------------------------------
@@ -167,15 +184,16 @@ class Dp(Batcher, Node):
         # ADIv6 adds TARGETID1 for vendor-defined extensions.
         if self.dp_version >= 2:
             self.targetid = await self.post(DpRead(self.TARGETID))
-            tdesigner = (self.targetid >> 1) & 0x7ff   # JEP106
-            tpartno = (self.targetid >> 12) & 0xffff
-            trevision = (self.targetid >> 28) & 0xf
-            self.logger.info(
-                "TARGETID 0x%08x — designer=jep%d/0x%02x part=0x%04x rev=%d",
-                self.targetid,
-                (tdesigner >> 7) & 0xf,    # continuation code
-                tdesigner & 0x7f,           # 7-bit ID code
-                tpartno, trevision)
+            if self.targetid & 0x1:
+                self.logger.info(
+                    "TARGETID 0x%08x — %s",
+                    self.targetid,
+                    PartId.from_idcode(self.targetid).pretty())
+            else:
+                self.logger.info(
+                    "TARGETID 0x%08x — bit[0] not set, "
+                    "manufacturer didn't populate the register",
+                    self.targetid)
             if self.adi_version == 6:
                 self.targetid1 = await self.post(DpRead(self.TARGETID1))
                 self.logger.info("TARGETID1 0x%08x", self.targetid1)
@@ -287,13 +305,11 @@ class Dp(Batcher, Node):
         only on chips that fail discovery entirely or have an empty
         BASE on every AP."""
         # 1. TARGETID — only meaningful when bit[0] (RES1) is actually 1.
+        # The TARGETID layout matches a JTAG IDCODE; PartId.from_idcode
+        # parses it directly.
         if self.targetid is not None and (self.targetid & 0x1):
-            tdesigner = (self.targetid >> 1) & 0x7ff
             return ChipId(
-                jep106_continuation=(tdesigner >> 7) & 0xf,
-                jep106_id=tdesigner & 0x7f,
-                part_no=(self.targetid >> 12) & 0xffff,
-                revision=(self.targetid >> 28) & 0xf,
+                partid=PartId.from_idcode(self.targetid),
                 source="TARGETID",
             )
 
@@ -311,12 +327,8 @@ class Dp(Batcher, Node):
                     continue
                 if grandchild.cidr_class is None:
                     continue
-                pid = grandchild.partid
                 return ChipId(
-                    jep106_continuation=pid.jep106_continuation,
-                    jep106_id=pid.jep106_id,
-                    part_no=pid.part_no,
-                    revision=grandchild.revision,
+                    partid=grandchild.partid,
                     source=f"ROMTABLE@0x{grandchild.base:x}",
                 )
 

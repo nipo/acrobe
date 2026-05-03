@@ -48,7 +48,7 @@ class FakeBus:
                           ((rev_and & 0xF) << 4) | (cmod & 0xF))
         self.install_word(base + MemoryMappedComponent.PIDR4,
                           ((size_log2 & 0xF) << 4)
-                          | (partid.jep106_continuation & 0xF))
+                          | (partid.jep106_bank & 0xF))
         # PIDR5..7 zero by default — already RAZ via missing entry.
 
         # CIDR preamble 0xB1_05_<class>0_0D
@@ -82,7 +82,7 @@ ARM_JEP106 = (4, 0x3B)  # Continuation 4, ID 0x3B → ARCHITECT 0x23B
 
 
 def _arm_partid(part_no: int) -> PartId:
-    return PartId(jep106_continuation=ARM_JEP106[0],
+    return PartId(jep106_bank=ARM_JEP106[0],
                   jep106_id=ARM_JEP106[1],
                   part_no=part_no)
 
@@ -98,8 +98,9 @@ class TestDataclasses:
 
     def test_partid_str(self):
         pid = _arm_partid(0x4a3)
-        assert "part" in str(pid)
-        assert "0x4a3" in str(pid)
+        s = str(pid)
+        # The pretty() form embeds the part_no zero-padded as 0xnnnn.
+        assert "0x04a3" in s
 
     def test_partid_equality(self):
         assert _arm_partid(0x4a3) == _arm_partid(0x4a3)
@@ -148,8 +149,10 @@ class TestMetadataRead:
         md = await ComponentIds.read(bus, 0xE000_0000)
 
         assert md.cidr_class == MemoryMappedComponent.CLASS_CORESIGHT
-        assert md.partid == _arm_partid(0x000)
-        assert md.revision == 2
+        # md.partid carries the read revision; compare via is_same_part
+        # to ignore revision (or check the revision separately).
+        assert md.partid.is_same_part(_arm_partid(0x000))
+        assert md.partid.revision == 2
         assert md.size_log2 == 1
         assert md.devarch is not None
         assert md.devarch.architect == 0x23B
