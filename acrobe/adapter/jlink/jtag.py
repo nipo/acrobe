@@ -54,12 +54,14 @@ class JtagJlink(jtag.JtagInterface):
         self._state = self.STATE_UNKNOWN
 
     async def setup(self, freq_khz: int = 1000):
-        """Switch the J-Link to JTAG mode and set the clock speed.
+        """Switch the J-Link to JTAG mode, release the target's
+        reset lines, set the clock speed.
 
-        Caller can call this before opening any chain. Does NOT
-        reset the TAP — the first ``flush_ops`` will issue a TLR
-        sequence the first time we need to leave UNKNOWN state."""
+        Without the reset deassertion, the target stays held in
+        reset and TDO floats — chain discovery sees "TDO stuck
+        high"."""
         await self._transport.select_interface(protocol.TIF_JTAG)
+        await self._transport.deassert_reset()
         await self._transport.set_speed_khz(freq_khz)
         self._state = self.STATE_UNKNOWN
 

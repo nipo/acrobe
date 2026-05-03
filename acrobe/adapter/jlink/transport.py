@@ -24,13 +24,19 @@ class JLinkTransport:
 
     def __init__(self, device, interface_index: int,
                  ep_out: BulkOutEndpoint, ep_in: BulkInEndpoint,
+                 mps: int,
                  logger: logging.Logger):
         self._device = device
         self._interface = interface_index
         self._ep_out = ep_out
         self._ep_in = ep_in
+        self._mps = mps
         self._lock = asyncio.Lock()
         self._logger = logger
+        # JTAG_IO_V3 (with status byte) is only available on hardware
+        # major version ≥ 5; older OB hardware uses V2. Set by the
+        # adapter after reading hardware_version.
+        self._jtag_io_v3 = False
 
     @classmethod
     async def from_device(cls, device, *,
@@ -66,7 +72,7 @@ class JLinkTransport:
         except TransferTimeout:
             pass
 
-        return cls(device, interface_index, ep_out, ep_in, logger)
+        return cls(device, interface_index, ep_out, ep_in, mps, logger)
 
     @staticmethod
     def _find_interface(device):
@@ -106,9 +112,22 @@ class JLinkTransport:
         await self._ep_out.write(data)
 
     async def _read(self, length: int) -> bytes:
+        """Read at least ``length`` bytes from the bulk-IN endpoint.
+
+        Issues MPS-sized reads in a loop and accumulates the result.
+        A short packet (< MPS bytes) is the device's way of saying
+        "frame is over" — stop reading even if we have fewer than
+        ``length`` total bytes; the caller decides whether that's
+        an error. Truncates to ``length`` on return."""
         if length == 0:
             return b""
-        return await self._ep_in.read(length)
+        out = bytearray()
+        while len(out) < length:
+            chunk = await self._ep_in.read(self._mps)
+            out.extend(chunk)
+            if len(chunk) < self._mps:
+                break
+        return bytes(out[:length])
 
     # -- High-level commands ---------------------------------------
 
@@ -168,6 +187,18 @@ class JLinkTransport:
                 (speed_khz >> 8) & 0xFF,
             ]))
 
+    async def get_hw_status(self) -> dict:
+        """Read the 8-byte hardware status block: target voltage in
+        mV plus pin states (TCK, TDI, TDO, TMS, TRES, TRST)."""
+        async with self._lock:
+            await self._write(bytes([protocol.CMD_GET_HW_STATUS]))
+            data = await self._read(8)
+        return {
+            "target_voltage_mv": data[0] | (data[1] << 8),
+            "tck": data[2], "tdi": data[3], "tdo": data[4],
+            "tms": data[5], "tres": data[6], "trst": data[7],
+        }
+
     async def assert_reset(self) -> None:
         """Drive nRST low."""
         async with self._lock:
@@ -193,25 +224,31 @@ class JLinkTransport:
             raise ValueError(
                 f"jtag_io: tms/tdi length mismatch "
                 f"(bit_count={bit_count}, expected {num_bytes} bytes)")
-        cmd = bytes([protocol.CMD_JTAG_IO_V3, 0,
+        opcode = (protocol.CMD_JTAG_IO_V3 if self._jtag_io_v3
+                  else protocol.CMD_JTAG_IO_V2)
+        # V3 appends a status byte to the response; V2 does not.
+        resp_size = num_bytes + 1 if self._jtag_io_v3 else num_bytes
+        cmd = bytes([opcode, 0,
                      bit_count & 0xFF, (bit_count >> 8) & 0xFF])
         async with self._lock:
+            self._logger.protocol(
+                "JTAG_IO bits=%d tms=%s tdi=%s",
+                bit_count, tms[:8].hex(), tdi[:8].hex())
             await self._write(cmd + tms + tdi)
-            # The device returns TDO + status in a single bulk-IN
-            # transfer; reading the two in sequence trips
-            # USBErrorOverflow on macOS (the second read sees the
-            # leftover bytes from the first packet as overflow).
-            resp = await self._read(num_bytes + 1)
-        if len(resp) < num_bytes + 1:
+            resp = await self._read(resp_size)
+            self._logger.protocol(
+                "JTAG_IO tdo=%s (%d bytes)",
+                resp[:8].hex(), len(resp))
+        if len(resp) < resp_size:
             raise protocol.JLinkError(
                 f"JTAG_IO short response: got {len(resp)} bytes, "
-                f"expected {num_bytes + 1}")
-        tdo = resp[:num_bytes]
-        status = resp[num_bytes]
-        if status != 0:
-            raise protocol.JLinkError(
-                f"JTAG_IO failed with status 0x{status:02x}")
-        return tdo
+                f"expected {resp_size}")
+        if self._jtag_io_v3:
+            status = resp[num_bytes]
+            if status != 0:
+                raise protocol.JLinkError(
+                    f"JTAG_IO failed with status 0x{status:02x}")
+        return resp[:num_bytes]
 
     async def close(self) -> None:
         try:

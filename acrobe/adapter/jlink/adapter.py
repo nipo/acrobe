@@ -87,6 +87,30 @@ class JLinkAdapter(Adapter):
         else:
             hardware_version = (0, 0, 0, 0)
 
+        # JTAG_IO_V3 (with per-transaction status byte) is only
+        # available on hardware major version ≥ 5; older OB
+        # hardware uses V2 with a fixed-length TDO-only response.
+        transport._jtag_io_v3 = hardware_version[1] >= 5
+
+        # Release target reset early — some adapters power up with
+        # nRST asserted, which masks the target's TDO/SWDIO drivers.
+        await transport.deassert_reset()
+
+        # Surface target power + pin state. Particularly useful for
+        # diagnosing "TDO stuck high" — Vtref=0 means the target is
+        # unpowered, TRES=0 (asserted) means we're holding it in
+        # reset.
+        try:
+            hw = await transport.get_hw_status()
+            logger.info(
+                "Target Vtref=%.2fV pins TCK=%d TDI=%d TDO=%d TMS=%d "
+                "TRES=%d TRST=%d",
+                hw["target_voltage_mv"] / 1000,
+                hw["tck"], hw["tdi"], hw["tdo"],
+                hw["tms"], hw["tres"], hw["trst"])
+        except Exception as exc:
+            logger.warning("get_hw_status failed: %s", exc)
+
         # Log the high-level capabilities the user is most likely to
         # care about.
         cap_names = []
