@@ -250,6 +250,44 @@ class JLinkTransport:
                     f"JTAG_IO failed with status 0x{status:02x}")
         return resp[:num_bytes]
 
+    async def swd_io(self, direction: bytes, out: bytes,
+                     bit_count: int) -> bytes:
+        """Issue a CMD_SWD_IO transaction.
+
+        ``direction`` and ``out`` are LSB-first bit-streams of
+        ``ceil(bit_count / 8)`` bytes each. ``direction`` selects who
+        drives SWDIO each cycle (1 = host, 0 = target). ``out`` is
+        the bits the host drives when direction=1 (ignored in
+        target-driven cycles).
+
+        Returns ``num_bytes`` of sampled SWDIO (only meaningful for
+        target-driven cycles)."""
+        num_bytes = (bit_count + 7) // 8
+        if len(direction) != num_bytes or len(out) != num_bytes:
+            raise ValueError(
+                f"swd_io: direction/out length mismatch "
+                f"(bit_count={bit_count}, expected {num_bytes} bytes)")
+        cmd = bytes([0xCF, 0,
+                     bit_count & 0xFF, (bit_count >> 8) & 0xFF])
+        async with self._lock:
+            self._logger.protocol(
+                "SWD_IO bits=%d dir=%s out=%s",
+                bit_count, direction[:8].hex(), out[:8].hex())
+            await self._write(cmd + direction + out)
+            # SWD_IO response: num_bytes of sampled SWDIO + 1 status.
+            resp = await self._read(num_bytes + 1)
+            self._logger.protocol(
+                "SWD_IO in=%s status=0x%02x",
+                resp[:8].hex(), resp[num_bytes] if len(resp) > num_bytes else 0xff)
+        if len(resp) < num_bytes + 1:
+            raise protocol.JLinkError(
+                f"SWD_IO short response: got {len(resp)} bytes, "
+                f"expected {num_bytes + 1}")
+        if resp[num_bytes] != 0:
+            raise protocol.JLinkError(
+                f"SWD_IO failed with status 0x{resp[num_bytes]:02x}")
+        return resp[:num_bytes]
+
     async def close(self) -> None:
         try:
             self._device.handle.releaseInterface(self._interface)
