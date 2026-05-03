@@ -95,6 +95,7 @@ class Dp(Batcher, Node):
     DLPIDR    = 0x34  # bank 3
     EVENTSTAT = 0x44  # bank 4
     SELECT1   = 0x54  # bank 5 (ADIv6, W)
+    TARGETID1 = 0x64  # bank 6 (ADIv6)
     SELECT    = 0x08  # bank-agnostic, W
     RDBUFF    = 0x0c  # bank-agnostic, R
     TARGETSEL = 0x0c  # bank-agnostic, W (multidrop)
@@ -123,6 +124,8 @@ class Dp(Batcher, Node):
         self.dpidr1: int | None = None
         self.dp_version: int | None = None  # DPVER (0=DPv0, 1=DPv1, 2=DPv2, 3=DPv3=ADIv6)
         self.adi_version: int | None = None  # 5 or 6
+        self.targetid: int | None = None     # DPv2+: chip designer/part/revision
+        self.targetid1: int | None = None    # ADIv6: vendor-defined extension
 
     async def start(self):
         """Read DPIDR, clear sticky flags, power up debug+system domains."""
@@ -136,6 +139,28 @@ class Dp(Batcher, Node):
         if self.adi_version == 6:
             self.dpidr1 = await self.post(DpRead(self.DPIDR1))
             self.logger.info("DPIDR1 0x%08x", self.dpidr1)
+
+        # TARGETID identifies the chip (designer/part/revision), as
+        # opposed to the DP IP itself (DPIDR). Available on DPv2+.
+        # ADIv6 adds TARGETID1 for vendor-defined extensions.
+        if self.dp_version >= 2:
+            self.targetid = await self.post(DpRead(self.TARGETID))
+            tdesigner = (self.targetid >> 1) & 0x7ff   # JEP106
+            tpartno = (self.targetid >> 12) & 0xffff
+            trevision = (self.targetid >> 28) & 0xf
+            self.logger.info(
+                "TARGETID 0x%08x — designer=jep%d/0x%02x part=0x%04x rev=%d",
+                self.targetid,
+                (tdesigner >> 7) & 0xf,    # continuation code
+                tdesigner & 0x7f,           # 7-bit ID code
+                tpartno, trevision)
+            if self.adi_version == 6:
+                self.targetid1 = await self.post(DpRead(self.TARGETID1))
+                self.logger.info("TARGETID1 0x%08x", self.targetid1)
+        else:
+            self.logger.info(
+                "TARGETID: not available (DPv%d, requires DPv2+)",
+                self.dp_version)
 
         await self.post(Abort(self.STICKYORUN | self.STICKYCMP
                               | self.STICKYERR | self.WDATAERR | 0x1))
