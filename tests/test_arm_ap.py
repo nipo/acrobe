@@ -199,3 +199,25 @@ class TestApDiscover:
         dp.read_failure_at = (0x05000000, Ap.IDR)
         ap = await Ap.discover(dp, base=0x05000000)
         assert ap is None
+
+    @pytest.mark.asyncio
+    async def test_handler_construction_failure_falls_back_to_base(self):
+        # A registered handler whose __init__ blows up shouldn't lose
+        # the AP — discover logs and returns the generic base Ap.
+        idr_registered = 0x04770009  # TYPE not used by MemAp (avoid collision)
+
+        class BrokenAp(Ap):
+            def __init__(self, dp, base, idr, name=None):
+                raise RuntimeError("broken handler")
+
+        Ap.db.register(idr_registered)(BrokenAp)
+        try:
+            dp = FakeDp()
+            dp.install_ap_reg(base=0, addr=Ap.IDR, value=idr_registered)
+            ap = await Ap.discover(dp, base=0)
+            # Falls back to the base Ap class — the AP is still
+            # surfaced in enumeration with its IDR.
+            assert type(ap) is Ap
+            assert ap.idr == idr_registered
+        finally:
+            Ap.db._registry.pop(idr_registered, None)

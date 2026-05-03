@@ -110,19 +110,33 @@ class Ap(Node):
         present (IDR = 0).
 
         Caller is responsible for adding the returned Ap to the DP's
-        Node tree (usually via ``dp.child_add(ap)``)."""
+        Node tree (usually via ``dp.child_add(ap)``).
+
+        Failure modes:
+          * IDR read raises ``DpAccessFailure`` → logged at protocol
+            level, returns ``None`` (treat as "no AP here" — keep
+            walking sibling APSELs).
+          * Registered handler ``__init__`` raises → logged at warning
+            level, falls back to a generic ``Ap`` so the AP still
+            surfaces in enumeration with its IDR."""
         idr_future = dp.post(dpmod.ApRead(ap=base, addr=cls.IDR))
         try:
             idr = await idr_future
         except dpmod.DpAccessFailure as exc:
             dp.logger.protocol(
-                "AP discovery at 0x%08x failed: %s", base, exc)
+                "AP IDR read at 0x%08x failed: %s", base, exc)
             return None
         if idr == 0:
             return None
         try:
             return cls.db.call(idr, dp=dp, base=base, idr=idr)
         except NoMatch:
+            return cls(dp=dp, base=base, idr=idr)
+        except Exception as exc:
+            dp.logger.warning(
+                "AP at 0x%08x (idr=0x%08x): registered handler raised "
+                "%s during construction (falling back to generic Ap): %s",
+                base, idr, type(exc).__name__, exc, exc_info=True)
             return cls(dp=dp, base=base, idr=idr)
 
     def __repr__(self):

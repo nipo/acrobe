@@ -579,6 +579,52 @@ class TestEndToEnd:
         assert ap_children[0].name == "ap255"
 
     @pytest.mark.asyncio
+    async def test_failing_ap_start_does_not_drop_siblings(self):
+        # One AP's start blows up; the sibling AP must still end up
+        # as a child of the DP. The failing AP stays attached too,
+        # just with an incomplete subtree.
+        from acrobe.component.arm.ap import Ap
+
+        # Custom AP subclass whose start raises. Pick an IDR.TYPE
+        # that's not in MemAp's registrations (TYPE=0x9 is unused).
+        broken_idr = 0x04770009
+
+        class BrokenStartAp(Ap):
+            def __init__(self, dp, base, idr, name=None):
+                if name is None:
+                    name = f"broken@{base >> 24}"
+                super().__init__(dp, base, idr, name)
+
+            async def start(self):
+                raise RuntimeError("simulated AP start failure")
+
+        Ap.db.register(broken_idr)(BrokenStartAp)
+        try:
+            sim = _DpSim(idcode=0x4BA00477, dpidr=0x4BA02477)
+            sim.install_ap(base=0x00000000,
+                           registers={Ap.IDR: broken_idr})
+            sim.install_ap(base=0x01000000, registers={
+                Ap.IDR: 0x04770002,
+                # MemAp.start reads CFG and BASE_LO — supply zeros.
+                0xF4: 0x0,
+                0xF8: 0x0,
+            })
+            chain = Chain()
+            sim.child_add(chain)
+            await chain.discover()
+            tap = chain.children[0]
+            await tap.start_tree()
+
+            dp = [c for c in tap.children if isinstance(c, JtagDp)][0]
+            ap_children = [c for c in dp.children if isinstance(c, Ap)]
+            # Both APs are present despite the broken one's failed start.
+            assert len(ap_children) == 2
+            bases = sorted(ap.base for ap in ap_children)
+            assert bases == [0x00000000, 0x01000000]
+        finally:
+            Ap.db._registry.pop(broken_idr, None)
+
+    @pytest.mark.asyncio
     async def test_ap_reg_read_addresses_correctly(self):
         # After enumeration, an AP can read its own registers.
         # AP at apsel 1 with IDR=0x04770002 and a fake register at

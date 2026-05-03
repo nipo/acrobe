@@ -162,7 +162,11 @@ class Dp(Batcher, Node):
         """Discover APs and add them as children. DPv0-v2 walks
         APSEL at fixed indices; DPv3 (ADIv6) walks the ROM Table at
         BASEPTR0/1 — implemented in slice 5 alongside the general
-        CoreSight ROM walker."""
+        CoreSight ROM walker.
+
+        Per-APSEL discovery failures are logged and the walk
+        continues. Per-AP ``start()`` failures are isolated by the
+        :meth:`start_tree` override below."""
         # Imported lazily to avoid a circular dependency at module-load.
         from .ap import Ap
 
@@ -178,12 +182,34 @@ class Dp(Batcher, Node):
             for apsel in self.AP_PROBE_INDICES
         ]
         for apsel, coro in futures:
-            ap = await coro
+            try:
+                ap = await coro
+            except Exception as exc:
+                self.logger.warning(
+                    "AP discovery at APSEL %d crashed: %s",
+                    apsel, exc, exc_info=True)
+                continue
             if ap is not None:
                 self.child_add(ap)
                 self.logger.info(
                     "AP%d discovered: idr=0x%08x class=0x%x type=0x%x",
                     apsel, ap.idr, ap.klass, ap.type)
+
+    async def start_tree(self):
+        """Best-effort tree start: a single AP's failed ``start()``
+        (e.g. a chip whose CFG/BASE is unresponsive on one AP) is
+        logged but doesn't drop sibling APs from the tree. The failed
+        AP remains attached, just with an incomplete subtree."""
+        if not self._started:
+            await self.start()
+            self._started = True
+        for child in self._children:
+            try:
+                await child.start_tree()
+            except Exception as exc:
+                self.logger.warning(
+                    "Child %r start failed: %s. Subtree incomplete.",
+                    child.name, exc, exc_info=True)
 
     async def flush_ops(self, batch):
         raise NotImplementedError(
