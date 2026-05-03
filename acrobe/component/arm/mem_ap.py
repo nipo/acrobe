@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 from ...engine import Batcher
 from . import dp as dpmod
-from .ap import Ap
+from .ap import Ap, ApIdr
 
 
 # --- Op dataclasses (frozen, inputs only) --------------------------
@@ -485,4 +485,4 @@ class MemAp(Ap, Batcher):
 
 for _idr in (0x04770001, 0x04770002, 0x04770004,
              0x04770005, 0x04770006, 0x04770007, 0x04770008):
-    Ap.db.register(_idr)(MemAp)
+    Ap.db.register(ApIdr.from_idr(_idr))(MemAp)

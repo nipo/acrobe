@@ -3,11 +3,49 @@ discovery."""
 
 import pytest
 
-from acrobe.component.arm.ap import Ap
+from acrobe.component.arm.ap import Ap, ApIdr
 from acrobe.component.arm.dp import (
     ApRead, ApWrite, Dp, DpRead, DpWrite,
 )
 from acrobe.db import NoMatch
+
+
+# -- ApIdr decoding --------------------------------------------------
+
+class TestApIdrDecoding:
+    def test_ahb_ap_decode(self):
+        idr = ApIdr.from_idr(0x04770001)
+        # DESIGNER 0x23B = ARM (jep4/0x3B), CLASS = 0b1000 (MEM-AP),
+        # TYPE = 1 (AHB), VARIANT = 0, REVISION = 0.
+        assert idr.jep106_bank == 4
+        assert idr.jep106_id == 0x3B
+        assert idr.klass == 0b1000
+        assert idr.type == 0x1
+        assert idr.variant == 0
+        assert idr.revision == 0
+
+    def test_round_trip(self):
+        for raw in (0x04770001, 0x14770052, 0x84770005, 0x44760010):
+            assert int(ApIdr.from_idr(raw)) == raw
+
+    def test_is_same_ap_type_ignores_revision_and_variant(self):
+        a = ApIdr.from_idr(0x04770001)  # rev=0, variant=0
+        b = ApIdr.from_idr(0x14770051)  # rev=1, variant=5 — same type
+        assert a.is_same_ap_type(b)
+        # Different DESIGNER → not the same.
+        c = ApIdr.from_idr(0x14760001)  # designer differs
+        assert not a.is_same_ap_type(c)
+        # Different TYPE → not the same.
+        d = ApIdr.from_idr(0x04770002)
+        assert not a.is_same_ap_type(d)
+
+    def test_pretty_includes_manufacturer(self):
+        idr = ApIdr.from_idr(0x04770001)
+        s = idr.pretty()
+        assert "0x04770001" in s
+        assert "ARM" in s
+        assert "class=0x8" in s
+        assert "type=0x1" in s
 
 
 # -- Fake DP for unit-testing Ap in isolation -----------------------
