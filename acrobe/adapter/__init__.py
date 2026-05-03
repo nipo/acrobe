@@ -5,3 +5,4 @@ from . import altera  # noqa: F401
 from .ftdi import generic  # noqa: F401
 from . import icepizero  # noqa: F401
 from . import sipeed  # noqa: F401
+from . import stlink  # noqa: F401
