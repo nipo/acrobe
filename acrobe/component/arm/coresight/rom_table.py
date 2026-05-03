@@ -157,7 +157,26 @@ class RomTable(MemoryMappedComponent):
             self.child_add(PowerGate(self._bus, addr, FailureKind.FAULT))
             return
 
+        # Attach + await the child's start_tree before walking the
+        # next entry. Some components (e.g. Cortex-M's SCS, which
+        # sets DEMCR.TRCENA) gate the visibility of sibling
+        # components listed *after* them in the ROM table —
+        # without an explicit await here, child_add's
+        # ensure_future-scheduled start_tree races against the
+        # walker's next CIDR read and loses non-deterministically
+        # depending on adapter batching (J-Link's one-USB-call-
+        # per-batch tends to win the race; CMSIS-DAP's per-transfer
+        # USB calls always lose). start_tree is idempotent
+        # (_started guard), so the parallel ensure_future invocation
+        # from child_add is harmless.
         self.child_add(child)
+        try:
+            await child.start_tree()
+        except Exception as exc:
+            self.logger.warning(
+                "Child at 0x%x: start_tree raised %s — sibling "
+                "discovery may be incomplete",
+                addr, exc, exc_info=True)
 
     def _classify(self, ids: ComponentIds, addr: int):
         """Pick a class for the child at ``addr`` given its IDs.
