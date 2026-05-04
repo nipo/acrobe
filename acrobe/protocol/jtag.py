@@ -498,6 +498,7 @@ class Chain(Batcher, Node):
         self._parent.post(Reset(count=50))
         self._parent.post(SwdToJtag())
         self._parent.post(Reset(count=50))
+        self._parent.post(Run(1))
 
         # IEEE-1149.7 escape — flat list of DR-scan widths. For each
         # n: CaptureDr; if n>0, Shift(n bits TDI=-1). Trailing Run(1).
