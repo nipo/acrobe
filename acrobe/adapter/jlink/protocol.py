@@ -15,6 +15,7 @@ CMD_GET_VERSION         = 0x01  # firmware version string (length-prefixed)
 CMD_SET_SPEED           = 0x05  # JTAG/SWD clock speed in kHz (LE u16)
 CMD_GET_HW_STATUS       = 0x07  # 8-byte status struct
 CMD_SET_TARGET_POWER    = 0x08
+CMD_REGISTER            = 0x09  # register/unregister an exclusive connection
 CMD_GET_SPEEDS          = 0xC0  # 6-byte: base_freq (u32 LE) + min_div (u16 LE)
 CMD_GET_HW_INFO         = 0xC1  # 4-byte hardware-info field bitmap arg
 CMD_SELECT_TIF          = 0xC7  # set/get target interface (JTAG / SWD / ...)

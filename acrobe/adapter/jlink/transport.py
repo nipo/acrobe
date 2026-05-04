@@ -216,6 +216,48 @@ class JLinkTransport:
         min_div = data[4] | (data[5] << 8)
         return base_freq, min_div
 
+    async def register(self, enable: bool, handle: int = 0) -> int:
+        """Claim (``enable=True``) or release (``enable=False``) an
+        exclusive connection handle on the J-Link.
+
+        The firmware tracks active host connections so concurrent
+        users (e.g. acrobe + JLinkExe + GDB) see each other and don't
+        clobber per-connection state. JLinkExe and crobe both register
+        on connect when CAP_REGISTER is set; we follow suit.
+
+        Frame: cmd(1) + sub(1, 0x64=register / 0x65=unregister) +
+        pid(u32 LE) + addr(u32 LE) + iid(1) + cid(1) + handle(u16 LE).
+        Response: handle(u16 LE) + count(u16 LE) + entry_size(u16 LE) +
+        info_size(u16 LE) + count*entry_size connection-info entries +
+        info_size trailer. Returns the handle the J-Link assigned us
+        (zero for unregister)."""
+        import os
+        import struct
+        sub = 0x64 if enable else 0x65
+        payload = struct.pack(
+            "<BBIIBBH",
+            protocol.CMD_REGISTER, sub, os.getpid() & 0xFFFFFFFF,
+            0, 0, 0, handle & 0xFFFF)
+        async with self._lock:
+            await self._write(payload)
+            # Response is variable length — read one MPS-or-larger
+            # buffer; the loop terminates on the device's short-packet
+            # marker.
+            resp = await self._read(2048)
+        if len(resp) < 8:
+            raise protocol.JLinkError(
+                f"REGISTER short response: got {len(resp)} bytes")
+        new_handle, count, entry_size, info_size = struct.unpack_from(
+            "<HHHH", resp, 0)
+        expected = 8 + count * entry_size + info_size
+        if len(resp) < expected:
+            raise protocol.JLinkError(
+                f"REGISTER response truncated: got {len(resp)} bytes, "
+                f"expected {expected} (handle=0x{new_handle:04x}, "
+                f"count={count}, entry_size={entry_size}, "
+                f"info_size={info_size})")
+        return new_handle
+
     async def get_hw_status(self) -> dict:
         """Read the 8-byte hardware status block: target voltage in
         mV plus pin states (TCK, TDI, TDO, TMS, TRES, TRST)."""
@@ -281,7 +323,7 @@ class JLinkTransport:
 
     async def swd_io(self, direction: bytes, out: bytes,
                      bit_count: int) -> bytes:
-        """Issue a CMD_SWD_IO transaction.
+        """Issue an SWD bit-bang transaction.
 
         ``direction`` and ``out`` are LSB-first bit-streams of
         ``ceil(bit_count / 8)`` bytes each. ``direction`` selects who
@@ -289,33 +331,14 @@ class JLinkTransport:
         the bits the host drives when direction=1 (ignored in
         target-driven cycles).
 
-        Returns ``num_bytes`` of sampled SWDIO (only meaningful for
-        target-driven cycles)."""
-        num_bytes = (bit_count + 7) // 8
-        if len(direction) != num_bytes or len(out) != num_bytes:
-            raise ValueError(
-                f"swd_io: direction/out length mismatch "
-                f"(bit_count={bit_count}, expected {num_bytes} bytes)")
-        cmd = bytes([0xCF, 0,
-                     bit_count & 0xFF, (bit_count >> 8) & 0xFF])
-        async with self._lock:
-            self._logger.protocol(
-                "SWD_IO bits=%d dir=%s out=%s",
-                bit_count, direction[:8].hex(), out[:8].hex())
-            await self._write(cmd + direction + out)
-            # SWD_IO response: num_bytes of sampled SWDIO + 1 status.
-            resp = await self._read(num_bytes + 1)
-            self._logger.protocol(
-                "SWD_IO in=%s (got %d bytes)",
-                resp[:8].hex(), len(resp))
-        if len(resp) < num_bytes + 1:
-            raise protocol.JLinkError(
-                f"SWD_IO short response: got {len(resp)} bytes, "
-                f"expected {num_bytes + 1}")
-        if resp[num_bytes] != 0:
-            raise protocol.JLinkError(
-                f"SWD_IO failed with status 0x{resp[num_bytes]:02x}")
-        return resp[:num_bytes]
+        Wire format is identical to JTAG_IO_V2 / JTAG_IO_V3 — when
+        the J-Link's TIF is set to SWD, the firmware reinterprets
+        the JTAG bit-bang command's TMS slot as the per-cycle output
+        enable. crobe and JLinkExe both go through this same opcode
+        for SWD; reusing :meth:`jtag_io` keeps the V2/V3 selection
+        consistent with hardware-version detection (older J-Link OB
+        firmwares (hw major < 5) only respond correctly to V2)."""
+        return await self.jtag_io(direction, out, bit_count)
 
     async def close(self) -> None:
         try:

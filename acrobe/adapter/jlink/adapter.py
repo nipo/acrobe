@@ -28,6 +28,7 @@ _JLINK_INFOS = (
     AdapterInfo("jlink-ob",  vid=0x1366, pid=0x1016),
     AdapterInfo("jlink-ob",  vid=0x1366, pid=0x1017),
     AdapterInfo("jlink-ob",  vid=0x1366, pid=0x1020),
+    AdapterInfo("jlink-ob",  vid=0x1366, pid=0x1024),  # Renesas
 )
 
 
@@ -46,7 +47,7 @@ class JLinkAdapter(Adapter):
     def __init__(self, name: str, info: AdapterInfo, device,
                  transport: JLinkTransport, firmware_version: str,
                  hardware_version: tuple[int, int, int, int],
-                 caps: bytes):
+                 caps: bytes, register_handle: int | None):
         super().__init__(name)
         self._info = info
         self._device = device
@@ -54,6 +55,9 @@ class JLinkAdapter(Adapter):
         self.firmware_version = firmware_version
         self.hardware_version = hardware_version
         self.caps = caps
+        # Connection handle returned by CMD_REGISTER, if we claimed
+        # one. Closed back out via CMD_REGISTER(unregister) on close.
+        self._register_handle = register_handle
 
     @classmethod
     async def open(cls, descriptor) -> "JLinkAdapter":
@@ -92,6 +96,19 @@ class JLinkAdapter(Adapter):
         # available on hardware major version ≥ 5; older OB
         # hardware uses V2 with a fixed-length TDO-only response.
         transport._jtag_io_v3 = hardware_version[1] >= 5
+
+        # Claim a connection handle if the firmware supports it.
+        # JLinkExe and crobe both do this unconditionally when
+        # CAP_REGISTER is set — lets the firmware track concurrent
+        # host connections and (on close) frees the slot promptly.
+        register_handle = None
+        if protocol.has_cap(caps, protocol.CAP_REGISTER):
+            try:
+                register_handle = await transport.register(True)
+                logger.debug("J-Link registered handle=0x%04x",
+                             register_handle)
+            except Exception as exc:
+                logger.warning("CMD_REGISTER failed: %s", exc)
 
         # Release target reset early — some adapters power up with
         # nRST asserted, which masks the target's TDO/SWDIO drivers.
@@ -141,7 +158,8 @@ class JLinkAdapter(Adapter):
                 logger.warning("get_available_interfaces failed: %s", exc)
 
         return cls(name, info, device, transport,
-                   firmware_version, hardware_version, caps)
+                   firmware_version, hardware_version, caps,
+                   register_handle)
 
     async def child_spawn(self, name):
         if name == "jtag":
@@ -155,6 +173,15 @@ class JLinkAdapter(Adapter):
         raise NoMatch("interface", name)
 
     async def close(self):
+        if self._register_handle is not None:
+            try:
+                await self._transport.register(False, self._register_handle)
+            except Exception:
+                # Best-effort: a failed unregister shouldn't prevent
+                # USB cleanup. The firmware times out stale handles
+                # on its own.
+                pass
+            self._register_handle = None
         await self._transport.close()
         self._device.handle.close()
 
