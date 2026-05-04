@@ -627,7 +627,9 @@ class Chain(Batcher, Node):
         if len(possibilities) != 1:
             raise ValueError(
                 f"Ambiguous IR lengths: {len(possibilities)} possibilities "
-                f"for {device_count} devices (idcodes={idcodes!r})")
+                f"for {device_count} devices (idcodes={idcodes!r}):"
+                f" {possibilities!r}, known:"
+                f" {known_irlens!r}")
 
         ir_lengths = possibilities[0]
         self.logger.trace("IR lengths: %s", ir_lengths)
