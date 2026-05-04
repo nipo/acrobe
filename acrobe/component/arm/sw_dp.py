@@ -28,17 +28,24 @@ class SwDp(dpmod.Dp):
     def __init__(self, swd_interface: swd.Interface, name: str = "dap"):
         super().__init__(name=name)
         self._swd = swd_interface
-        # The line-reset / JTAG-to-SWD wakeup we issue in start()
-        # leaves the DP's SELECT register at 0; pre-seed accordingly
-        # so the first DPIDR read doesn't emit a redundant SELECT
-        # write.
+        # The wakeup sequence we issue in start() leaves the DP's
+        # SELECT register at 0; pre-seed accordingly so the first
+        # DPIDR read doesn't emit a redundant SELECT write.
         self._select: int = 0
 
     async def start(self):
-        # Bring the DP up to a known SWD state. JtagToSwd is
-        # idempotent — re-issuing on a chip already in SWD just
-        # exercises a line reset, which is harmless.
-        await self._swd.post(swd.JtagToSwd())
+        # Canonical SWD line wake-up: line reset → JTAG-to-SWD switch
+        # → line reset → idle → DPIDR read. Posted back-to-back so the
+        # whole sequence flushes in a single batch — the spec requires
+        # the first transaction after the switch to be a DPIDR read,
+        # and we don't want anything (e.g. a future Dp.start() change)
+        # slipping in between. Dp.start() will read DPIDR again on its
+        # own; that's redundant but harmless.
+        self._swd.post(swd.LineReset())
+        self._swd.post(swd.JtagToSwd())
+        self._swd.post(swd.LineReset())
+        self._swd.post(swd.Run(cycles=8))
+        await self._swd.post(swd.Read(ap=False, addr=dpmod.Dp.DPIDR))
         await super().start()
 
     def _select_for(self, op) -> int:

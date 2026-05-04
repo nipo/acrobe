@@ -472,7 +472,47 @@ class Chain(Batcher, Node):
     async def start(self):
         jtag_iface = self.parent_of_class(JtagInterface)
         with jtag_iface.freq_capped("enumeration", 1e6):
-            await self.discover()
+            await self._cold_init_and_discover(jtag_iface)
+
+    async def _cold_init_and_discover(self, jtag_iface):
+        """Atomic cold-line init + blind discovery.
+
+        Sequence:
+
+        1. TAP reset (≥50 TMS=1 cycles) — load IDCODE/BYPASS in
+           every TAP's IR, regardless of prior state.
+        2. SWD-to-JTAG switch — flips an SWJ-DP from SWD back to
+           JTAG. Harmless on chips without an SWJ-DP.
+        3. TAP reset — settles the chain after the switch.
+        4. IEEE-1149.7 unlock + 4-wire-mode switch (CCL_LOCK +
+           STC2(0,2,1) + STMC(0,0,1)). Capped to 100 kHz; ignored
+           by non-cJTAG TAPs because the shift values land in the
+           captured IDCODE/BYPASS DR (read-only / 1-bit).
+        5. Blind discovery (CaptureDr/IR + length probing).
+
+        Steps 4 and 5 must follow each other without an intervening
+        TAP reset — TLR reverts the cJTAG controller to 2-wire mode.
+        Discovery in turn requires every TAP to be in IDCODE/BYPASS
+        (i.e. *just* after a TAP reset), so the whole chain has to
+        be batched into a single uninterrupted post sequence."""
+        self._parent.post(Reset(count=50))
+        self._parent.post(SwdToJtag())
+        self._parent.post(Reset(count=50))
+
+        # IEEE-1149.7 escape — flat list of DR-scan widths. For each
+        # n: CaptureDr; if n>0, Shift(n bits TDI=-1). Trailing Run(1).
+        # Encodes CCL_LOCK=(0,0,1), STC2(0,2,1)=(2,9), STMC(0,0,1)=(0,1).
+        # No `read_tdo` — by spec there's nothing observable to capture.
+        cjtag_lock_unlock = (0, 0, 1, 2, 9, 0, 1)
+        with jtag_iface.freq_capped("cjtag", 1e5):
+            for width in cjtag_lock_unlock:
+                self._parent.post(CaptureDr())
+                if width:
+                    self._parent.post(Shift(BitString(-1, width),
+                                            read_tdo=False))
+            self._parent.post(Run(1))
+
+        await self.discover()
 
     def children_changed(self):
         try:
@@ -522,10 +562,14 @@ class Chain(Batcher, Node):
         Reliably identifies IDCODEs and TAP count. Determines IR
         lengths from the captured IR pattern (JTAG spec: after
         Capture-IR, each TAP's IR starts with 01 in bits [1:0]).
+
+        Caller MUST have just put every TAP into IDCODE/BYPASS via
+        a TAP reset — the first DR shift here assumes that state.
+        Issuing a TAP reset from inside this method would defeat the
+        cJTAG escape sequence in :meth:`_cold_init_and_discover`,
+        so the reset is the caller's responsibility.
         """
         self.logger.trace("Discovering chain...")
-        self._parent.post(Reset())
-        self._parent.post(Run(1))
         self._parent.post(CaptureDr())
         reset_dr = await self._shift_discover()
         self.logger.trace("DR after reset: %d bits", len(reset_dr))
