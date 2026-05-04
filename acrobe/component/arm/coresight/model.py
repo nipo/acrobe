@@ -273,11 +273,12 @@ class MemoryMappedComponent(Node):
             return f"{self.FRIENDLY_NAME}@{base:08x}"
         if ids.cidr_class is None:
             return f"unknown@{base:08x}"
+        designer = ids.partid.manufacturer_name
         if ids.devarch is not None and ids.devarch.present:
             return (f"comp@{base:08x}"
-                    f"[archid={ids.devarch.archid:#06x}]")
+                    f"[archid={ids.devarch.archid:#06x}, {designer}]")
         return (f"comp@{base:08x}"
-                f"[part={ids.partid.part_no:#05x}]")
+                f"[part={ids.partid.part_no:#05x}, {designer}]")
 
     # -- Discovery (the canonical entry point) ----------------------
 
@@ -327,8 +328,15 @@ class CoresightComponent(MemoryMappedComponent):
 
 
 def _pick_class(ids: ComponentIds):
-    """Lookup precedence: DEVARCH → PartId → DEVTYPE → fallback.
-    Return the class to instantiate."""
+    """Lookup precedence: DEVARCH → CIDR class 0x1 (ROM Table) →
+    PartId → DEVTYPE → fallback. Return the class to instantiate.
+
+    CIDR class 0x1 outranks the PartId registry because ROM Tables
+    don't carry a vendor-distinct PartId — many SoCs ship multiple
+    ROM Tables that all share whatever PartId the implementer
+    happened to leave in PIDR. A PartId-keyed handler with class 0x1
+    in the wild would almost certainly mean we mistook a ROM Table
+    for a leaf component."""
     # 1. DEVARCH-based registry (class 0x9, PRESENT=1).
     if ids.devarch is not None and ids.devarch.present:
         try:
@@ -337,7 +345,12 @@ def _pick_class(ids: ComponentIds):
             return handlers[0]
         except NoMatch:
             pass
-    # 2. PartId-based registry. Skip when there's no valid component.
+    # 2. Class 0x1 ROM Tables — CIDR class is the authoritative
+    #    type indicator. Lazy import to avoid circular dep.
+    if ids.cidr_class == MemoryMappedComponent.CLASS_ROM_TABLE:
+        from .rom_table import RomTable
+        return RomTable
+    # 3. PartId-based registry. Skip when there's no valid component.
     if ids.cidr_class is not None:
         try:
             handlers = MemoryMappedComponent.db.get(
@@ -345,7 +358,7 @@ def _pick_class(ids: ComponentIds):
             return handlers[0]
         except NoMatch:
             pass
-    # 3. DEVTYPE registry (class 0x9 only).
+    # 4. DEVTYPE registry (class 0x9 only).
     if ids.cidr_class == MemoryMappedComponent.CLASS_CORESIGHT \
             and ids.devtype is not None:
         try:
@@ -354,9 +367,5 @@ def _pick_class(ids: ComponentIds):
             return handlers[0]
         except NoMatch:
             pass
-    # 4. Class 0x1 ROM Tables: lazy import to avoid circular dep.
-    if ids.cidr_class == MemoryMappedComponent.CLASS_ROM_TABLE:
-        from .rom_table import RomTable
-        return RomTable
     # 5. Fallback to the generic class.
     return MemoryMappedComponent

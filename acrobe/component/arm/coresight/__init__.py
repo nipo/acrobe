@@ -26,3 +26,4 @@ from . import router         # noqa: F401
 from . import scs            # noqa: F401
 from . import stm            # noqa: F401
 from . import tpiu           # noqa: F401
+from . import tsgen          # noqa: F401
