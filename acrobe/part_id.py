@@ -62,8 +62,10 @@ class PartId:
                 | (self.part_no << 12)
                 | (self.revision << 28))
 
-    def is_same_part(self, other: "PartId") -> bool:
+    def is_same_part(self, other: "PartId" | None) -> bool:
         """True when the part identity matches, ignoring revision."""
+        if other is None:
+            return False
         return (self.jep106_bank == other.jep106_bank
                 and self.jep106_id == other.jep106_id
                 and self.part_no == other.part_no)

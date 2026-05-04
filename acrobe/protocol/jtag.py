@@ -669,7 +669,7 @@ class Chain(Batcher, Node):
             tap = base(idcode=idcode, irlen=irlen)
         else:
             try:
-                tap = Tap.db.call(PartId.from_idcode(idcode),
+                tap = Tap.db.call(PartId.from_idcode(idcode) if idcode else None,
                                   idcode=idcode, irlen=irlen)
             except NoMatch:
                 tap = Tap(idcode=idcode, irlen=irlen)
