@@ -88,14 +88,29 @@ class RomTable(MemoryMappedComponent):
                     offset, exc)
                 return
 
-            present_bits = entry & 0x3
-            if present_bits == 0b00:
-                # End of table.
+            # Spec D2.2.2 / D3.2.2: only an all-zero ROMENTRY value
+            # marks the end of the table. PRESENT=0b00 with any other
+            # bit set (e.g. POWERIDVALID/POWERID populated, or the
+            # high OFFSET word non-zero in a 64-bit entry) is a
+            # not-present *slot* — the walk must continue.
+            if entry == 0:
                 return
+
+            present_bits = entry & 0x3
+            powerid_valid = bool((entry >> 2) & 1)
+            powerid = (entry >> 4) & 0x1f
+
+            if present_bits == 0b00:
+                self.logger.trace(
+                    "ROM entry +0x%x = 0x%x: PRESENT=0 (not present, "
+                    "POWERIDVALID=%d POWERID=0x%x) — skipping",
+                    offset, entry, powerid_valid, powerid)
+                offset += entry_size
+                continue
             if present_bits != 0b11:
                 self.logger.warning(
-                    "ROM entry +0x%x has reserved present bits 0b%02b — skipping",
-                    offset, present_bits)
+                    "ROM entry +0x%x = 0x%x: reserved PRESENT=0b%02b — "
+                    "skipping", offset, entry, present_bits)
                 offset += entry_size
                 continue
 
@@ -109,6 +124,23 @@ class RomTable(MemoryMappedComponent):
             addr_size_bits = getattr(self._bus, "addr_size_bits", 64)
             addr_mask = (1 << addr_size_bits) - 1
             child_addr = (self.base + child_offset) & addr_mask
+
+            # Spec D2.3.2 (Class 0x1) / D3.3.2 (Class 0x9): when
+            # POWERIDVALID is set, the entry sits in a power domain
+            # identified by POWERID and the debugger must request
+            # power before the component is accessible. We don't yet
+            # drive the power Requester — surface the metadata at
+            # info level so the operator can correlate WAIT/FAULT
+            # responses with gated domains.
+            if powerid_valid:
+                self.logger.info(
+                    "ROM entry +0x%x → 0x%x: POWERID=0x%x "
+                    "(power-domain gated, requester not yet driven)",
+                    offset, child_addr, powerid)
+            else:
+                self.logger.trace(
+                    "ROM entry +0x%x → 0x%x", offset, child_addr)
+
             await self._discover_child(child_addr)
             offset += entry_size
 
