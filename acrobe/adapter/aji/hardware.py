@@ -83,7 +83,7 @@ def _make_tap_for(device, position: int):
     return tap
 
 
-class AjiHardware(Batcher, Node, FreqCapper):
+class AjiHardware(Batcher, FreqCapper, Node):
     """One ``Hardware`` entry from an AJI server.
 
     Constructed by :class:`AjiHost` after ``get_hardware()`` returns;

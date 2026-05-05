@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 
-from .util.pretty import metric
+from .util.pretty import metric, sci_parse
 
 
 class FreqCapper:
@@ -10,11 +10,24 @@ class FreqCapper:
     Subclasses override freq_update() to apply the frequency to hardware.
 
     Expects the target class to provide self.logger (e.g. Node).
+
+    Place FreqCapper *before* Node in the MRO when mixing both, so the
+    cooperative ``option_set`` here is reached before Node's terminal
+    ValueError raise.
     """
 
     def __init__(self):
         self.__constraints = {}
         self.__freq = None
+
+    def option_set(self, key, value):
+        """Generic node option support: ``fmax=<sci>`` registers a
+        ``"user"`` cap so command-line ``proto(fmax=1M)`` paths just
+        work on any FreqCapper-mixing interface."""
+        if key == "fmax":
+            self.freq_cap("user", sci_parse(value))
+            return
+        super().option_set(key, value)
 
     @property
     def freq(self):

@@ -23,6 +23,7 @@ from enum import IntEnum
 
 from ..db import Db
 from ..engine import Batcher
+from ..freq_capper import FreqCapper
 from ..node import Node
 
 
@@ -116,13 +117,19 @@ class SwdWait(SwdAccessFailure):
 # --- Abstract Interface ------------------------------------------------
 
 
-class Interface(Batcher, Node):
+class Interface(Batcher, FreqCapper, Node):
     """SWD wire interface.
 
     Concrete subclasses (e.g. :class:`acrobe.adapter.jlink.swd.JLinkSwdInterface`,
     :class:`acrobe.adapter.cmsisdap.swd.CmsisDapSwdInterface`) implement
     :meth:`flush_ops` to translate batched swd ops into adapter-specific
     USB transactions.
+
+    Mixes in :class:`FreqCapper` so the wire frequency is always the
+    minimum of named constraints (hardware ceiling, user ``fmax``,
+    transient enumeration caps, …); subclasses override
+    :meth:`FreqCapper.freq_update` to apply the resulting freq to
+    hardware.
 
     The canonical child is a :class:`SwDp` registered under ``"dap"`` in
     :data:`db`; spawning happens via the standard ``child_summon``
@@ -133,6 +140,7 @@ class Interface(Batcher, Node):
     def __init__(self, name="swd"):
         Batcher.__init__(self)
         Node.__init__(self, name)
+        FreqCapper.__init__(self)
 
     async def flush_ops(self, batch):
         raise NotImplementedError(
