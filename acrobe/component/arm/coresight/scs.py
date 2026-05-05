@@ -47,6 +47,21 @@ class CpuFeatures:
     ctr: int | None = None
     ccsidr: int | None = None
 
+_parts = (0x000,  # Cortex-M3
+          0x008,  # Cortex-M0
+          0x009,  # Cortex-M0+
+          0x00C,  # Cortex-M4
+          0x00D,  # Cortex-M7
+          0x00E,  # Cortex-M33
+          0x471,  # Cortex-M1 (legacy)
+          0x4C8)  # Cortex-M55
+@MemoryMappedComponent.db.register(
+    *[PartId(jep106_bank=4, jep106_id=0x3B, part_no=p) for p in _parts])
+
+# ARMv8-M debug architecture.
+@MemoryMappedComponent.devarch_db.register(
+    DevArch(architect=0x23B, archid=0x2A04, revision=0, present=True)
+)
 
 class Scs(MemoryMappedComponent):
     FRIENDLY_NAME = "System Control Space"
@@ -290,22 +305,3 @@ class Scs(MemoryMappedComponent):
             self.logger.warning(
                 "DEMCR write failed: %s — trace components may "
                 "not enumerate", exc)
-
-
-for _part in (0x000,  # Cortex-M3
-              0x008,  # Cortex-M0
-              0x009,  # Cortex-M0+
-              0x00C,  # Cortex-M4
-              0x00D,  # Cortex-M7
-              0x00E,  # Cortex-M33
-              0x471,  # Cortex-M1 (legacy)
-              0x4C8): # Cortex-M55
-    MemoryMappedComponent.db.register(
-        PartId(jep106_bank=4, jep106_id=0x3B, part_no=_part)
-    )(Scs)
-
-
-# ARMv8-M debug architecture.
-MemoryMappedComponent.devarch_db.register(
-    DevArch(architect=0x23B, archid=0x2A04, revision=0, present=True)
-)(Scs)

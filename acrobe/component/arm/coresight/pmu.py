@@ -6,12 +6,7 @@ ARMv8 cores."""
 
 from .model import CoresightComponent, DevArch, MemoryMappedComponent
 
-
+@MemoryMappedComponent.devarch_db.register(DevArch(architect=0x23B, archid=0x2A16, revision=0, present=True))
 @CoresightComponent.db.register(0x16)
 class Pmu(CoresightComponent):
     FRIENDLY_NAME = "Performance Monitoring Unit"
-
-
-MemoryMappedComponent.devarch_db.register(
-    DevArch(architect=0x23B, archid=0x2A16, revision=0, present=True)
-)(Pmu)

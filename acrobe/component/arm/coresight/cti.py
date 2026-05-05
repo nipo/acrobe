@@ -8,10 +8,8 @@ from .model import CoresightComponent, DevArch, MemoryMappedComponent
 
 
 @CoresightComponent.db.register(0x14)
+@MemoryMappedComponent.devarch_db.register(DevArch(architect=0x23B, archid=0x1A14, revision=0, present=True))
 class Cti(CoresightComponent):
     FRIENDLY_NAME = "Cross-Trigger Interface"
 
 
-MemoryMappedComponent.devarch_db.register(
-    DevArch(architect=0x23B, archid=0x1A14, revision=0, present=True)
-)(Cti)

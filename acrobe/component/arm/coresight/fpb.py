@@ -8,19 +8,9 @@ DEVARCH ARCHID = 0x1A03 (BPU; same role, no flash-patch)."""
 
 from .model import DevArch, MemoryMappedComponent, PartId
 
-
+# ARMv8-M BPU — same role, identified by DEVARCH instead of PartId.
+@MemoryMappedComponent.devarch_db.register(DevArch(architect=0x23B, archid=0x1A03, revision=0, present=True))
+@MemoryMappedComponent.db.register(PartId.from_idcode(0x003477))
+@MemoryMappedComponent.db.register(PartId.from_idcode(0x00b477))
 class Fpb(MemoryMappedComponent):
     FRIENDLY_NAME = "Flash Patch and Breakpoint"
-
-
-for _part in (0x003,   # Cortex-M3 / M4 FPB
-              0x00B):  # Cortex-M0+ BPU
-    MemoryMappedComponent.db.register(
-        PartId(jep106_bank=4, jep106_id=0x3B, part_no=_part)
-    )(Fpb)
-
-
-# ARMv8-M BPU — same role, identified by DEVARCH instead of PartId.
-MemoryMappedComponent.devarch_db.register(
-    DevArch(architect=0x23B, archid=0x1A03, revision=0, present=True)
-)(Fpb)

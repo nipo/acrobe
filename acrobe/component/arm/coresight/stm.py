@@ -8,10 +8,10 @@ that advertise the STM-specific architecture."""
 from .model import DevArch, MemoryMappedComponent
 
 
+@MemoryMappedComponent.devarch_db.register(
+    DevArch(architect=0x23B, archid=0x0A63, revision=0, present=True)
+)
 class Stm(MemoryMappedComponent):
     FRIENDLY_NAME = "System Trace Macrocell"
 
 
-MemoryMappedComponent.devarch_db.register(
-    DevArch(architect=0x23B, archid=0x0A63, revision=0, present=True)
-)(Stm)

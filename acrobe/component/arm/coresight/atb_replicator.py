@@ -16,7 +16,8 @@ from __future__ import annotations
 
 from .model import MemoryMappedComponent, PartId
 
-
+# ARM SoC-600 css600_atbreplicator_prog: PIDR1.PART_1=0x9, PIDR0.PART_0=0xEC.
+@MemoryMappedComponent.db.register(PartId.from_idcode(0x9EC477))
 class AtbReplicator(MemoryMappedComponent):
     """Programmable ATB replicator (1-to-2 splitter with ID filters)."""
 
@@ -31,9 +32,3 @@ class AtbReplicator(MemoryMappedComponent):
     # Integration test area.
     ITATBCTRL  = 0xEF8  # Integration Mode ATB Control
     ITCTRL     = 0xF00  # Integration Mode Control
-
-
-# ARM SoC-600 css600_atbreplicator_prog: PIDR1.PART_1=0x9, PIDR0.PART_0=0xEC.
-MemoryMappedComponent.db.register(
-    PartId(jep106_bank=4, jep106_id=0x3B, part_no=0x9EC)
-)(AtbReplicator)

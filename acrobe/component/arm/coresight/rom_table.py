@@ -38,6 +38,14 @@ from .power_gate import FailureKind, PowerGate
 _DEVID_FORMAT_MASK = 0xF
 _DEVID_FORMAT_64BIT = 0x1
 
+# Class 0x9 ROM Tables are identified by ARCHID = 0x0AF7 (architect
+# = ARM JEP106 0x23B). Register against devarch_db so any class-0x9
+# component matching this DEVARCH spawns a RomTable.
+@MemoryMappedComponent.devarch_db.register(DevArch(architect=0x23B, archid=0x0AF7, revision=0, present=True))
+
+# Class 0x1 ROM Tables don't have DEVARCH or DEVTYPE — they're
+# detected purely by CIDR.CLASS. See model._pick_class for the
+# Class 0x1 fallback to RomTable (lazy-imports this module).
 
 class RomTable(MemoryMappedComponent):
     """CoreSight ROM Table — a list of pointers to other components.
@@ -268,14 +276,3 @@ class RomTable(MemoryMappedComponent):
         return _pick_class(ids)
 
 
-# Class 0x9 ROM Tables are identified by ARCHID = 0x0AF7 (architect
-# = ARM JEP106 0x23B). Register against devarch_db so any class-0x9
-# component matching this DEVARCH spawns a RomTable.
-MemoryMappedComponent.devarch_db.register(
-    DevArch(architect=0x23B, archid=0x0AF7, revision=0, present=True)
-)(RomTable)
-
-
-# Class 0x1 ROM Tables don't have DEVARCH or DEVTYPE — they're
-# detected purely by CIDR.CLASS. See model._pick_class for the
-# Class 0x1 fallback to RomTable (lazy-imports this module).

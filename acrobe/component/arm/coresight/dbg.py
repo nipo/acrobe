@@ -7,12 +7,7 @@ EDLAR/EDSCR register set)."""
 
 from .model import CoresightComponent, DevArch, MemoryMappedComponent
 
-
+@MemoryMappedComponent.devarch_db.register(DevArch(architect=0x23B, archid=0x6A15, revision=0, present=True))
 @CoresightComponent.db.register(0x15)
 class Dbg(CoresightComponent):
     FRIENDLY_NAME = "Debug Management"
-
-
-MemoryMappedComponent.devarch_db.register(
-    DevArch(architect=0x23B, archid=0x6A15, revision=0, present=True)
-)(Dbg)

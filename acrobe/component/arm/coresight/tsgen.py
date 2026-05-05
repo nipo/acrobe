@@ -12,12 +12,8 @@ variants register the same role:
 
 from .model import MemoryMappedComponent, PartId
 
-
+@MemoryMappedComponent.db.register(PartId.from_idcode(0x101477))
+@MemoryMappedComponent.db.register(PartId.from_idcode(0x193477))
 class TimeStampGenerator(MemoryMappedComponent):
     FRIENDLY_NAME = "Time Stamp Generator"
 
-
-_ARM = dict(jep106_bank=4, jep106_id=0x3B)
-
-MemoryMappedComponent.db.register(PartId(part_no=0x101, **_ARM))(TimeStampGenerator)
-MemoryMappedComponent.db.register(PartId(part_no=0x193, **_ARM))(TimeStampGenerator)

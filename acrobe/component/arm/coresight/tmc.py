@@ -74,30 +74,21 @@ class Tmc(MemoryMappedComponent):
     MODE_FIFO_SW      = 0b01
     MODE_FIFO_HW      = 0b10
 
-
+@MemoryMappedComponent.db.register(PartId.from_idcode(0x9E9477))
 class TmcEtb(Tmc):
     """Embedded Trace Buffer — TMC bound to a dedicated on-chip SRAM."""
     FRIENDLY_NAME = "TMC ETB"
 
-
+@MemoryMappedComponent.db.register(PartId.from_idcode(0x9EA477))
 class TmcEtf(Tmc):
     """Embedded Trace FIFO — TMC bound to an on-chip FIFO; can act
     as a buffer or a passthrough formatter for downstream sinks."""
     FRIENDLY_NAME = "TMC ETF"
 
-
+@MemoryMappedComponent.db.register(PartId.from_idcode(0x9E8477))
 class TmcEtr(Tmc):
     """Embedded Trace Router / Streamer — TMC bound to an AXI manager
     interface, capturing trace into system memory (ETR) or streaming
     it off-chip (ETS). PIDR is shared between ETR and ETS; DEVID
     distinguishes them at runtime."""
     FRIENDLY_NAME = "TMC ETR"
-
-
-# ARM SoC-600 PartIds. JEP106 = ARM (bank 4, id 0x3B).
-# 12-bit part numbers from PIDR1.PART_1[3:0] || PIDR0.PART_0[7:0].
-_ARM = dict(jep106_bank=4, jep106_id=0x3B)
-
-MemoryMappedComponent.db.register(PartId(part_no=0x9E9, **_ARM))(TmcEtb)
-MemoryMappedComponent.db.register(PartId(part_no=0x9EA, **_ARM))(TmcEtf)
-MemoryMappedComponent.db.register(PartId(part_no=0x9E8, **_ARM))(TmcEtr)
