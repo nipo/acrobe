@@ -187,6 +187,16 @@ class JtagDp(dpmod.Dp):
     # WAITs.
     INTER_SHIFT_RUN = 8
 
+    # WAIT-retry parameters. When the chip returns ACK=WAIT for a
+    # pipelined read, we re-issue that op at the wire level up to
+    # ``MAX_WAIT_RETRIES`` times, separated by ``WAIT_RETRY_IDLE``
+    # idle TCKs each, before giving up with DpAccessFailure. The
+    # numbers are conservative — a real APB-mediated debug-fabric
+    # transaction shouldn't need more than a handful even on a
+    # heavily loaded chip.
+    MAX_WAIT_RETRIES = 16
+    WAIT_RETRY_IDLE = 32
+
     def __init__(self, name: str = "dap", jtag_protocol_version: int = 0):
         super().__init__(name)
         self._select: int | None = None  # cached SELECT value
@@ -226,11 +236,17 @@ class JtagDp(dpmod.Dp):
 
         # All bit-level shift futures (we await them all together).
         shift_futures: list[asyncio.Future] = []
-        # Pairs of (shift_future_carrying_response, user_future_to_resolve).
-        result_shifts: list[tuple[asyncio.Future, asyncio.Future]] = []
-        # User future whose response is in flight (to be picked up by
-        # the next shift's TDO, or a forced RDBUFF read at end-of-batch).
-        pending_user_future: asyncio.Future | None = None
+        # Triples of (shift_future_carrying_response, user_future_to_resolve,
+        # original_op_or_None). The op is kept so that, on a WAIT response,
+        # we can re-issue it inline at the wire level. ``None`` for the
+        # RDBUFF flush path triggered by SELECT changes — by definition
+        # there's no separate op driving that one.
+        result_shifts: list[
+            tuple[asyncio.Future, asyncio.Future, object | None]] = []
+        # The (user_future, op) whose response is in flight (to be
+        # picked up by the next shift's TDO, or a forced RDBUFF read
+        # at end-of-batch).
+        pending: tuple[asyncio.Future, object] | None = None
 
         select = self._select
 
@@ -254,12 +270,12 @@ class JtagDp(dpmod.Dp):
             return f
 
         def flush_pending_via_rdbuff():
-            nonlocal pending_user_future
-            if pending_user_future is None:
+            nonlocal pending
+            if pending is None:
                 return
             f = emit_dpacc(rnw=True, addr=dpmod.Dp.RDBUFF, capture=True)
-            result_shifts.append((f, pending_user_future))
-            pending_user_future = None
+            result_shifts.append((f, pending[0], pending[1]))
+            pending = None
 
         for op, user_future in batch:
             if isinstance(op, dpmod.Run):
@@ -306,14 +322,18 @@ class JtagDp(dpmod.Dp):
 
             # The shift we just emitted carries the TDO of the
             # *previous* request — hand it to the pending user future.
-            if pending_user_future is not None:
-                result_shifts.append((f, pending_user_future))
-                pending_user_future = None
+            if pending is not None:
+                result_shifts.append((f, pending[0], pending[1]))
+                pending = None
 
-            # If the current op is a read, mark its user future as the
-            # next pending one (its data will arrive on the next shift).
+            # If the current op is a read, mark its (user_future, op)
+            # as the next pending pair: its data will arrive on the
+            # next shift's TDO. Writes resolve immediately — their
+            # ACK is not currently propagated back, so a write that
+            # WAITs goes undetected (a known limitation; reads are
+            # what surface in practice).
             if isinstance(op, (dpmod.ApRead, dpmod.DpRead)):
-                pending_user_future = user_future
+                pending = (user_future, op)
             else:
                 user_future.set_result(None)
 
@@ -326,13 +346,79 @@ class JtagDp(dpmod.Dp):
             await asyncio.gather(*shift_futures)
 
         # Resolve user futures from the shifts that carry their
-        # responses. ACK and read-data are extracted here.
-        for shift_f, user_f in result_shifts:
+        # responses. WAIT triggers an inline wire-level retry; OK /
+        # FAULT / WAIT-after-retries-exhausted resolve via
+        # ``_resolve_response``.
+        for shift_f, user_f, op in result_shifts:
             if user_f.done():
                 continue
             tdo = shift_f.result()
             ack, data = _Wire.unpack(tdo)
-            self._resolve_response(user_f, ack, data)
+            if ack == _Wire.ACK_WAIT and op is not None:
+                await self._retry_on_wait(user_f, op)
+            else:
+                self._resolve_response(user_f, ack, data)
+
+    async def _retry_on_wait(self, user_f: asyncio.Future, op) -> None:
+        """Inline wire-level retry for an op whose pipelined response
+        was WAIT.
+
+        Re-issues the same DP/AP access directly to the parent TAP up
+        to :attr:`MAX_WAIT_RETRIES` times, separated by
+        :attr:`WAIT_RETRY_IDLE` idle TCKs each. Each retry shift is
+        followed by an RDBUFF read whose TDO carries the retry's ACK
+        and (for reads) data. Resolves ``user_f`` with the first
+        non-WAIT response, or fails it with :class:`DpAccessFailure`
+        once retries are exhausted.
+
+        Runs *after* the main batch flush, so SELECT might have moved
+        to a value that doesn't match this op's bank/AP — we restore
+        it as the first step."""
+        tap = self._parent
+        is_ap = isinstance(op, (dpmod.ApRead, dpmod.ApWrite))
+        rnw = isinstance(op, (dpmod.ApRead, dpmod.DpRead))
+        wire_addr = op.addr & 0xc
+        op_data = getattr(op, "data", 0)
+
+        # Restore SELECT for this op (later batch ops may have moved it).
+        target_select = self._select_for(op)
+        if self._select != target_select:
+            sel_tdi = BitString(
+                _Wire.pack(False, dpmod.Dp.SELECT, target_select), 35)
+            tap.DPACC(sel_tdi, read_tdo=False)
+            tap.run(self.INTER_SHIFT_RUN)
+            self._select = target_select
+
+        for attempt in range(self.MAX_WAIT_RETRIES):
+            # Idle to give the AP time to complete the prior transaction.
+            tap.run(self.WAIT_RETRY_IDLE)
+
+            # Re-issue the op (no need to capture this shift's TDO —
+            # the response of THIS shift is whatever was in flight
+            # before, which is uninteresting in retry context).
+            tdi = BitString(_Wire.pack(rnw, wire_addr, op_data), 35)
+            if is_ap:
+                tap.APACC(tdi, read_tdo=False)
+            else:
+                tap.DPACC(tdi, read_tdo=False)
+            tap.run(self.INTER_SHIFT_RUN)
+
+            # RDBUFF read to capture the retry's ACK + data.
+            rdbuff_tdi = BitString(
+                _Wire.pack(True, dpmod.Dp.RDBUFF, 0), 35)
+            ack_f = tap.DPACC(rdbuff_tdi, read_tdo=True)
+            tap.run(self.INTER_SHIFT_RUN)
+
+            tdo = await ack_f
+            ack, data_out = _Wire.unpack(tdo)
+
+            if ack != _Wire.ACK_WAIT:
+                self._resolve_response(user_f, ack, data_out)
+                return
+
+        user_f.set_exception(dpmod.DpAccessFailure(
+            f"JTAG-DP WAIT after {self.MAX_WAIT_RETRIES} retries on "
+            f"{type(op).__name__}(addr=0x{op.addr:x})"))
 
     def _resolve_response(self, user_f: asyncio.Future,
                           ack: int, data: int) -> None:
@@ -342,10 +428,13 @@ class JtagDp(dpmod.Dp):
 
           * v0 (ADIv5): 0b010 = OK_OR_FAULT (success), 0b001 = WAIT.
           * v1 (ADIv6): 0b100 = OK,         0b010 = FAULT, 0b001 = WAIT.
-        """
+
+        WAIT is reached here only when the inline retry path
+        (:meth:`_retry_on_wait`) has exhausted its budget — the wire
+        is genuinely stuck."""
         if ack == _Wire.ACK_WAIT:
             user_f.set_exception(dpmod.DpAccessFailure(
-                "JTAG-DP WAIT response (retry not yet implemented)"))
+                "JTAG-DP WAIT response after retry exhaustion"))
             return
 
         if self._jtag_protocol_version == 0:

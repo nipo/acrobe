@@ -302,15 +302,31 @@ class TestAbort:
 
 class TestAckErrors:
     @pytest.mark.asyncio
-    async def test_wait_ack_raises(self):
+    async def test_wait_ack_raises_after_retry_budget(self):
+        # Initial DpRead consumes 2 captured shifts (DPACC + RDBUFF
+        # flush). Each retry consumes one (the RDBUFF capture). With
+        # MAX_WAIT_RETRIES=16, queue 2 + 16 WAIT responses; the
+        # retry budget exhausts and raises DpAccessFailure tagged
+        # "WAIT after N retries".
         tap, dp = _make_dp()
+        for _ in range(2 + JtagDp.MAX_WAIT_RETRIES):
+            tap.queue_response(_Wire.ACK_WAIT, 0)
 
-        # All shifts return WAIT.
-        tap.queue_response(_Wire.ACK_WAIT, 0)
-        tap.queue_response(_Wire.ACK_WAIT, 0)
-
-        with pytest.raises(DpAccessFailure, match="WAIT"):
+        with pytest.raises(DpAccessFailure, match="WAIT after"):
             await dp.post(DpRead(Dp.CTRL_STAT))
+
+    @pytest.mark.asyncio
+    async def test_wait_then_ok_resolves_via_retry(self):
+        # First two captures return WAIT (initial DPACC + RDBUFF
+        # flush). The third — first retry's RDBUFF — returns OK with
+        # the real read value; the user future resolves to it.
+        tap, dp = _make_dp()
+        tap.queue_response(_Wire.ACK_WAIT, 0)
+        tap.queue_response(_Wire.ACK_WAIT, 0)
+        tap.queue_response(_Wire.ACK_OK_FAULT, 0xc0ffee01)
+
+        result = await dp.post(DpRead(Dp.CTRL_STAT))
+        assert result == 0xc0ffee01
 
     @pytest.mark.asyncio
     async def test_invalid_ack_raises(self):
