@@ -29,23 +29,31 @@ from .model import (
 from .power_gate import FailureKind, PowerGate
 
 
-# DEVID.FORMAT (Class 0x9 ROM Tables): bit selecting 32-bit vs 64-bit
-# entries. The spec places this at DEVID[4] for Class 0x9 ROM Tables.
-_DEVID_FORMAT_BIT = 1 << 4
+# DEVID.FORMAT for Class 0x9 ROM Tables (IHI0074F D3.5.11.1) lives in
+# bits[3:0]; FORMAT==0x0 means 32-bit ROMENTRY format and FORMAT==0x1
+# means 64-bit. Bit[4] is SYSMEM (deprecated) and was previously
+# misread as FORMAT — a chip with SYSMEM=1 (Agilex 5 HPS) was decoded
+# as 64-bit format, packing two 32-bit ROMENTRYs into a single read
+# and dropping the high half of every entry on the floor.
+_DEVID_FORMAT_MASK = 0xF
+_DEVID_FORMAT_64BIT = 0x1
 
 
 class RomTable(MemoryMappedComponent):
     """CoreSight ROM Table — a list of pointers to other components.
 
-    Class 0x1 ROM Tables: 32-bit entries (legacy ADIv5 layout).
-    Class 0x9 ROM Tables: 32 or 64-bit entries; format is in
-    ``DEVID.FORMAT``. ARCHID = 0x0AF7 identifies them.
+    Class 0x1 ROM Tables (D2.2): 32-bit entries; the table ends on the
+    first ROMENTRY whose value is 0x00000000 (PRESENT==0 with any
+    other bit set is a not-present slot, must be skipped).
 
-    The walker iterates entries until it hits a present=0b00
-    terminator (or the management-register area at +0xF00). Each
-    present entry is classified via :data:`soc_db` (per-SoC override)
-    or the standard :class:`MemoryMappedComponent` lookup precedence.
-    Failures install a :class:`PowerGate`."""
+    Class 0x9 ROM Tables (D3.2): 32 or 64-bit entries selected by
+    ``DEVID.FORMAT``; ARCHID = 0x0AF7 identifies them. PRESENT is a
+    2-bit field: 0b00 = final entry (table end), 0b10 = not present
+    (skip), 0b11 = present, 0b01 = reserved.
+
+    Each present entry is classified via :data:`soc_db` (per-SoC
+    override) or the standard :class:`MemoryMappedComponent` lookup
+    precedence. Failures install a :class:`PowerGate`."""
 
     FRIENDLY_NAME = "ROM Table"
 
@@ -54,19 +62,23 @@ class RomTable(MemoryMappedComponent):
     # generic components placed at well-known addresses.
     soc_db: Db = Db("ROM Table SoC override")
 
-    # Maximum offset for ROM entries — management registers begin
-    # at +0xF00 on Class 0x1 ROM Tables. We use the same upper
-    # bound for both classes; entries are terminated by the first
-    # PRESENT=0b00 anyway.
-    _ENTRY_AREA_END = 0xF00
+    # Maximum offset for ROM entries by class. Class 0x1: management
+    # register space starts at 0xF00 so entries occupy 0x000..0xEFC.
+    # Class 0x9: reserved area starts at 0x800 so entries occupy
+    # 0x000..0x7FC (or 0x7F8 for 64-bit).
+    _ENTRY_AREA_END_CLASS_1 = 0xF00
+    _ENTRY_AREA_END_CLASS_9 = 0x800
 
     @property
     def entry_size(self) -> int:
-        """Bytes per ROM entry: 4 for Class 0x1 and 32-bit Class 0x9,
-        8 for 64-bit Class 0x9."""
+        """Bytes per ROM entry: 4 for Class 0x1; for Class 0x9, 4 or
+        8 depending on DEVID.FORMAT (bits[3:0], not bit[4])."""
         if self.cidr_class == self.CLASS_ROM_TABLE:
             return 4
-        if self.devid is not None and (self.devid & _DEVID_FORMAT_BIT):
+        if self.devid is None:
+            return 4
+        format_field = self.devid & _DEVID_FORMAT_MASK
+        if format_field == _DEVID_FORMAT_64BIT:
             return 8
         return 4
 
@@ -83,8 +95,11 @@ class RomTable(MemoryMappedComponent):
     _LOG_ADDR_NIBBLES = 16
 
     async def _walk(self, entry_size: int):
+        is_class_9 = self.cidr_class == self.CLASS_CORESIGHT
+        entry_area_end = (self._ENTRY_AREA_END_CLASS_9 if is_class_9
+                          else self._ENTRY_AREA_END_CLASS_1)
         offset = 0
-        while offset < self._ENTRY_AREA_END:
+        while offset < entry_area_end:
             try:
                 entry = await self._read_entry(offset, entry_size)
             except DpAccessFailure as exc:
@@ -93,14 +108,8 @@ class RomTable(MemoryMappedComponent):
                     offset, exc)
                 return
 
-            # Spec D2.2.2 / D3.2.2: only an all-zero ROMENTRY value
-            # marks the end of the table. PRESENT=0b00 with any other
-            # bit set (e.g. POWERIDVALID/POWERID populated, or the
-            # high OFFSET word non-zero in a 64-bit entry) is a
-            # not-present *slot* — the walk must continue.
-            if entry == 0:
-                return
-
+            # Termination depends on the ROM Table class. Common
+            # fields decoded once for the trace line either way.
             present_bits = entry & 0x3
             powerid_valid = bool((entry >> 2) & 1)
             powerid = (entry >> 4) & 0x1f
@@ -109,16 +118,34 @@ class RomTable(MemoryMappedComponent):
             addr_mask = (1 << addr_size_bits) - 1
             child_addr = (self.base + child_offset) & addr_mask
 
-            # State summary — short tag for log readability.
-            if present_bits == 0b00:
-                state = "abs"
-            elif present_bits == 0b11:
-                state = "ok"
+            # Class 0x1 (D2.2.2): ROMENTRY value 0 = end of table;
+            # PRESENT (bit[0]) = 0 with any other bit set is a
+            # not-present slot — skip and continue.
+            #
+            # Class 0x9 (D3.2.2 / D3.5.18): PRESENT[1:0] = 0b00 =
+            # final entry (all other fields RES0); 0b10 = not present
+            # (skip); 0b11 = present; 0b01 reserved.
+            if is_class_9:
+                if present_bits == 0b00:
+                    self.logger.trace(
+                        "ROM entry +0x%03x = 0x%0*x: end of ROM Table",
+                        offset, entry_size * 2, entry)
+                    return
+                present = (present_bits == 0b11)
+                state = {0b01: "rsvd", 0b10: "abs", 0b11: "ok"}[present_bits]
             else:
-                state = f"{present_bits}?"
+                if entry == 0:
+                    self.logger.trace(
+                        "ROM entry +0x%03x = 0x%0*x: end of ROM Table",
+                        offset, entry_size * 2, entry)
+                    return
+                # Class 0x1 PRESENT is bit[0] alone; bit[1] is FORMAT
+                # (RAO=1 in any non-terminator entry).
+                present = bool(entry & 0x1)
+                state = "ok" if present else "abs"
 
             # Single per-entry trace dump: raw value + every parsed
-            # field (per IHI0074F D2.4.4 / D3.4.4). On a 32-bit
+            # field (per IHI0074F D2.4.4 / D3.5.18). On a 32-bit
             # entry, the high address nibbles read as zero — we keep
             # the wider format so 32-bit and 64-bit entries align in
             # mixed logs.
@@ -130,13 +157,11 @@ class RomTable(MemoryMappedComponent):
                 powerid, powerid_valid,
                 self._LOG_ADDR_NIBBLES, child_addr)
 
-            if present_bits == 0b00:
-                offset += entry_size
-                continue
-            if present_bits != 0b11:
-                self.logger.warning(
-                    "ROM entry +0x%x: reserved PRESENT=0b%02b — skipping",
-                    offset, present_bits)
+            if not present:
+                if is_class_9 and present_bits == 0b01:
+                    self.logger.warning(
+                        "ROM entry +0x%x: reserved PRESENT=0b01 — skipping",
+                        offset)
                 offset += entry_size
                 continue
 

@@ -343,7 +343,9 @@ class TestSocDbOverride:
 class TestClass9Format1:
     @pytest.mark.asyncio
     async def test_64bit_entries(self):
-        # DEVID.FORMAT bit (bit 4) = 1 → 64-bit entries.
+        # IHI0074F D3.5.11.1: DEVID.FORMAT lives in bits[3:0]; 0x1
+        # selects 64-bit ROMENTRY format. Bit[4] is SYSMEM
+        # (deprecated) — getting these confused was an earlier bug.
         bus = FakeBus()
         rom_base = 0xE000_0000
         bus.install_component_ids(
@@ -351,7 +353,7 @@ class TestClass9Format1:
             cidr_class=MemoryMappedComponent.CLASS_CORESIGHT,
             devarch_architect=0x23B, devarch_archid=0x0AF7,
             devarch_present=True,
-            devid=(1 << 4),  # FORMAT bit
+            devid=0x1,  # FORMAT == 0x1
         )
         # Entry 0: 64-bit, child at offset 0x20000.
         bus.install_rom_entry(rom_base, idx=0, child_offset=0x20000,
