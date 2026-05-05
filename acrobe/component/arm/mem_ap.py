@@ -12,10 +12,14 @@ Also exposes ``mem_read(addr, size) -> bytes`` and
 access; these decompose unaligned head/tail into byte/halfword
 accesses and bulk-handle aligned middles as word streams.
 
-This implementation targets APv1 (ADIv5) register layout (CSW=0x00,
-TAR=0x04, DRW=0x0c, BASE=0xF8, IDR=0xFC). The APv2 (ADIv6) layout
-puts these registers at 0xD00..0xD0C / 0xDF8 / 0xDFC; a separate
-``MemApV2`` will land alongside DPv3 wire support.
+Two flavours of MEM-AP register layout are supported:
+
+* :class:`MemAp` — APv1 / ADIv5: CSW=0x00, TAR=0x04, DRW=0x0c, BASE=0xF8,
+  IDR=0xFC. Discovered via APSEL walk, registered against ``Ap.db``.
+* :class:`MemApV2` — APv2 / ADIv6: same registers shifted into the
+  0xD00..0xDFC management area. Discovered through CoreSight ROM
+  Table walks (registered against ``MemoryMappedComponent.devarch_db``
+  for ARCHID 0x0A17).
 """
 
 from __future__ import annotations
@@ -27,6 +31,9 @@ from dataclasses import dataclass
 from ...engine import Batcher
 from . import dp as dpmod
 from .ap import Ap, ApIdr
+from .coresight.model import (
+    DevArch, MemoryMappedComponent,
+)
 
 
 # --- Op dataclasses (frozen, inputs only) --------------------------
@@ -151,6 +158,12 @@ class MemAp(Ap, Batcher):
             0x8: "AHB5-AP-EnH",
         }.get(type_field, "")
 
+    # Address-space size of this MEM-AP's connected bus, in bits.
+    # 32 by default; ``start()`` upgrades to 64 when CFG.LA is set
+    # (Large Physical Address Extension). Used by the CoreSight ROM
+    # Table walker to mask computed child addresses.
+    addr_size_bits: int = 32
+
     async def start(self):
         """Read CFG and BASE; if BASE is valid, kick off CoreSight
         discovery at that address by attaching the discovered
@@ -160,6 +173,8 @@ class MemAp(Ap, Batcher):
                          self.cfg,
                          (self.cfg >> 1) & 1,
                          (self.cfg >> 2) & 1)
+        if self.cfg & self.CFG_LA:
+            self.addr_size_bits = 64
 
         base_lo = await self.reg_read(self.BASE_LO)
         base_hi = 0
@@ -501,3 +516,271 @@ class MemAp(Ap, Batcher):
 for _idr in (0x04770001, 0x04770002, 0x04770004,
              0x04770005, 0x04770006, 0x04770007, 0x04770008):
     Ap.db.register(ApIdr.from_idr(_idr))(MemAp)
+
+
+# --- ADIv6 / APv2 MEM-AP -------------------------------------------
+
+class MemApV2(MemoryMappedComponent, Batcher):
+    """ADIv6 / APv2 MEM-AP. Registered against
+    ``MemoryMappedComponent.devarch_db`` keyed on ARCHID 0x0A17 so
+    the CoreSight ROM Table walker instantiates one whenever it
+    encounters a class-0x9 component with that DEVARCH.
+
+    Same memory-access semantics as :class:`MemAp` (CSW/TAR/DRW dance,
+    state caching, auto-increment, byte-granular ``mem_read`` /
+    ``mem_write``); differs in:
+
+    * **Register offsets**: CSW/TAR/DRW/CFG/BASE/IDR live in the
+      management area (0xD00..0xDFC), versus APv1's 0x00..0xFC.
+    * **Discovery**: instantiated from a ROM Table walk via
+      ``devarch_db``, not from an APSEL walk against ``Ap.db``.
+    * **Bus**: AP-register accesses go through ``self._bus`` (a
+      :class:`DpSystemBus` for an AP attached directly to the DP's
+      top-level ROM Table), instead of ``self._dp.post(ApRead/ApWrite)``.
+      Same wire effect — the bus's ``read32``/``write32`` lower to one
+      APACC each.
+
+    Inheritance order: :class:`MemoryMappedComponent` first so its
+    Node-tree contract (``__init__(bus, base, ids)``, child management,
+    CIDR/PIDR accessors) governs; :class:`Batcher` second supplies
+    ``post`` and ``flush_ops`` for the MEM-AP ops."""
+
+    FRIENDLY_NAME = "MEM-AP"
+
+    # APv2 register offsets — CSW/TAR/DRW shifted into the management area.
+    CSW       = 0xD00
+    TAR_LO    = 0xD04
+    TAR_HI    = 0xD08
+    DRW       = 0xD0C
+    BD0       = 0xD10
+    BD1       = 0xD14
+    BD2       = 0xD18
+    BD3       = 0xD1C
+    MBT       = 0xD20
+    BASE_HI   = 0xDF0
+    CFG       = 0xDF4
+    BASE_LO   = 0xDF8
+    IDR       = 0xDFC
+
+    # Reuse APv1's CSW bit definitions, CSW size table, and helpers.
+    CSW_SIZE_BYTE      = MemAp.CSW_SIZE_BYTE
+    CSW_SIZE_HALF      = MemAp.CSW_SIZE_HALF
+    CSW_SIZE_WORD      = MemAp.CSW_SIZE_WORD
+    CSW_ADDRINC_OFF    = MemAp.CSW_ADDRINC_OFF
+    CSW_ADDRINC_SINGLE = MemAp.CSW_ADDRINC_SINGLE
+    CSW_ADDRINC_PACKED = MemAp.CSW_ADDRINC_PACKED
+    CSW_DEVICE_EN      = MemAp.CSW_DEVICE_EN
+    CSW_TR_IN_PROG     = MemAp.CSW_TR_IN_PROG
+    CSW_HPROT0_PRIV    = MemAp.CSW_HPROT0_PRIV
+    CSW_HPROT1_BUFF    = MemAp.CSW_HPROT1_BUFF
+    CSW_MASTER_DEBUG   = MemAp.CSW_MASTER_DEBUG
+    CSW_DBGSWENABLE    = MemAp.CSW_DBGSWENABLE
+
+    CFG_BIG_ENDIAN = MemAp.CFG_BIG_ENDIAN
+    CFG_LA         = MemAp.CFG_LA
+    CFG_LD         = MemAp.CFG_LD
+
+    _SIZE_BYTES = MemAp._SIZE_BYTES
+
+    # The lowering uses self._bus directly, but _size_for / _csw_with
+    # are pure helpers reusable across MemAp variants.
+    _size_for         = staticmethod(MemAp._size_for)
+    _csw_with         = MemAp._csw_with
+    _type_name_for_idr = staticmethod(MemAp._type_name_for_idr)
+
+    def __init__(self, bus, base: int, ids,
+                 name: str | None = None):
+        # Defer IDR.TYPE-aware naming to start() once IDR is read;
+        # __init__ runs synchronously from the ROM walker.
+        if name is None:
+            name = f"MEM-AP@{base:08x}"
+        MemoryMappedComponent.__init__(self, bus, base, ids, name=name)
+        Batcher.__init__(self)
+        self.idr: int | None = None
+        self.cfg: int | None = None
+        self.base_addr: int | None = None
+        self._csw_cache: int | None = None
+        self._tar_cache: int | None = None
+
+    # See :attr:`MemAp.addr_size_bits`.
+    addr_size_bits: int = 32
+
+    async def start(self):
+        """Read IDR/CFG/BASE; if BASE is valid, discover the component
+        sitting in this AP's memory aperture (typically a ROM Table)
+        and attach it as a child."""
+        self.idr = await self._bus.read32(self.base + self.IDR)
+        self.cfg = await self._bus.read32(self.base + self.CFG)
+        type_name = self._type_name_for_idr(self.idr)
+        self.logger.info(
+            "IDR 0x%08x (%s) CFG 0x%08x (LA=%d, LD=%d)",
+            self.idr, type_name or "unknown",
+            self.cfg, (self.cfg >> 1) & 1, (self.cfg >> 2) & 1)
+        if self.cfg & self.CFG_LA:
+            self.addr_size_bits = 64
+        # Now that we know the AP type, refine the Node name.
+        if type_name and self._name.startswith("MEM-AP@"):
+            self._name = f"{type_name}@{self.base:08x}"
+
+        base_lo = await self._bus.read32(self.base + self.BASE_LO)
+        base_hi = 0
+        if self.cfg & self.CFG_LA:
+            base_hi = await self._bus.read32(self.base + self.BASE_HI)
+
+        # BASE format handling — same logic as APv1: bit[0]=P,
+        # bit[1]=FORMAT (0=legacy, 1=new), bits[31:12]=address.
+        # 0xFFFFFFFF is the legacy "no debug entries" sentinel.
+        if base_lo == 0xFFFFFFFF:
+            self.base_addr = None
+            self.logger.info("BASE 0xFFFFFFFF: no debug components (sentinel)")
+            return
+
+        new_format = bool(base_lo & 0x2)
+        present = bool(base_lo & 0x1) if new_format else True
+        if not present:
+            self.base_addr = None
+            self.logger.info(
+                "BASE 0x%08x: no debug components (P=0)", base_lo)
+            return
+
+        self.base_addr = ((base_hi & 0xffffffff) << 32) | (base_lo & 0xfffff000)
+        self.logger.info(
+            "BASE 0x%016x (%s format)", self.base_addr,
+            "new" if new_format else "legacy")
+
+        # Walk the AP's memory aperture for a ROM Table / single
+        # component. This is *memory* access — goes through this MEM-AP's
+        # CSW/TAR/DRW dance via ``self`` as the bus.
+        from .coresight.power_gate import FailureKind, PowerGate
+
+        try:
+            child = await MemoryMappedComponent.discover(self, self.base_addr)
+        except Exception as exc:
+            self.logger.warning(
+                "BASE component at 0x%x: discover failed: %s",
+                self.base_addr, exc, exc_info=True)
+            child = PowerGate(self, self.base_addr, FailureKind.FAULT)
+
+        if (isinstance(child, MemoryMappedComponent)
+                and child.cidr_class is None):
+            self.logger.info(
+                "BASE component at 0x%x: no CIDR preamble — "
+                "installing PowerGate", self.base_addr)
+            child = PowerGate(self, self.base_addr, FailureKind.EMPTY)
+
+        if (isinstance(child, MemoryMappedComponent)
+                and child.cidr_class is not None):
+            self.logger.info(
+                "BASE component: %s — %s",
+                type(child).__name__, child.partid.pretty())
+
+        self.child_add(child)
+
+    # MemoryMappedComponent.start_tree provides the best-effort
+    # behaviour we need; no override required.
+
+    # -- User-facing memory access (mirrors MemAp) ------------------
+
+    def read8(self, addr: int):
+        return self.post(Read8(addr=addr))
+
+    def read16(self, addr: int):
+        return self.post(Read16(addr=addr))
+
+    def read32(self, addr: int):
+        return self.post(Read32(addr=addr))
+
+    def write8(self, addr: int, data: int):
+        return self.post(Write8(addr=addr, data=data))
+
+    def write16(self, addr: int, data: int):
+        return self.post(Write16(addr=addr, data=data))
+
+    def write32(self, addr: int, data: int):
+        return self.post(Write32(addr=addr, data=data))
+
+    # Byte-granular convenience helpers — the implementation only
+    # depends on read{8,16,32} / write{8,16,32}, so we delegate.
+    async def mem_read(self, addr: int, size: int) -> bytes:
+        return await MemAp.mem_read(self, addr, size)
+
+    async def mem_write(self, addr: int, data: bytes) -> None:
+        await MemAp.mem_write(self, addr, data)
+
+    # -- Lowering ---------------------------------------------------
+
+    async def flush_ops(self, batch):
+        """Translate batched MEM-AP ops to AP-register accesses on
+        the bus. Mirrors :meth:`MemAp.flush_ops`; the only difference
+        is the access path: ``self._bus.read32/write32`` here vs.
+        ``self._dp.post(ApRead/ApWrite)`` there. Same wire effect."""
+        ap_futures: list[asyncio.Future] = []
+        read_results: list[tuple[object, asyncio.Future, asyncio.Future]] = []
+
+        csw = self._csw_cache
+        tar = self._tar_cache
+
+        for op, user_future in batch:
+            try:
+                size_field = self._size_for(op)
+            except TypeError as exc:
+                user_future.set_exception(exc)
+                continue
+            size_bytes = self._SIZE_BYTES[size_field]
+            new_csw = self._csw_with(size=size_field,
+                                     addrinc=self.CSW_ADDRINC_SINGLE)
+
+            if csw != new_csw:
+                ap_futures.append(self._bus.write32(
+                    self.base + self.CSW, new_csw))
+                csw = new_csw
+
+            if tar != op.addr:
+                ap_futures.append(self._bus.write32(
+                    self.base + self.TAR_LO, op.addr & 0xffffffff))
+                tar = op.addr
+
+            if isinstance(op, (Read8, Read16, Read32)):
+                drw_future = self._bus.read32(self.base + self.DRW)
+                ap_futures.append(drw_future)
+                read_results.append((op, user_future, drw_future))
+            else:
+                shift = (op.addr & 3) * 8
+                lane_data = (op.data << shift) & 0xffffffff
+                ap_futures.append(self._bus.write32(
+                    self.base + self.DRW, lane_data))
+                user_future.set_result(None)
+
+            next_tar = op.addr + size_bytes
+            if (next_tar & 0xFFFFFC00) != (op.addr & 0xFFFFFC00):
+                tar = None
+            else:
+                tar = next_tar
+
+        self._csw_cache = csw
+        self._tar_cache = tar
+
+        if ap_futures:
+            try:
+                await asyncio.gather(*ap_futures)
+            except Exception as exc:
+                for op, uf, _ in read_results:
+                    if not uf.done():
+                        uf.set_exception(exc)
+                raise
+
+        for op, user_future, drw_future in read_results:
+            if user_future.done():
+                continue
+            raw = drw_future.result()
+            shift = (op.addr & 3) * 8
+            mask = (1 << (self._SIZE_BYTES[self._size_for(op)] * 8)) - 1
+            user_future.set_result((raw >> shift) & mask)
+
+
+# DEVARCH for APv2 MEM-AP per IHI0074F: ARCHITECT=0x23B (ARM),
+# ARCHID=0x0A17. devarch_db's eq func masks REVISION, so one
+# registration covers all silicon revisions.
+MemoryMappedComponent.devarch_db.register(
+    DevArch(architect=0x23B, archid=0x0A17, revision=0, present=True)
+)(MemApV2)

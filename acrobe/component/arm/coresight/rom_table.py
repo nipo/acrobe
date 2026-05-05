@@ -100,7 +100,15 @@ class RomTable(MemoryMappedComponent):
                 continue
 
             child_offset = self._sign_extend_offset(entry, entry_size)
-            child_addr = (self.base + child_offset) & 0xFFFFFFFFFFFFFFFF
+            # Per spec, Component_n_Address = ROM_Base + (OFFSET << 12),
+            # taken modulo the bus's address-space size. Some chips leave
+            # stale non-zero bits in OFFSET[63:32] of 64-bit entries on
+            # 32-bit address spaces (RES0 violation); the wire-level path
+            # silently truncates, so the modulo here keeps our internal
+            # bookkeeping consistent with the actual access.
+            addr_size_bits = getattr(self._bus, "addr_size_bits", 64)
+            addr_mask = (1 << addr_size_bits) - 1
+            child_addr = (self.base + child_offset) & addr_mask
             await self._discover_child(child_addr)
             offset += entry_size
 

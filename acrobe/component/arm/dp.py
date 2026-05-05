@@ -123,6 +123,47 @@ class DpAccessFailure(Exception):
     """DP/AP access failed (bad ACK, sticky error, parity, etc.)."""
 
 
+# --- ADIv6 system-address bus adapter -----------------------------
+
+class DpSystemBus:
+    """Bus adapter exposing ``read32``/``write32`` at absolute system
+    addresses by issuing direct APACC ops on a :class:`Dp`. Used as
+    the bus argument for ADIv6 top-level component discovery
+    (BASEPTR0 walk) and for any non-MEM-AP component reachable via
+    direct register access in the DP's system address space.
+
+    Distinct from a MEM-AP: there is no CSW/TAR/DRW state machine —
+    each access is one APACC at SELECT composed from ``addr[31:4]``.
+    The DP's system address space is the debug fabric, directly
+    addressable through APACC. Only 32-bit aligned word accesses are
+    supported (component management registers and ROM Table entries
+    are word-aligned)."""
+
+    def __init__(self, dp: "Dp"):
+        self._dp = dp
+        # Mirror DP's logger so child components attached via this bus
+        # surface log lines under the DP's tree path.
+        self.logger = dp.logger
+        # System-address size in bits (DPIDR1.ASIZE). Used by the
+        # ROM Table walker to mask computed child addresses — some
+        # chips leave stale non-zero bits above ASIZE in the
+        # OFFSET[63:32] half of 64-bit ROM entries (spec says RES0,
+        # but wire-level access silently truncates).
+        self.addr_size_bits: int = dp.asize if dp.asize else 32
+
+    def read32(self, addr: int):
+        if addr & 0x3:
+            raise ValueError(
+                f"DpSystemBus.read32: unaligned address 0x{addr:x}")
+        return self._dp.post(ApRead(addr=addr))
+
+    def write32(self, addr: int, data: int):
+        if addr & 0x3:
+            raise ValueError(
+                f"DpSystemBus.write32: unaligned address 0x{addr:x}")
+        return self._dp.post(ApWrite(addr=addr, data=data & 0xffffffff))
+
+
 # --- Abstract DP ---------------------------------------------------
 
 class Dp(Batcher, Node):
@@ -180,6 +221,8 @@ class Dp(Batcher, Node):
         self.adi_version: int | None = None  # 5 or 6
         self.targetid: int | None = None     # DPv2+: chip designer/part/revision
         self.targetid1: int | None = None    # ADIv6: vendor-defined extension
+        self.asize: int | None = None        # ADIv6 system-address size in bits
+                                             # (DPIDR1.ASIZE; None on ADIv5)
 
     async def start(self):
         """Read DPIDR, clear sticky flags, power up debug+system domains."""
@@ -192,7 +235,10 @@ class Dp(Batcher, Node):
 
         if self.adi_version == 6:
             self.dpidr1 = await self.post(DpRead(self.DPIDR1))
-            self.logger.info("DPIDR1 0x%08x", self.dpidr1)
+            # DPIDR1[6:0] = ASIZE (system-address size in bits).
+            self.asize = self.dpidr1 & 0x7f
+            self.logger.info(
+                "DPIDR1 0x%08x — ASIZE=%d", self.dpidr1, self.asize)
 
         # TARGETID identifies the chip (designer/part/revision), as
         # opposed to the DP IP itself (DPIDR). Available on DPv2+.
@@ -242,21 +288,18 @@ class Dp(Batcher, Node):
 
     async def _enumerate_aps(self):
         """Discover APs and add them as children. DPv0-v2 walks
-        APSEL at fixed indices; DPv3 (ADIv6) walks the ROM Table at
-        BASEPTR0/1 — implemented in slice 5 alongside the general
-        CoreSight ROM walker.
+        APSEL at fixed indices; ADIv6 walks the system-address ROM
+        Table rooted at BASEPTR0.
 
         Per-APSEL discovery failures are logged and the walk
         continues. Per-AP ``start()`` failures are isolated by the
         :meth:`start_tree` override below."""
+        if self.adi_version >= 6:
+            await self._enumerate_aps_adiv6()
+            return
+
         # Imported lazily to avoid a circular dependency at module-load.
         from .ap import Ap
-
-        if self.adi_version >= 6:
-            self.logger.warning(
-                "ADIv6 (DPv3) AP enumeration via BASEPTR is not yet "
-                "implemented — slice 5 will land it. No APs added.")
-            return
 
         # DPv0-v2: walk APSEL space, batch all the IDR reads at once.
         futures = [
@@ -276,6 +319,52 @@ class Dp(Batcher, Node):
                 self.logger.info(
                     "AP%d discovered: idr=0x%08x class=0x%x type=0x%x",
                     apsel, ap.idr, ap.klass, ap.type)
+
+    async def _enumerate_aps_adiv6(self):
+        """ADIv6 path: read BASEPTR0 (and BASEPTR1 if ASIZE > 32),
+        discover the top-level component at that system address, and
+        attach it as a child. Typically a ROM Table whose entries
+        point to APs and other CoreSight components in the DP's
+        system address space."""
+        from .coresight.model import MemoryMappedComponent
+        from .coresight.power_gate import FailureKind, PowerGate
+
+        # DPIDR1.ASIZE: bits[6:0] — system address size in bits.
+        asize = (self.dpidr1 or 0) & 0x7f
+        if asize > 32:
+            # SELECT1 (ADDR[63:32]) needed for >32-bit address space.
+            # Not yet wired in JtagDp/SwDp — components above the
+            # 4 GiB boundary will fault.
+            self.logger.warning(
+                "DPIDR1.ASIZE=%d > 32: SELECT1 unsupported, only "
+                "ADDR[31:0] reachable", asize)
+
+        baseptr0 = await self.post(DpRead(self.BASEPTR0))
+        self.logger.info("BASEPTR0 0x%08x", baseptr0)
+        if not (baseptr0 & 0x1):
+            self.logger.warning(
+                "BASEPTR0.VALID=0 — no top-level component, "
+                "no APs to enumerate")
+            return
+        base_addr = baseptr0 & 0xfffff000
+
+        bus = DpSystemBus(self)
+        try:
+            comp = await MemoryMappedComponent.discover(bus, base_addr)
+        except Exception as exc:
+            self.logger.warning(
+                "Top-level component at 0x%x: discover failed: %s",
+                base_addr, exc, exc_info=True)
+            comp = PowerGate(bus, base_addr, FailureKind.FAULT)
+
+        if (isinstance(comp, MemoryMappedComponent)
+                and comp.cidr_class is None):
+            self.logger.warning(
+                "Top-level component at 0x%x: no CIDR preamble — "
+                "installing PowerGate", base_addr)
+            comp = PowerGate(bus, base_addr, FailureKind.EMPTY)
+
+        self.child_add(comp)
 
     async def start_tree(self):
         """Best-effort tree start: a single AP's failed ``start()``
