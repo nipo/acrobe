@@ -202,3 +202,64 @@ class TestChipId:
         chip = d.chip_id()
         assert chip.source == "TARGETID"
         assert chip.part_no == 0x5678
+
+
+class TestSystemMemap:
+    """Heuristic ranking for ``Dp.system_memap()``: prefer
+    AHB/AXI variants (system-bus types) over APB (debug fabric);
+    among same-class APs, prefer one without an embedded debug ROM
+    (``base_addr is None``)."""
+
+    def _make_dp_with_aps(self, ap_specs):
+        """Build a DP whose subtree contains stub MEM-APs.
+        ``ap_specs`` is a list of ``(name, idr, base_addr)`` tuples;
+        each becomes a manually-attached ``MemAp`` child."""
+        from acrobe.component.arm.mem_ap import MemAp
+
+        d = Dp("t")
+        for name, idr, base_addr in ap_specs:
+            ap = MemAp(dp=d, base=0, idr=idr, name=name)
+            ap.base_addr = base_addr
+            d._child_attach(ap)
+        return d
+
+    def test_no_aps_returns_none(self):
+        d = Dp("t")
+        assert d.system_memap() is None
+
+    def test_axi_preferred_over_apb(self):
+        d = self._make_dp_with_aps([
+            # APB4-AP (TYPE=6, debug fabric) with embedded ROM Table.
+            ("apb", 0x04770006, 0x80000000),
+            # AXI5-AP (TYPE=7, system memory) without embedded ROM.
+            ("axi", 0x04770007, None),
+        ])
+        chosen = d.system_memap()
+        assert chosen is not None
+        assert chosen.name == "axi"
+
+    def test_axi_preferred_even_when_first_is_apb(self):
+        # Tree-walk order shouldn't beat type ranking.
+        d = self._make_dp_with_aps([
+            ("apb", 0x04770002, 0x80000000),  # APB-AP first
+            ("ahb", 0x04770001, None),         # AHB-AP second — wins
+        ])
+        assert d.system_memap().name == "ahb"
+
+    def test_no_rom_preferred_among_same_type(self):
+        # Two AHB5-APs, same TYPE; the one without an embedded
+        # debug ROM (likely the system-memory one) wins.
+        d = self._make_dp_with_aps([
+            ("ahb_with_rom", 0x04770005, 0xE0000000),
+            ("ahb_bare",     0x04770005, None),
+        ])
+        assert d.system_memap().name == "ahb_bare"
+
+    def test_apb_only_falls_back_to_apb(self):
+        # Heuristic still returns *something* when only APB-APs exist;
+        # no MEM-AP candidates would be wrong, but APB is what the
+        # caller has to work with.
+        d = self._make_dp_with_aps([
+            ("apb", 0x04770002, 0x80000000),
+        ])
+        assert d.system_memap().name == "apb"

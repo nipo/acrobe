@@ -395,6 +395,60 @@ class Dp(Batcher, Node):
         raise NotImplementedError(
             f"{type(self).__name__} must implement flush_ops")
 
+    # IDR.TYPE values whose connected bus is conventionally main
+    # system memory rather than the debug fabric. Used by
+    # :meth:`system_memap` to rank candidate MEM-APs.
+    _SYSTEM_BUS_TYPES = frozenset({
+        0x1,  # AHB-AP
+        0x4,  # AXI-AP
+        0x5,  # AHB5-AP
+        0x7,  # AXI5-AP
+        0x8,  # AHB5-AP with enhanced HPROT
+    })
+
+    def system_memap(self):
+        """Return the MEM-AP most likely to bridge to main system
+        memory, or ``None`` if no MEM-AP is discovered.
+
+        ADI does not flag any AP as "the system memory one" — chip
+        designers wire APs as they please. This method applies a
+        heuristic that gets the right answer on conventional Cortex-A
+        / Cortex-M layouts; precise routing for a specific SoC
+        belongs in a target-framework driver. The ranking is:
+
+          1. ``IDR.TYPE`` in ``_SYSTEM_BUS_TYPES`` (AHB / AHB5 /
+             AHB5-EnH / AXI / AXI5) is preferred over APB / APB4
+             (debug fabric).
+          2. ``BASE.P == 0`` (no embedded debug ROM Table inside the
+             AP's aperture) is preferred over ``BASE.P == 1``: a
+             MEM-AP with a ROM Table inside is by convention
+             carrying debug components, not RAM.
+
+        Among ties, the first match in tree-walk order wins.
+
+        Both ADIv5 (``MemAp`` directly under the DP) and ADIv6
+        (``MemApV2`` under the top-level system-bus ROM Table) layouts
+        are covered by walking the DP's whole subtree."""
+        # Lazy-import MemAp / MemApV2 to avoid a module-load circular
+        # dependency through coresight.model.
+        from .mem_ap import MemAp, MemApV2
+
+        candidates = (self.children_of_class(MemAp)
+                      + self.children_of_class(MemApV2))
+        if not candidates:
+            return None
+
+        def rank(ap):
+            type_field = (ap.idr or 0) & 0xf
+            is_system_type = type_field in self._SYSTEM_BUS_TYPES
+            has_debug_rom = ap.base_addr is not None
+            # Lower tuple sorts first.
+            return (0 if is_system_type else 1,
+                    1 if has_debug_rom else 0)
+
+        candidates.sort(key=rank)
+        return candidates[0]
+
     def chip_id(self) -> "ChipId | None":
         """Return the best-available chip identifier, in this order
         of preference:
