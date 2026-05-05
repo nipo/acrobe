@@ -408,8 +408,13 @@ class MemAp(Ap, Batcher):
         # byte/halfword lane from drw_future.result() at the end.
         read_results: list[tuple[object, asyncio.Future, asyncio.Future]] = []
 
-        csw = self._csw_cache
-        tar = self._tar_cache
+        # Always re-establish CSW/TAR at start of batch — interleaved
+        # batches from another Mem-AP user (or any other DP/AP
+        # consumer that touches AP state) may have moved them.
+        self._csw_cache = None
+        self._tar_cache = None
+        csw = None
+        tar = None
 
         for op, user_future in batch:
             try:
@@ -738,8 +743,11 @@ class MemApV2(MemoryMappedComponent, Batcher):
         ap_futures: list[asyncio.Future] = []
         read_results: list[tuple[object, asyncio.Future, asyncio.Future]] = []
 
-        csw = self._csw_cache
-        tar = self._tar_cache
+        # Refresh CSW/TAR at start of batch — see MemAp.flush_ops.
+        self._csw_cache = None
+        self._tar_cache = None
+        csw = None
+        tar = None
 
         for op, user_future in batch:
             try:

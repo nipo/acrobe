@@ -244,11 +244,15 @@ class JtagDp(dpmod.Dp):
         result_shifts: list[
             tuple[asyncio.Future, asyncio.Future, object | None]] = []
         # The (user_future, op) whose response is in flight (to be
-        # picked up by the next shift's TDO, or a forced RDBUFF read
-        # at end-of-batch).
+        # picked up by the trailing-read pipeline at end of batch).
         pending: tuple[asyncio.Future, object] | None = None
 
-        select = self._select
+        # Always re-establish SELECT at start of batch — interleaved
+        # batches from any other DP / AP user may have moved it. The
+        # ``self._select`` cache is reset here so the first op's
+        # ``_select_for`` comparison forces a SELECT write.
+        self._select = None
+        select = None
 
         def emit_idle():
             shift_futures.append(tap.run(self.INTER_SHIFT_RUN))
@@ -270,9 +274,19 @@ class JtagDp(dpmod.Dp):
             return f
 
         def flush_pending_via_rdbuff():
+            """Drain a pending AP/DP read at the end of a sequence.
+            Per JTAG-DP wire spec the result of a posted read is
+            returned on the *next* transfer — for the trailing read
+            in a batch that means we issue an RDBUFF DP read to
+            *trigger* fetching the buffered data, then a second
+            idempotent DPACC read whose TDO data field carries the
+            actual value. Capturing the RDBUFF shift's own TDO would
+            give us the response of the prior op, not the buffered
+            AP read result."""
             nonlocal pending
             if pending is None:
                 return
+            emit_dpacc(rnw=True, addr=dpmod.Dp.RDBUFF, capture=False)
             f = emit_dpacc(rnw=True, addr=dpmod.Dp.RDBUFF, capture=True)
             result_shifts.append((f, pending[0], pending[1]))
             pending = None
@@ -340,10 +354,34 @@ class JtagDp(dpmod.Dp):
         # End-of-batch: drain any trailing pending read with RDBUFF.
         flush_pending_via_rdbuff()
 
+        # Always read CTRL/STAT at end of batch to surface AP errors
+        # that ACK'd OK at the wire (writes are fire-and-forget on
+        # this driver, so a write to a misconfigured / power-gated
+        # region can fault silently and only show up as STICKYERR).
+        # Same trailing-shift pattern: CTRL/STAT read triggers the
+        # fetch; the next idempotent DP read's TDO carries the
+        # CTRL/STAT value.
+        ctrlstat_select = (select & 0xFFFFFFF0) if select is not None else 0
+        if select != ctrlstat_select:
+            emit_dpacc(rnw=False, addr=dpmod.Dp.SELECT,
+                       data=ctrlstat_select, capture=False)
+            select = ctrlstat_select
+        emit_dpacc(rnw=True, addr=dpmod.Dp.CTRL_STAT, capture=False)
+        ctrlstat_data_f = emit_dpacc(rnw=True, addr=dpmod.Dp.RDBUFF,
+                                     capture=True)
+
         self._select = select
 
         if shift_futures:
             await asyncio.gather(*shift_futures)
+
+        # Inspect CTRL/STAT before resolving anything — a sticky error
+        # invalidates everything that came after it in the batch.
+        ack, ctrlstat = _Wire.unpack(ctrlstat_data_f.result())
+        sticky_mask = (dpmod.Dp.STICKYERR | dpmod.Dp.STICKYORUN
+                       | dpmod.Dp.WDATAERR)
+        sticky = ctrlstat & sticky_mask if ack in (
+            _Wire.ACK_OK_FAULT, _Wire.ACK_V1_OK) else 0
 
         # Resolve user futures from the shifts that carry their
         # responses. WAIT triggers an inline wire-level retry; OK /
@@ -358,6 +396,19 @@ class JtagDp(dpmod.Dp):
                 await self._retry_on_wait(user_f, op)
             else:
                 self._resolve_response(user_f, ack, data)
+
+        if sticky:
+            self.logger.warning(
+                "DP CTRL/STAT sticky bits set: 0x%08x — clearing via ABORT",
+                ctrlstat)
+            # ABORT to clear sticky state; subsequent batches have a
+            # clean slate. Posted via the DP's own batcher so it goes
+            # out as part of the next flush; we don't await it here
+            # (the user's batch is already done).
+            self.post(dpmod.Abort(dpmod.Dp.ABORT_ALL))
+            raise dpmod.DpAccessFailure(
+                f"AP transaction faulted (CTRL/STAT=0x{ctrlstat:08x}, "
+                f"sticky={sticky:#x})")
 
     async def _retry_on_wait(self, user_f: asyncio.Future, op) -> None:
         """Inline wire-level retry for an op whose pipelined response

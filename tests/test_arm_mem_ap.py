@@ -294,15 +294,19 @@ class TestCsw_Tar_Caching:
 
     @pytest.mark.asyncio
     async def test_within_1kb_segment_no_extra_tar_writes(self):
-        # Read32 at 0x10FC then 0x1100 — both within [0x1000, 0x13FF],
-        # auto-inc handles the address change in hardware.
+        # Within a single batch, sequential reads inside a 1 KiB
+        # segment ride hardware auto-inc — TAR is written only at
+        # the start. (Cross-batch caching is intentionally disabled
+        # in MemAp.flush_ops, so this only holds intra-batch.)
+        import asyncio
         dp = RecordingDp(ap_base=0)
         dp.install_word(0x10FC, 0xaaaaaaaa)
         dp.install_word(0x1100, 0xbbbbbbbb)
         ap = _make_memap(dp)
 
-        v1 = await ap.read32(0x10FC)
-        v2 = await ap.read32(0x1100)
+        f1 = ap.read32(0x10FC)
+        f2 = ap.read32(0x1100)
+        v1, v2 = await asyncio.gather(f1, f2)
 
         assert v1 == 0xaaaaaaaa
         assert v2 == 0xbbbbbbbb
