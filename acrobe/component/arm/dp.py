@@ -456,10 +456,14 @@ class Dp(Batcher, Node):
         1. **TARGETID** (DPv2+) when populated. TARGETID's bit[0] is
            RES1 in spec, so a value with bit 0 cleared indicates the
            manufacturer didn't populate it — fall through.
-        2. **Root ROM Table PIDR** discovered under any MEM-AP child.
-           This is the legacy place where chip identity has lived
-           since ADIv5.0 and is still where some manufacturers keep
-           it even on DPv2+ hardware.
+        2. **Root ROM Table PIDR**. The topmost ROM Table reachable
+           from the DP is the legacy place where chip identity has
+           lived since ADIv5.0 and is still where some manufacturers
+           keep it even on DPv2+ hardware. The DP's subtree shape
+           differs by ADI version — on ADIv5 the ROM Table sits
+           under a MEM-AP child of the DP, on ADIv6 it sits directly
+           under the DP via the BASEPTR0 walk — so we let
+           ``children_of_class`` find it regardless.
 
         Returns ``None`` when neither source is available — typical
         only on chips that fail discovery entirely or have an empty
@@ -473,24 +477,20 @@ class Dp(Batcher, Node):
                 source="TARGETID",
             )
 
-        # 2. Root ROM Table PIDR. Look at each AP child and its first
-        # discovered child (typically the ROM Table at AP.BASE).
-        # Lazy imports avoid a circular dependency at module-load.
-        from .ap import Ap
-        from .coresight.model import MemoryMappedComponent
+        # 2. First ROM Table in the DP's subtree. ``children_of_class``
+        # walks pre-order DFS, so the topmost ROM Table comes first —
+        # matches what "root ROM Table" means on either ADI version:
+        # the AP-mediated ROM on ADIv5, the BASEPTR0 ROM on ADIv6.
+        # Lazy import avoids a module-load circular dep.
+        from .coresight.rom_table import RomTable
 
-        for ap in self._children:
-            if not isinstance(ap, Ap):
+        for rt in self.children_of_class(RomTable):
+            if rt.cidr_class is None:
                 continue
-            for grandchild in ap._children:
-                if not isinstance(grandchild, MemoryMappedComponent):
-                    continue
-                if grandchild.cidr_class is None:
-                    continue
-                return ChipId(
-                    partid=grandchild.partid,
-                    source=f"ROMTABLE@0x{grandchild.base:x}",
-                )
+            return ChipId(
+                partid=rt.partid,
+                source=f"ROMTABLE@0x{rt.base:x}",
+            )
 
         return None
 

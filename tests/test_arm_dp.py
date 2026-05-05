@@ -147,13 +147,16 @@ class TestChipId:
         d.targetid = None
         assert d.chip_id() is None
 
-    def test_falls_back_to_rom_table_partid(self):
+    def test_falls_back_to_rom_table_partid_adiv5(self):
         # No usable TARGETID; an AP child has a discovered ROM Table
-        # with a known PartId. chip_id() should return that.
+        # (ADIv5 layout: ROM Table sits under a MEM-AP that's a direct
+        # child of the DP). chip_id() should walk to it and return
+        # its PartId.
         from acrobe.component.arm.ap import Ap
         from acrobe.component.arm.coresight.model import (
-            ComponentIds, DevArch, MemoryMappedComponent, PartId,
+            ComponentIds, MemoryMappedComponent, PartId,
         )
+        from acrobe.component.arm.coresight.rom_table import RomTable
 
         d = Dp("t")
         d.targetid = None  # no TARGETID
@@ -165,7 +168,7 @@ class TestChipId:
             cmod=0, rev_and=0, size_log2=0,
             devarch=None, devtype=None, devid=None,
         )
-        rom = MemoryMappedComponent(bus=None, base=0x80000000, ids=ids)
+        rom = RomTable(bus=None, base=0x80000000, ids=ids)
         ap = Ap(dp=d, base=1 << 24, idr=0x04770002)
         ap._child_attach(rom)
         d._child_attach(ap)
@@ -178,12 +181,41 @@ class TestChipId:
         assert chip.part_no == 0x4A9
         assert chip.revision == 2
 
+    def test_falls_back_to_rom_table_partid_adiv6(self):
+        # ADIv6 layout: the top-level ROM Table is a *direct* child
+        # of the DP (BASEPTR0-rooted). chip_id() must reach it via
+        # subtree walk just as it reaches the AP-mediated case above.
+        from acrobe.component.arm.coresight.model import (
+            ComponentIds, MemoryMappedComponent, PartId,
+        )
+        from acrobe.component.arm.coresight.rom_table import RomTable
+
+        d = Dp("t")
+        d.targetid = None
+
+        ids = ComponentIds(
+            cidr_class=MemoryMappedComponent.CLASS_CORESIGHT,
+            partid=PartId(jep106_bank=4, jep106_id=0x3B,
+                          part_no=0xBEEF, revision=1),
+            cmod=0, rev_and=0, size_log2=0,
+            devarch=None, devtype=None, devid=0,
+        )
+        rom = RomTable(bus=None, base=0, ids=ids)
+        d._child_attach(rom)
+
+        chip = d.chip_id()
+        assert chip is not None
+        assert chip.source.startswith("ROMTABLE@")
+        assert chip.part_no == 0xBEEF
+        assert chip.revision == 1
+
     def test_targetid_wins_over_romtable(self):
         # When both are present, TARGETID is preferred.
         from acrobe.component.arm.ap import Ap
         from acrobe.component.arm.coresight.model import (
             ComponentIds, MemoryMappedComponent, PartId,
         )
+        from acrobe.component.arm.coresight.rom_table import RomTable
 
         d = Dp("t")
         d.targetid = (0x1 << 28) | (0x5678 << 12) | (0x23B << 1) | 0x1
@@ -194,7 +226,7 @@ class TestChipId:
             cmod=0, rev_and=0, size_log2=0,
             devarch=None, devtype=None, devid=None,
         )
-        rom = MemoryMappedComponent(bus=None, base=0x80000000, ids=ids)
+        rom = RomTable(bus=None, base=0x80000000, ids=ids)
         ap = Ap(dp=d, base=0)
         ap._child_attach(rom)
         d._child_attach(ap)
