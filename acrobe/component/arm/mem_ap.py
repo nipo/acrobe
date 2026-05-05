@@ -42,34 +42,46 @@ from .coresight.model import (
 class Read8:
     addr: int
 
+    def __repr__(self):
+        return f"Read8({self.addr:#x})"
 
 @dataclass(frozen=True)
 class Read16:
     addr: int
 
+    def __repr__(self):
+        return f"Read16({self.addr:#x})"
 
 @dataclass(frozen=True)
 class Read32:
     addr: int
 
+    def __repr__(self):
+        return f"Read32({self.addr:#x})"
 
 @dataclass(frozen=True)
 class Write8:
     addr: int
     data: int
 
+    def __repr__(self):
+        return f"Write8({self.addr:#x}, {self.data:#04x})"
 
 @dataclass(frozen=True)
 class Write16:
     addr: int
     data: int
 
+    def __repr__(self):
+        return f"Write16({self.addr:#x}, {self.data:#06x})"
 
 @dataclass(frozen=True)
 class Write32:
     addr: int
     data: int
 
+    def __repr__(self):
+        return f"Write32({self.addr:#x}, {self.data:#010x})"
 
 # --- MEM-AP --------------------------------------------------------
 

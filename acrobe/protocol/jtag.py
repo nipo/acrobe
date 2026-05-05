@@ -47,18 +47,26 @@ class Shift:
     tdi: BitString
     read_tdo: bool = True
 
+    def __repr__(self):
+        tdi = repr(self.tdi) if self.tdi is not None else '-'
+        no_tdo = ', notdo' if not self.read_tdo else ''
+        return f"Shift({tdi}{no_tdo})"
 
 @wire.op(CAPTURE_DR_UUID)
 @dataclass(frozen=True)
 class CaptureDr:
     """Transition FSM to Capture-DR."""
 
+    def __repr__(self):
+        return f"CaptureDr()"
 
 @wire.op(CAPTURE_IR_UUID)
 @dataclass(frozen=True)
 class CaptureIr:
     """Transition FSM to Capture-IR."""
 
+    def __repr__(self):
+        return f"CaptureIr()"
 
 @wire.op(RESET_UUID)
 @dataclass(frozen=True)
@@ -71,6 +79,8 @@ class Reset:
     def tms(self) -> BitString:
         return BitString(-1, max(self.count, 5))
 
+    def __repr__(self):
+        return f"Reset({self.count})"
 
 @wire.op(RUN_UUID)
 @dataclass(frozen=True)
@@ -78,6 +88,9 @@ class Run:
     """Run TCK cycles in Run-Test/Idle."""
 
     cycles: int
+
+    def __repr__(self):
+        return f"Run({self.cycles})"
 
 
 # Class-level constant for SwdToJtag — the TMS sequence is fixed.
@@ -94,6 +107,8 @@ class SwdToJtag:
     def tms(self) -> BitString:
         return _SWD_TO_JTAG_TMS
 
+    def __repr__(self):
+        return f"SwdToJtag()"
 
 # Internal Tap Operations
 # Not @wire-decorated yet — Chain/Tap aren't transportable in v1
@@ -108,16 +123,25 @@ class _TapShift:
     tdi: BitString | None
     read_tdo: bool
 
+    def __repr__(self):
+        ir = f"{self.ir_value:#x}" if self.ir_value is not None else '-'
+        tdi = repr(self.tdi) if self.tdi is not None else '-'
+        no_tdo = ', notdo' if not self.read_tdo else ''
+        return f"TapShift({ir}, {tdi}{no_tdo})"
 
 @dataclass(frozen=True)
 class _TapRun:
     cycles: int
 
+    def __repr__(self):
+        return f"TapRun({self.cycles})"
 
 @dataclass(frozen=True)
 class _TapIrStatus:
     """No fields — purely a marker requesting an IR-status capture."""
 
+    def __repr__(self):
+        return f"TapIrStatus()"
 
 # Tap → parent submission
 
@@ -700,7 +724,7 @@ class Chain(Batcher, Node):
         posted to the JtagInterface parent. Resolves each TapOp's
         future once the bit-level work completes.
         """
-        self.logger.protocol("Chain batch: %s", [top for top, _ in batch])
+        #self.logger.protocol("Chain batch: %s", [top for top, _ in batch])
 
         if self._parent is None:
             raise RuntimeError(f"Chain {self.name!r} has no parent to forward to")

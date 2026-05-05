@@ -115,7 +115,7 @@ class JtagMpsse(jtag.JtagInterface):
 
     async def flush_ops(self, batch):
         """Translate JTAG operations to MPSSE and execute."""
-        self.logger.log(5, "JTAG batch: %s", [op for op, _ in batch])
+        #self.logger.log(5, "JTAG batch: %s", [op for op, _ in batch])
         mpsse_ops = []
         # Track Shift ops that need TDO extraction:
         # (batch_index, mpsse_start_index, mpsse_end_index)

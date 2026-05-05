@@ -35,7 +35,7 @@ class BitStringBase(ABC):
     def __repr__(self):
         if len(self) > 1024:
             return "BitString([...], %d)" % len(self)
-        return "BitString(%r, %d)" % (self.data, len(self))
+        return "BitString(%s, %d)" % (self.data.hex(), len(self))
 
     def __hash__(self):
         return hash((len(self), bytes(self)))

@@ -44,6 +44,7 @@ class Batcher:
             batch = self._pending
             self._pending = []
             try:
+                self.logger.protocol("Batching %s", [top for top, _ in batch])
                 await self.flush_ops(batch)
             except Exception as exc:
                 import traceback

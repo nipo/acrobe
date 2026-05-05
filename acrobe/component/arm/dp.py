@@ -46,12 +46,16 @@ class ApRead:
     ADDR[31:4])."""
     addr: int
 
+    def __repr__(self):
+        return f"ApRead({self.addr:#x})"
 
 @dataclass(frozen=True)
 class ApWrite:
     addr: int
     data: int
 
+    def __repr__(self):
+        return f"ApWrite({self.addr:#x}, {self.data:#010x})"
 
 @dataclass(frozen=True)
 class DpRead:
@@ -59,12 +63,16 @@ class DpRead:
     DPBANKSEL (which is loaded into SELECT before access)."""
     addr: int
 
+    def __repr__(self):
+        return f"DpRead({self.addr:#x})"
 
 @dataclass(frozen=True)
 class DpWrite:
     addr: int
     data: int
 
+    def __repr__(self):
+        return f"DpWrite({self.addr:#x}, {self.data:#010x})"
 
 @dataclass(frozen=True)
 class Abort:
@@ -72,12 +80,16 @@ class Abort:
     dedicated ABORT IR; on SWD, lowered as a write to DP addr 0x00."""
     what: int = 0x1f
 
+    def __repr__(self):
+        return f"Abort({self.what:#x})"
 
 @dataclass(frozen=True)
 class Run:
     """Idle clock cycles between transactions."""
     cycles: int
 
+    def __repr__(self):
+        return f"Run({self.cycles})"
 
 @dataclass(frozen=True)
 class ChipId:
