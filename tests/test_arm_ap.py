@@ -52,18 +52,19 @@ class TestApIdrDecoding:
 
 class FakeDp(Dp):
     """A Dp whose ``flush_ops`` resolves ApRead via a programmable
-    register file. ApWrite is recorded; DP/Run/Abort ops are no-ops.
-    Lets Ap-level tests exercise reg_read/reg_write/discover without
-    a JTAG-DP / Chain stack."""
+    register file keyed on absolute system address. ApWrite is
+    recorded; DP/Run/Abort ops are no-ops. Lets Ap-level tests
+    exercise reg_read/reg_write/discover without a JTAG-DP / Chain
+    stack."""
 
     def __init__(self):
         super().__init__("fake")
-        self.ap_regs: dict[tuple[int, int], int] = {}
-        self.writes: list[tuple[int, int, int]] = []  # (ap, addr, data)
-        self.read_failure_at: tuple[int, int] | None = None
+        self.ap_regs: dict[int, int] = {}        # addr → value
+        self.writes: list[tuple[int, int]] = []  # (addr, data)
+        self.read_failure_at: int | None = None  # absolute addr
 
     def install_ap_reg(self, base: int, addr: int, value: int):
-        self.ap_regs[(base, addr)] = value
+        self.ap_regs[base + addr] = value
 
     async def flush_ops(self, batch):
         from acrobe.component.arm.dp import (
@@ -71,12 +72,12 @@ class FakeDp(Dp):
         )
         for op, future in batch:
             if isinstance(op, ApRead):
-                if self.read_failure_at == (op.ap, op.addr):
+                if self.read_failure_at == op.addr:
                     future.set_exception(DpAccessFailure("simulated"))
                     continue
-                future.set_result(self.ap_regs.get((op.ap, op.addr), 0))
+                future.set_result(self.ap_regs.get(op.addr, 0))
             elif isinstance(op, ApWrite):
-                self.writes.append((op.ap, op.addr, op.data))
+                self.writes.append((op.addr, op.data))
                 future.set_result(None)
             elif isinstance(op, (DpRead,)):
                 future.set_result(0)
@@ -163,7 +164,7 @@ class TestRegisterAccess:
         ap = Ap(dp=dp, base=0x01000000)
 
         await ap.reg_write(0x04, 0xc0ffee01)
-        assert (0x01000000, 0x04, 0xc0ffee01) in dp.writes
+        assert (0x01000004, 0xc0ffee01) in dp.writes
 
 
 # -- Discovery via Ap.db -------------------------------------------
@@ -234,7 +235,7 @@ class TestApDiscover:
     @pytest.mark.asyncio
     async def test_dp_access_failure_returns_none(self):
         dp = FakeDp()
-        dp.read_failure_at = (0x05000000, Ap.IDR)
+        dp.read_failure_at = 0x05000000 + Ap.IDR
         ap = await Ap.discover(dp, base=0x05000000)
         assert ap is None
 

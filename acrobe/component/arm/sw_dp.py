@@ -51,12 +51,14 @@ class SwDp(dpmod.Dp):
     def _select_for(self, op) -> int:
         """Compute the SELECT value needed to access ``op``'s register.
 
-        For AP ops, APSEL goes in bits[31:24] and APBANKSEL (== upper
-        nibble of the AP byte address) in bits[7:4]. For DP ops, only
-        DPBANKSEL (lower nibble) changes; APSEL/APBANKSEL stick."""
+        For AP ops, ``op.addr`` is the absolute system address, encoded
+        ADIv5-style as ``(apsel << 24) | reg_offset``. APSEL goes in
+        SELECT[31:24] and APBANKSEL (upper nibble of the register
+        offset) in SELECT[7:4]. For DP ops, only DPBANKSEL (lower
+        nibble) changes; APSEL/APBANKSEL stick."""
         cur = self._select
         if isinstance(op, (dpmod.ApRead, dpmod.ApWrite)):
-            apsel = (op.ap >> 24) & 0xff
+            apsel = (op.addr >> 24) & 0xff
             apbank = (op.addr >> 4) & 0xf
             return (apsel << 24) | (apbank << 4) | (cur & 0xf)
         return (cur & 0xFFFFFFF0) | ((op.addr >> 4) & 0xf)

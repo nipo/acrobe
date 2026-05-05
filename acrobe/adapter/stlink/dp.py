@@ -106,7 +106,7 @@ class StLinkDp(dpmod.Dp):
         Ap.db lookup. Empty / power-gated APSELs return None."""
         base = apsel << 24
         try:
-            idr = await self.post(dpmod.ApRead(ap=base, addr=Ap.IDR))
+            idr = await self.post(dpmod.ApRead(addr=base + Ap.IDR))
         except dpmod.DpAccessFailure as exc:
             self.logger.protocol(
                 "AP IDR read at APSEL %d failed: %s", apsel, exc)
@@ -170,18 +170,20 @@ class StLinkDp(dpmod.Dp):
                         protocol.DAP_PORT_DP, op.addr, op.data)
                     future.set_result(None)
                 elif isinstance(op, dpmod.ApRead):
-                    ap_num = (op.ap >> 24) & 0xFF
-                    if op.addr != Ap.IDR:
+                    ap_num = (op.addr >> 24) & 0xFF
+                    reg_addr = op.addr & 0x00FFFFFF
+                    if reg_addr != Ap.IDR:
                         await self._ensure_ap_open(ap_num)
                     val = await self._transport.read_dap_reg(
-                        ap_num, op.addr)
+                        ap_num, reg_addr)
                     future.set_result(val)
                 elif isinstance(op, dpmod.ApWrite):
-                    ap_num = (op.ap >> 24) & 0xFF
-                    if op.addr != Ap.IDR:
+                    ap_num = (op.addr >> 24) & 0xFF
+                    reg_addr = op.addr & 0x00FFFFFF
+                    if reg_addr != Ap.IDR:
                         await self._ensure_ap_open(ap_num)
                     await self._transport.write_dap_reg(
-                        ap_num, op.addr, op.data)
+                        ap_num, reg_addr, op.data)
                     future.set_result(None)
                 elif isinstance(op, dpmod.Abort):
                     # ST-Link manages sticky-error state on its own.

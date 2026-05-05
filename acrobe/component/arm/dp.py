@@ -33,16 +33,22 @@ from ...part_id import PartId
 
 @dataclass(frozen=True)
 class ApRead:
-    """Read AP register. ``ap`` is the AP base address (ADIv6 view;
-    ADIv5 indices fall on ``index << 24`` boundaries). ``addr`` is the
-    AP register byte offset; upper nibble selects APBANKSEL."""
-    ap: int
+    """Read a 32-bit register at an absolute system address.
+
+    ADIv6 model carried through to ADIv5: in ADIv6 the DP exposes a
+    flat system address space and APs are 4 KB regions inside it;
+    each `ApRead(addr)` is one APACC at that address. ADIv5's
+    APSEL+APBANKSEL+register-offset retrofits onto the same model:
+    callers compose ``(apsel << 24) | reg_offset``, which is exactly
+    what an ADIv5 SELECT register needs to load. The DP's
+    ``_select_for`` then extracts the right SELECT view per protocol
+    (legacy APSEL/APBANKSEL/DPBANKSEL split, or ADIv6 unified
+    ADDR[31:4])."""
     addr: int
 
 
 @dataclass(frozen=True)
 class ApWrite:
-    ap: int
     addr: int
     data: int
 

@@ -68,14 +68,16 @@ class RecordingDp(Dp):
         for op, future in batch:
             self.posted.append(op)
             if isinstance(op, ApWrite):
-                if op.ap != self.ap_base:
+                # Absolute address → AP register offset within ap_base.
+                if (op.addr & ~0xFFF) != self.ap_base:
                     future.set_result(None)
                     continue
-                if op.addr == MemAp.CSW:
+                reg = op.addr - self.ap_base
+                if reg == MemAp.CSW:
                     self._csw = op.data
-                elif op.addr == MemAp.TAR_LO:
+                elif reg == MemAp.TAR_LO:
                     self._tar = op.data
-                elif op.addr == MemAp.DRW:
+                elif reg == MemAp.DRW:
                     # Combine partial-byte writes with what's already
                     # in memory at TAR.
                     size_bits = self._size_in_bits()
@@ -87,14 +89,15 @@ class RecordingDp(Dp):
                     self._auto_increment()
                 future.set_result(None)
             elif isinstance(op, ApRead):
-                if op.ap != self.ap_base:
+                if (op.addr & ~0xFFF) != self.ap_base:
                     future.set_result(0)
                     continue
-                if op.addr == MemAp.CSW:
+                reg = op.addr - self.ap_base
+                if reg == MemAp.CSW:
                     future.set_result(self._csw)
-                elif op.addr == MemAp.TAR_LO:
+                elif reg == MemAp.TAR_LO:
                     future.set_result(self._tar)
-                elif op.addr == MemAp.DRW:
+                elif reg == MemAp.DRW:
                     val = self.get_word(self._tar)
                     future.set_result(val)
                     self._auto_increment()

@@ -8,7 +8,8 @@ from acrobe.component.arm.dp import (
     Abort, ApRead, ApWrite, Dp, DpAccessFailure, DpRead, DpWrite, Run,
 )
 from acrobe.component.arm.jtag_dp import (
-    JTAG_DP_IDCODES, JtagDp, JtagDpTap, _Wire,
+    JTAG_DP_IDCODES, JTAG_DP_V3_IDCODES, JtagDp, JtagDpTap, JtagDpV3Tap,
+    _Wire,
 )
 from acrobe.protocol.jtag import (
     Chain, JtagInterface, Reset, Run as JtagRun, Shift, CaptureDr,
@@ -62,12 +63,12 @@ class RecordingDpTap(JtagDpTap):
                 future.set_result(None)
 
 
-def _make_dp() -> tuple[RecordingDpTap, JtagDp]:
+def _make_dp(jtag_protocol_version: int = 0) -> tuple[RecordingDpTap, JtagDp]:
     """Build a recording tap with an attached JtagDp child, both
     detached from any chain. The DP is not started — tests post ops
     directly to exercise flush_ops in isolation."""
     tap = RecordingDpTap()
-    dp = JtagDp()
+    dp = JtagDp(jtag_protocol_version=jtag_protocol_version)
     tap._child_attach(dp)
     return tap, dp
 
@@ -87,6 +88,17 @@ class TestTapDbRegistration:
         # 0x4BA00477 should still hit the 0x0BA00477 registration.
         tap = Tap.db.call(0x4BA00477, idcode=0x4BA00477, irlen=4)
         assert isinstance(tap, JtagDpTap)
+
+    def test_v3_idcode_resolves_to_v3_tap(self):
+        # 0x_BA06477 (Agilex 5 HPS, observed with revision=4) routes
+        # to JtagDpV3Tap and carries protocol-v1 ACK semantics.
+        for idcode in JTAG_DP_V3_IDCODES:
+            tap = Tap.db.call(idcode, idcode=idcode, irlen=4)
+            assert isinstance(tap, JtagDpV3Tap)
+            assert tap.JTAG_PROTOCOL_VERSION == 1
+        # And revision masking still applies.
+        tap = Tap.db.call(0x4BA06477, idcode=0x4BA06477, irlen=4)
+        assert isinstance(tap, JtagDpV3Tap)
 
 
 # -- Wire packing ---------------------------------------------------
@@ -161,8 +173,8 @@ class TestApReadPipelining:
         tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0xaaaa1111)  # shift#3 = read#1
         tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0xbbbb2222)  # shift#4 = read#2
 
-        f1 = dp.post(ApRead(ap=0, addr=0x00))
-        f2 = dp.post(ApRead(ap=0, addr=0x00))
+        f1 = dp.post(ApRead(addr=0x00))
+        f2 = dp.post(ApRead(addr=0x00))
 
         v1 = await f1
         v2 = await f2
@@ -185,8 +197,8 @@ class TestApReadPipelining:
         tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0)            # shift#2 garbage
         tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0x12345678)  # shift#3 (write) = read's response
 
-        f1 = dp.post(ApRead(ap=0, addr=0x00))
-        f2 = dp.post(ApWrite(ap=0, addr=0x04, data=0xcafebabe))
+        f1 = dp.post(ApRead(addr=0x00))
+        f2 = dp.post(ApWrite(addr=0x04, data=0xcafebabe))
 
         assert await f1 == 0x12345678
         assert await f2 is None
@@ -243,10 +255,10 @@ class TestSelectCaching:
         for _ in range(8):
             tap.queue_response(_Wire.ACK_OK_FAULT, 0)
 
-        await dp.post(ApRead(ap=0, addr=0))
+        await dp.post(ApRead(addr=0))
         n_after_first = len(tap.shifts)
 
-        await dp.post(ApRead(ap=1 << 24, addr=0))
+        await dp.post(ApRead(addr=1 << 24))
         # New AP base: SELECT(W) + APACC-read(R) + RDBUFF(R) = +3.
         assert len(tap.shifts) == n_after_first + 3
 
@@ -310,6 +322,54 @@ class TestAckErrors:
 
         with pytest.raises(DpAccessFailure, match="invalid ACK"):
             await dp.post(DpRead(Dp.CTRL_STAT))
+
+
+# -- Protocol-v1 (ADIv6 / DPv3) ACK decoding -----------------------
+
+class TestProtocolV1Ack:
+    """Wire-level layout (request/response) is identical between v0
+    and v1; only ACK semantics change. These tests exercise the v1
+    decoding path on an isolated JtagDp constructed with
+    ``jtag_protocol_version=1``."""
+
+    @pytest.mark.asyncio
+    async def test_ok_returns_data(self):
+        tap, dp = _make_dp(jtag_protocol_version=1)
+
+        # In v1, OK = 0b100. The first capture is garbage, the
+        # RDBUFF flush carries the real CTRL_STAT response.
+        tap.queue_response(ack=_Wire.ACK_V1_OK, data=0)
+        tap.queue_response(ack=_Wire.ACK_V1_OK, data=0xc0ffee01)
+
+        result = await dp.post(DpRead(Dp.CTRL_STAT))
+        assert result == 0xc0ffee01
+
+    @pytest.mark.asyncio
+    async def test_fault_raises(self):
+        tap, dp = _make_dp(jtag_protocol_version=1)
+
+        # In v1, 0b010 = FAULT (not OK). Returned data is UNKNOWN
+        # and must surface as DpAccessFailure.
+        tap.queue_response(ack=_Wire.ACK_V1_OK, data=0)
+        tap.queue_response(ack=_Wire.ACK_V1_FAULT, data=0)
+
+        with pytest.raises(DpAccessFailure, match="FAULT"):
+            await dp.post(DpRead(Dp.CTRL_STAT))
+
+    @pytest.mark.asyncio
+    async def test_v0_ok_encoding_is_invalid_under_v1(self):
+        # 0b010 means "OK" under v0 but "FAULT" under v1, so seeing
+        # it on a v1 DP is a fault — never silently treated as OK.
+        tap, dp = _make_dp(jtag_protocol_version=1)
+        tap.queue_response(ack=_Wire.ACK_V1_OK, data=0)
+        tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0xdeadbeef)
+
+        with pytest.raises(DpAccessFailure, match="FAULT"):
+            await dp.post(DpRead(Dp.CTRL_STAT))
+
+    def test_invalid_protocol_version_rejected(self):
+        with pytest.raises(ValueError):
+            JtagDp(jtag_protocol_version=2)
 
 
 # -- Integration via Chain + a full JTAG-DP simulator --------------

@@ -39,12 +39,28 @@ class _Wire:
         bits 34:3  data (32 bits, LSB first)
 
     Response layout (TDO, LSB first):
-        bits 2:0   ACK (010 = OK_OR_FAULT, 001 = WAIT)
+        bits 2:0   ACK
         bits 34:3  read data of the previously-shifted request
+
+    ACK encoding depends on the JTAG-DP protocol version (DPIDR.DPVER
+    selects, but the IDCODE alone tells us which encoding to use —
+    distinct part numbers per protocol version):
+
+      Protocol v0 (DPv0/v1/v2, ADIv5):
+        0b001 = WAIT, 0b010 = OK_OR_FAULT
+      Protocol v1 (DPv3, ADIv6):
+        0b001 = WAIT, 0b010 = FAULT, 0b100 = OK
     """
 
+    # Protocol v0 — also re-used as "any non-WAIT response" for callers
+    # that share v0/v1 bookkeeping (kept as class-level constants for
+    # legacy tests).
     ACK_OK_FAULT = 0b010
     ACK_WAIT     = 0b001
+
+    # Protocol v1 (ADIv6 / DPv3) split.
+    ACK_V1_OK    = 0b100
+    ACK_V1_FAULT = 0b010
 
     @staticmethod
     def pack(rnw: bool, addr: int, data: int = 0) -> int:
@@ -66,10 +82,20 @@ class JtagDpTap(Tap):
 
     Vendor-specific TAPs that share the JTAG-DP IDCODE pattern can
     subclass this and add their own instructions; the DP child still
-    operates the same."""
+    operates the same.
+
+    ``JTAG_PROTOCOL_VERSION`` selects the wire-level ACK encoding
+    used by the :class:`JtagDp` child:
+
+      * ``0`` — DPv0/v1/v2 (ADIv5). Default.
+      * ``1`` — DPv3 (ADIv6). See :class:`JtagDpV3Tap`.
+
+    IR opcodes, DR widths, and SELECT layout are identical between
+    the two — only the ACK decoding differs."""
 
     irlen = 4
     max_freq = 20e6
+    JTAG_PROTOCOL_VERSION = 0
 
     DPACC_DR  = Dr(35)
     APACC_DR  = Dr(35)
@@ -87,7 +113,28 @@ class JtagDpTap(Tap):
         super().__init__(idcode=idcode, irlen=irlen, name=name)
 
     async def start(self):
-        self.child_add(JtagDp())
+        self.child_add(JtagDp(jtag_protocol_version=self.JTAG_PROTOCOL_VERSION))
+
+
+class JtagDpV3Tap(JtagDpTap):
+    """JTAG-DP using JTAG protocol version 1 (DPv3 / ADIv6).
+
+    Wire-level differences from :class:`JtagDpTap`:
+
+      * ACK encoding: ``0b001=WAIT``, ``0b010=FAULT``, ``0b100=OK``
+        (versus protocol v0: ``0b001=WAIT``, ``0b010=OK_OR_FAULT``).
+      * IR opcodes, DR widths, and SELECT layout are identical.
+
+    ADIv6-specific behaviours that live above the wire (AP enumeration
+    via BASEPTR, APv2 register layout) are handled by the DP / AP
+    layers — not here."""
+
+    JTAG_PROTOCOL_VERSION = 1
+
+    def __init__(self, idcode=None, irlen=None, name=None):
+        if name is None:
+            name = "JTAG-DPv3"
+        super().__init__(idcode=idcode, irlen=irlen, name=name)
 
 
 # --- JTAG-DP IDCODE registrations ---------------------------------
@@ -103,10 +150,13 @@ class JtagDpTap(Tap):
 #   0x_BA02477  — JTAG-DPv2 (ADIv5 with multidrop)
 #
 # DPv3 (ADIv6) JTAG-DP uses "JTAG DP Protocol version 1" — different
-# OK/FAULT ACK encoding, different overrun semantics, and distinct
-# IDCODEs. It is NOT wire-compatible with this class. A separate
-# JtagDpV3Tap will register the DPv3 IDCODEs when ADIv6 hardware
-# support lands.
+# OK/FAULT ACK encoding from protocol v0. The IR opcodes, DR widths,
+# and SELECT layout are identical, so the JtagDpV3Tap subclass just
+# flips JTAG_PROTOCOL_VERSION; ADIv6-specific AP enumeration / APv2
+# register layout live above the wire (DP / AP layers).
+#
+# Known DPv3 JTAG-DP IDCODEs:
+#   0x_BA06477  — observed on Intel Agilex 5 HPS (Cortex-A55/A76).
 
 JTAG_DP_IDCODES = (
     0x0BA00477,
@@ -114,8 +164,15 @@ JTAG_DP_IDCODES = (
     0x0BA02477,
 )
 
+JTAG_DP_V3_IDCODES = (
+    0x0BA06477,
+)
+
 for _idcode in JTAG_DP_IDCODES:
     Tap.db.register(PartId.from_idcode(_idcode))(JtagDpTap)
+
+for _idcode in JTAG_DP_V3_IDCODES:
+    Tap.db.register(PartId.from_idcode(_idcode))(JtagDpV3Tap)
 
 
 # --- DP overlay ----------------------------------------------------
@@ -130,25 +187,30 @@ class JtagDp(dpmod.Dp):
     # WAITs.
     INTER_SHIFT_RUN = 8
 
-    def __init__(self, name: str = "dap"):
+    def __init__(self, name: str = "dap", jtag_protocol_version: int = 0):
         super().__init__(name)
         self._select: int | None = None  # cached SELECT value
+        if jtag_protocol_version not in (0, 1):
+            raise ValueError(
+                f"JTAG-DP protocol version must be 0 or 1, "
+                f"got {jtag_protocol_version!r}")
+        self._jtag_protocol_version = jtag_protocol_version
 
     def _select_for(self, op) -> int:
         """Compute the SELECT value needed for ``op``, using ADIv6's
         unified ADDR[31:4] view. SELECT[31:4] = ADDR[31:4],
         SELECT[3:0] = DPBANKSEL.
 
-        For an ADIv5 chip with AP base ``apsel << 24`` and register
-        offset ``r``, this produces SELECT = (apsel << 24) |
-        (r & 0xf0) | dpbank — byte-identical to the legacy ADIv5
-        APSEL/APBANKSEL/DPBANKSEL packing.
+        AP ops carry the absolute system address as ``op.addr``: for
+        ADIv6 that's the AP register's system address, and for ADIv5
+        the encoding ``(apsel << 24) | reg_offset`` lands the same
+        bits in SELECT (APSEL[31:24] | APBANKSEL[7:4] | DPBANKSEL).
 
-        SELECT1 (ADDR[63:32], DPv3+) is not handled here — slice 2
-        targets DPv0-v2 (ASIZE = 32)."""
+        SELECT1 (ADDR[63:32], DPv3 with ASIZE > 32) is not handled
+        here — current support is 32-bit address space only."""
         cur = 0 if self._select is None else self._select
         if isinstance(op, (dpmod.ApRead, dpmod.ApWrite)):
-            addr_high = ((op.ap + op.addr) & 0xFFFFFFF0)
+            addr_high = op.addr & 0xFFFFFFF0
             dpbank = cur & 0xf
             return addr_high | dpbank
         else:
@@ -270,11 +332,35 @@ class JtagDp(dpmod.Dp):
                 continue
             tdo = shift_f.result()
             ack, data = _Wire.unpack(tdo)
+            self._resolve_response(user_f, ack, data)
+
+    def _resolve_response(self, user_f: asyncio.Future,
+                          ack: int, data: int) -> None:
+        """Resolve ``user_f`` from the (ACK, data) carried by the shift
+        that piggybacked on the next request. Decoding depends on the
+        JTAG-DP protocol version selected at construction:
+
+          * v0 (ADIv5): 0b010 = OK_OR_FAULT (success), 0b001 = WAIT.
+          * v1 (ADIv6): 0b100 = OK,         0b010 = FAULT, 0b001 = WAIT.
+        """
+        if ack == _Wire.ACK_WAIT:
+            user_f.set_exception(dpmod.DpAccessFailure(
+                "JTAG-DP WAIT response (retry not yet implemented)"))
+            return
+
+        if self._jtag_protocol_version == 0:
             if ack == _Wire.ACK_OK_FAULT:
                 user_f.set_result(data)
-            elif ack == _Wire.ACK_WAIT:
+                return
+        else:  # v1 (ADIv6 / DPv3)
+            if ack == _Wire.ACK_V1_OK:
+                user_f.set_result(data)
+                return
+            if ack == _Wire.ACK_V1_FAULT:
                 user_f.set_exception(dpmod.DpAccessFailure(
-                    "JTAG-DP WAIT response (retry not yet implemented)"))
-            else:
-                user_f.set_exception(dpmod.DpAccessFailure(
-                    f"JTAG-DP invalid ACK 0b{ack:03b}"))
+                    "JTAG-DP FAULT response (check CTRL/STAT sticky bits)"))
+                return
+
+        user_f.set_exception(dpmod.DpAccessFailure(
+            f"JTAG-DP invalid ACK 0b{ack:03b} "
+            f"(protocol v{self._jtag_protocol_version})"))

@@ -164,11 +164,11 @@ class Ap(Node):
 
     def reg_read(self, addr: int):
         """Post an AP register read. Returns Future -> int."""
-        return self._dp.post(dpmod.ApRead(ap=self.base, addr=addr))
+        return self._dp.post(dpmod.ApRead(addr=self.base + addr))
 
     def reg_write(self, addr: int, data: int):
         """Post an AP register write. Returns Future -> None."""
-        return self._dp.post(dpmod.ApWrite(ap=self.base, addr=addr, data=data))
+        return self._dp.post(dpmod.ApWrite(addr=self.base + addr, data=data))
 
     # -- Discovery --------------------------------------------------
 
@@ -188,7 +188,7 @@ class Ap(Node):
           * Registered handler ``__init__`` raises → logged at warning
             level, falls back to a generic ``Ap`` so the AP still
             surfaces in enumeration with its IDR."""
-        idr_future = dp.post(dpmod.ApRead(ap=base, addr=cls.IDR))
+        idr_future = dp.post(dpmod.ApRead(addr=base + cls.IDR))
         try:
             idr = await idr_future
         except dpmod.DpAccessFailure as exc:

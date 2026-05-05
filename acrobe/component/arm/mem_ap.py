@@ -396,7 +396,7 @@ class MemAp(Ap, Batcher):
 
             if csw != new_csw:
                 ap_futures.append(self._dp.post(dpmod.ApWrite(
-                    ap=self.base, addr=self.CSW, data=new_csw)))
+                    addr=self.base + self.CSW, data=new_csw)))
                 csw = new_csw
                 # CSW change invalidates any auto-incremented TAR
                 # assumption — the AP's TAR isn't actually re-issued,
@@ -407,12 +407,13 @@ class MemAp(Ap, Batcher):
 
             if tar != op.addr:
                 ap_futures.append(self._dp.post(dpmod.ApWrite(
-                    ap=self.base, addr=self.TAR_LO, data=op.addr & 0xffffffff)))
+                    addr=self.base + self.TAR_LO,
+                    data=op.addr & 0xffffffff)))
                 tar = op.addr
 
             if isinstance(op, (Read8, Read16, Read32)):
                 drw_future = self._dp.post(dpmod.ApRead(
-                    ap=self.base, addr=self.DRW))
+                    addr=self.base + self.DRW))
                 ap_futures.append(drw_future)
                 read_results.append((op, user_future, drw_future))
             else:
@@ -420,7 +421,7 @@ class MemAp(Ap, Batcher):
                 shift = (op.addr & 3) * 8
                 lane_data = (op.data << shift) & 0xffffffff
                 ap_futures.append(self._dp.post(dpmod.ApWrite(
-                    ap=self.base, addr=self.DRW, data=lane_data)))
+                    addr=self.base + self.DRW, data=lane_data)))
                 user_future.set_result(None)
 
             # Auto-increment cached TAR. If we'd cross a 1KB segment,

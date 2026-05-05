@@ -15,12 +15,12 @@ class TestOpsAreFrozen:
     re-postable (i.e. usable across batches)."""
 
     def test_apread_immutable(self):
-        op = ApRead(ap=0, addr=0x0c)
+        op = ApRead(addr=0x0c)
         with pytest.raises(FrozenInstanceError):
             op.addr = 0x10
 
     def test_apwrite_immutable(self):
-        op = ApWrite(ap=0, addr=0, data=0)
+        op = ApWrite(addr=0, data=0)
         with pytest.raises(FrozenInstanceError):
             op.data = 1
 
@@ -46,17 +46,18 @@ class TestOpsAreFrozen:
 
     def test_no_result_field(self):
         # Frozen ops carry only inputs; results travel via futures.
-        assert not hasattr(ApRead(ap=0, addr=0), "data")
+        assert not hasattr(ApRead(addr=0), "data")
         assert not hasattr(DpRead(addr=0), "data")
 
     def test_value_equality(self):
-        assert ApRead(ap=0, addr=0x0c) == ApRead(ap=0, addr=0x0c)
+        assert ApRead(addr=0x0c) == ApRead(addr=0x0c)
         assert DpWrite(addr=0x04, data=1) == DpWrite(addr=0x04, data=1)
-        assert ApRead(ap=0, addr=0) != ApRead(ap=1, addr=0)
+        # ADIv5-style encoding: AP at apsel=0/1 puts apsel in addr[31:24].
+        assert ApRead(addr=0) != ApRead(addr=1 << 24)
 
     def test_hashable(self):
         # Hashability matters for using ops as dict keys in a lowering.
-        {ApRead(ap=0, addr=0): 1, DpRead(addr=0): 2}
+        {ApRead(addr=0): 1, DpRead(addr=0): 2}
 
 
 class TestAbortDefault:
