@@ -701,11 +701,20 @@ class MemApV2(MemoryMappedComponent, Batcher):
 
     # Byte-granular convenience helpers — the implementation only
     # depends on read{8,16,32} / write{8,16,32}, so we delegate.
+    # ``MemAp._byte_io`` is the byte-granular decomposer; it only
+    # touches ``self.read{8,16,32}``/``self.write{8,16,32}`` so it
+    # works with any object that exposes those — including a
+    # ``MemApV2`` which doesn't inherit from ``MemAp``. Bind the
+    # unbound method to keep one implementation.
     async def mem_read(self, addr: int, size: int) -> bytes:
-        return await MemAp.mem_read(self, addr, size)
+        if size == 0:
+            return b""
+        return await MemAp._byte_io(self, addr, size, data=None)
 
     async def mem_write(self, addr: int, data: bytes) -> None:
-        await MemAp.mem_write(self, addr, data)
+        if not data:
+            return
+        await MemAp._byte_io(self, addr, len(data), data=data)
 
     # -- Lowering ---------------------------------------------------
 
