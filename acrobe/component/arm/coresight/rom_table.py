@@ -77,6 +77,11 @@ class RomTable(MemoryMappedComponent):
             self.base, self.cidr_class, size * 8, self.partid.pretty())
         await self._walk(size)
 
+    # Width (in nibbles) used when formatting OFFSET/child addresses
+    # in entry-trace lines. Sized for 64-bit entries; 32-bit entries
+    # zero-extend in the same field, which keeps log columns aligned.
+    _LOG_ADDR_NIBBLES = 16
+
     async def _walk(self, entry_size: int):
         offset = 0
         while offset < self._ENTRY_AREA_END:
@@ -99,47 +104,54 @@ class RomTable(MemoryMappedComponent):
             present_bits = entry & 0x3
             powerid_valid = bool((entry >> 2) & 1)
             powerid = (entry >> 4) & 0x1f
+            child_offset = self._sign_extend_offset(entry, entry_size)
+            addr_size_bits = getattr(self._bus, "addr_size_bits", 64)
+            addr_mask = (1 << addr_size_bits) - 1
+            child_addr = (self.base + child_offset) & addr_mask
+
+            # State summary — short tag for log readability.
+            if present_bits == 0b00:
+                state = "abs"
+            elif present_bits == 0b11:
+                state = "ok"
+            else:
+                state = f"{present_bits}?"
+
+            # Single per-entry trace dump: raw value + every parsed
+            # field (per IHI0074F D2.4.4 / D3.4.4). On a 32-bit
+            # entry, the high address nibbles read as zero — we keep
+            # the wider format so 32-bit and 64-bit entries align in
+            # mixed logs.
+            self.logger.trace(
+                "ROM entry +0x%03x = 0x%0*x: %s "
+                "POWERID=0x%02x/VALID=%d "
+                "0x%0*x",
+                offset, entry_size * 2, entry, state,
+                powerid, powerid_valid,
+                self._LOG_ADDR_NIBBLES, child_addr)
 
             if present_bits == 0b00:
-                self.logger.trace(
-                    "ROM entry +0x%x = 0x%x: PRESENT=0 (not present, "
-                    "POWERIDVALID=%d POWERID=0x%x) — skipping",
-                    offset, entry, powerid_valid, powerid)
                 offset += entry_size
                 continue
             if present_bits != 0b11:
                 self.logger.warning(
-                    "ROM entry +0x%x = 0x%x: reserved PRESENT=0b%02b — "
-                    "skipping", offset, entry, present_bits)
+                    "ROM entry +0x%x: reserved PRESENT=0b%02b — skipping",
+                    offset, present_bits)
                 offset += entry_size
                 continue
-
-            child_offset = self._sign_extend_offset(entry, entry_size)
-            # Per spec, Component_n_Address = ROM_Base + (OFFSET << 12),
-            # taken modulo the bus's address-space size. Some chips leave
-            # stale non-zero bits in OFFSET[63:32] of 64-bit entries on
-            # 32-bit address spaces (RES0 violation); the wire-level path
-            # silently truncates, so the modulo here keeps our internal
-            # bookkeeping consistent with the actual access.
-            addr_size_bits = getattr(self._bus, "addr_size_bits", 64)
-            addr_mask = (1 << addr_size_bits) - 1
-            child_addr = (self.base + child_offset) & addr_mask
 
             # Spec D2.3.2 (Class 0x1) / D3.3.2 (Class 0x9): when
             # POWERIDVALID is set, the entry sits in a power domain
             # identified by POWERID and the debugger must request
             # power before the component is accessible. We don't yet
-            # drive the power Requester — surface the metadata at
+            # drive the power Requester — surface a one-liner at
             # info level so the operator can correlate WAIT/FAULT
-            # responses with gated domains.
+            # responses with gated domains without -vvvv.
             if powerid_valid:
                 self.logger.info(
                     "ROM entry +0x%x → 0x%x: POWERID=0x%x "
                     "(power-domain gated, requester not yet driven)",
                     offset, child_addr, powerid)
-            else:
-                self.logger.trace(
-                    "ROM entry +0x%x → 0x%x", offset, child_addr)
 
             await self._discover_child(child_addr)
             offset += entry_size
