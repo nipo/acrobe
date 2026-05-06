@@ -20,14 +20,11 @@ re-postable).
 from __future__ import annotations
 
 import asyncio
-
+import functools
 from ...bitstring import BitString
 from ...part_id import PartId
 from ...protocol.jtag import Dr, Instruction, Tap
 from . import dp as dpmod
-
-
-# --- 35-bit DPACC / APACC packing helpers --------------------------
 
 class _Wire:
     """Packing/unpacking for the 35-bit DR shift used by DPACC, APACC,
@@ -74,8 +71,9 @@ class _Wire:
         return ack, data
 
 
-# --- JTAG-DP TAP ---------------------------------------------------
-
+@Tap.db.register(PartId.from_idcode(0x0BA00477))
+@Tap.db.register(PartId.from_idcode(0x0BA01477))
+@Tap.db.register(PartId.from_idcode(0x0BA02477))
 class JtagDpTap(Tap):
     """JTAG-DP TAP. Owns the four JTAG-DP IR instructions and a
     :class:`JtagDp` child that exposes the DP/AP register space.
@@ -115,7 +113,7 @@ class JtagDpTap(Tap):
     async def start(self):
         self.child_add(JtagDp(jtag_protocol_version=self.JTAG_PROTOCOL_VERSION))
 
-
+@Tap.db.register(PartId.from_idcode(0x0BA06477))
 class JtagDpV3Tap(JtagDpTap):
     """JTAG-DP using JTAG protocol version 1 (DPv3 / ADIv6).
 
@@ -136,66 +134,199 @@ class JtagDpV3Tap(JtagDpTap):
             name = "JTAG-DPv3"
         super().__init__(idcode=idcode, irlen=irlen, name=name)
 
+class JtagDpLowerer:
+    """Object instantiated every time we need to lower a batch of DP
+    operations down to JTAG layer.
 
-# --- JTAG-DP IDCODE registrations ---------------------------------
-#
-# Tap.db's equality function masks the revision nibble (bits 31:28),
-# so we register one IDCODE per JEP106+part variant. Bits 27:12 are
-# the part number, bits 11:1 are JEDEC ID (with JEP106 bank in the
-# high bits), bit 0 is 1.
-#
-# Known JTAG-DP IDCODEs (ARM JEP106 = 0x23B, low half = 0x477):
-#   0x_BA00477  — JTAG-DPv0/v1 (ADIv5)
-#   0x_BA01477  — JTAG-DPv1 multidrop variant
-#   0x_BA02477  — JTAG-DPv2 (ADIv5 with multidrop)
-#
-# DPv3 (ADIv6) JTAG-DP uses "JTAG DP Protocol version 1" — different
-# OK/FAULT ACK encoding from protocol v0. The IR opcodes, DR widths,
-# and SELECT layout are identical, so the JtagDpV3Tap subclass just
-# flips JTAG_PROTOCOL_VERSION; ADIv6-specific AP enumeration / APv2
-# register layout live above the wire (DP / AP layers).
-#
-# Known DPv3 JTAG-DP IDCODEs:
-#   0x_BA06477  — observed on Intel Agilex 5 HPS (Cortex-A55/A76).
+    Keeps track of select and pending reads where data is attached to
+    subsequent DPACC or ACACC shifts.
+    """
+    
+    # Idle TCKs between consecutive APACC DR shifts.
+    INTER_AP_RUN = 8
 
-JTAG_DP_IDCODES = (
-    0x0BA00477,
-    0x0BA01477,
-    0x0BA02477,
-)
+    def __init__(self, version: int, tap: JtagDpTap):
+        self.version = version
+        self.tap = tap
 
-JTAG_DP_V3_IDCODES = (
-    0x0BA06477,
-)
+        self.last_select = None
 
-for _idcode in JTAG_DP_IDCODES:
-    Tap.db.register(PartId.from_idcode(_idcode))(JtagDpTap)
+        self.pending = None
 
-for _idcode in JTAG_DP_V3_IDCODES:
-    Tap.db.register(PartId.from_idcode(_idcode))(JtagDpV3Tap)
+    # Future handling
+        
+    def chain_completion(self, upper: asyncio.Future, lower: asyncio.Future):
+        """
+        Hook `lower` future done callback to resolve `upper`
+        """
+        lower.add_done_callback(functools.partial(self._completion_from_lower, upper))
 
+    def chain_data(self, upper: asyncio.Future, lower: asyncio.Future):
+        """Hook `lower` future done callback to resolve `upper` with
+        response data.
+        """
+        lower.add_done_callback(functools.partial(self._data_from_lower, upper))
+
+    def _completion_from_lower(self, upper: asyncio.Future, lower: asyncio.Future):
+        """
+        Actual implementation for chain_completion()
+        """
+        try:
+            upper.set_result(lower.result())
+        except Exception as e:
+            upper.set_exception(e)
+
+    def _data_from_lower(self, upper: asyncio.Future, lower: asyncio.Future):
+        """
+        Actual implementation for chain_data()
+        """
+        try:
+            tdo = lower.result()
+        except Exception as e:
+            upper.set_exception(e)
+            return
+        ack, data = _Wire.unpack(tdo)
+        if ack == _Wire.ACK_WAIT:
+            upper.set_exception(dpmod.DpAccessFailure("wait"))
+        elif (self.version == 0 and ack == _Wire.ACK_OK_FAULT) \
+             or ack == _Wire.ACK_V1_OK:
+            upper.set_result(data)
+        else:
+            upper.set_exception(dpmod.DpAccessFailure("fault"))
+
+    # Low-level shifts
+            
+    def dp_access(self, read: bool, address: int, data: int):
+        """
+        Low-level DPACC shift, no upper address update.
+        """
+
+        acc = self.tap.DPACC(_Wire.pack(read, address, data),
+                             read_tdo = self.pending is not None)
+        self.tap.run(42)
+        if self.pending:
+            self.chain_data(self.pending, acc)
+            self.pending = None
+
+    def ap_access(self, read: bool, address: int, data: int):
+        """
+        Low-level APACC shift, no upper address update.
+        """
+        lower = self.tap.APACC(_Wire.pack(read, address, data),
+                               read_tdo = self.pending is not None)
+#        self.tap.run(self.INTER_AP_RUN)
+        self.tap.run(42)
+        if self.pending:
+            self.chain_data(self.pending, lower)
+            self.pending = None
+
+    # Book keeping
+
+    def ap_select(self, address: int):
+        """
+        Change AP address higher bits.
+        Noop if not actually changing
+        """
+        address &= 0xfffffff0
+        self.select(address | ((self.last_select or 0) & 0xf))
+
+    def dp_select(self, address: int, read: bool):
+        """
+        Change DP address higher bits.
+        Noop if not actually changing
+        Noop if accessed register is present in all banks
+        """
+        dp_low = (address & 0xc)
+        if dp_low == dpmod.Dp.RDBUFF:
+            return
+        if not read and dp_low == dpmod.Dp.SELECT:
+            return
+        dp_bank = (address >> 4) & 0xf
+        self.select(dp_bank | ((self.last_select or 0) & 0xfffffff0))
+
+    def select(self, select) -> asyncio.Future | None:
+        """
+        Update select, may be a noop if not actually changing.
+        Will gather pending DP and AP accesses
+        """
+        if self.last_select == select:
+            return
+
+        self.last_select = select
+        self.dp_access(False, dpmod.Dp.SELECT, select)
+
+    def flush(self):
+        """
+        In pending AP and DP reads, get one
+        """
+        if self.pending:
+            self.dp_access(True, dpmod.Dp.RDBUFF, 0)
+
+    # Operations
+            
+    def run(self, op: dpmod.Run, pending: asyncio.Future):
+        """
+        Lowers one Run operation and chains completion to pending
+        """
+        self.chain_completion(pending, self.tap.run(op.cycles))
+            
+    def abort(self, op: dpmod.Abort, pending: asyncio.Future):
+        """
+        Lowers one Abort operation and chains completion to pending
+        """
+        # ABORT IR + 35-bit DR shift; data left-shifted by 3
+        # into the data field (RnW + addr bits are ignored).
+        self.chain_completion(pending, self.tap.ABORT_IR(op.what << 3, read_tdo=False))
+        self.tap.run(self.INTER_AP_RUN)
+
+    def dp_read_write(self, op, pending):
+        address = op.addr
+        read = isinstance(op, dpmod.DpRead)
+        data = 0 if read else op.data
+
+        self.dp_select(address, read)
+        self.dp_access(read, address, data)
+        self.pending = pending
+
+    def ap_read_write(self, op, pending):
+        address = op.addr
+        read = isinstance(op, dpmod.ApRead)
+        data = 0 if read else op.data
+
+        self.ap_select(address)
+        self.ap_access(read, address, data)
+        self.pending = pending
+        
+    def process(self, batch):
+        """
+        Perform the lowering for one batch
+        """
+        for op, result in batch:
+            if isinstance(op, dpmod.Run):
+                self.run(op, result)
+                continue
+
+            if isinstance(op, dpmod.Abort):
+                self.abort(op, result)
+                continue
+
+            if isinstance(op, (dpmod.ApRead, dpmod.ApWrite)):
+                self.ap_read_write(op, result)
+                continue
+
+            if isinstance(op, (dpmod.DpRead, dpmod.DpWrite)):
+                self.dp_read_write(op, result)
+                continue
+
+            result.set_exception(
+                TypeError(f"Unhandled DP op: {type(op).__name__}"))
+        self.flush()
 
 # --- DP overlay ----------------------------------------------------
 
 class JtagDp(dpmod.Dp):
     """ARM Debug Port over JTAG. Translates batched DP/AP ops to
     DPACC/APACC shifts on the parent :class:`JtagDpTap`."""
-
-    # Idle TCKs between consecutive DPACC/APACC DR shifts. JTAG-DP
-    # needs some time after Update-DR to perform the underlying access
-    # before the next Capture-DR; without this, every other access
-    # WAITs.
-    INTER_SHIFT_RUN = 8
-
-    # WAIT-retry parameters. When the chip returns ACK=WAIT for a
-    # pipelined read, we re-issue that op at the wire level up to
-    # ``MAX_WAIT_RETRIES`` times, separated by ``WAIT_RETRY_IDLE``
-    # idle TCKs each, before giving up with DpAccessFailure. The
-    # numbers are conservative — a real APB-mediated debug-fabric
-    # transaction shouldn't need more than a handful even on a
-    # heavily loaded chip.
-    MAX_WAIT_RETRIES = 16
-    WAIT_RETRY_IDLE = 32
 
     def __init__(self, name: str = "dap", jtag_protocol_version: int = 0):
         super().__init__(name)
@@ -205,302 +336,17 @@ class JtagDp(dpmod.Dp):
                 f"JTAG-DP protocol version must be 0 or 1, "
                 f"got {jtag_protocol_version!r}")
         self._jtag_protocol_version = jtag_protocol_version
-
-    def _select_for(self, op) -> int:
-        """Compute the SELECT value needed for ``op``, using ADIv6's
-        unified ADDR[31:4] view. SELECT[31:4] = ADDR[31:4],
-        SELECT[3:0] = DPBANKSEL.
-
-        AP ops carry the absolute system address as ``op.addr``: for
-        ADIv6 that's the AP register's system address, and for ADIv5
-        the encoding ``(apsel << 24) | reg_offset`` lands the same
-        bits in SELECT (APSEL[31:24] | APBANKSEL[7:4] | DPBANKSEL).
-
-        SELECT1 (ADDR[63:32], DPv3 with ASIZE > 32) is not handled
-        here — current support is 32-bit address space only."""
-        cur = 0 if self._select is None else self._select
-        if isinstance(op, (dpmod.ApRead, dpmod.ApWrite)):
-            addr_high = op.addr & 0xFFFFFFF0
-            dpbank = cur & 0xf
-            return addr_high | dpbank
-        else:
-            addr_high = cur & 0xFFFFFFF0
-            dpbank = (op.addr >> 4) & 0xf
-            return addr_high | dpbank
-
+        
     async def flush_ops(self, batch):
-        tap = self._parent
-        if tap is None or not isinstance(tap, JtagDpTap):
-            raise RuntimeError(
-                f"JtagDp {self.name!r}: parent must be a JtagDpTap, got {tap!r}")
+        """Lower a DP/AP batch to JTAG-DP wire shifts."""
 
-        # All bit-level shift futures (we await them all together).
-        shift_futures: list[asyncio.Future] = []
-        # Triples of (shift_future_carrying_response, user_future_to_resolve,
-        # original_op_or_None). The op is kept so that, on a WAIT response,
-        # we can re-issue it inline at the wire level. ``None`` for the
-        # RDBUFF flush path triggered by SELECT changes — by definition
-        # there's no separate op driving that one.
-        result_shifts: list[
-            tuple[asyncio.Future, asyncio.Future, object | None]] = []
-        # The (user_future, op) whose response is in flight (to be
-        # picked up by the trailing-read pipeline at end of batch).
-        pending: tuple[asyncio.Future, object] | None = None
+        try:
+            JtagDpLowerer(self._jtag_protocol_version, self._parent).process(batch)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
 
-        # Always re-establish SELECT at start of batch — interleaved
-        # batches from any other DP / AP user may have moved it. The
-        # ``self._select`` cache is reset here so the first op's
-        # ``_select_for`` comparison forces a SELECT write.
-        self._select = None
-        select = None
+        await asyncio.gather(*[r for (_,r) in batch])
 
-        def emit_idle():
-            shift_futures.append(tap.run(self.INTER_SHIFT_RUN))
-
-        def emit_dpacc(rnw: bool, addr: int, data: int = 0,
-                       capture: bool = True) -> asyncio.Future:
-            tdi = BitString(_Wire.pack(rnw, addr, data), 35)
-            f = tap.DPACC(tdi, read_tdo=capture)
-            shift_futures.append(f)
-            emit_idle()
-            return f
-
-        def emit_apacc(rnw: bool, addr: int, data: int = 0,
-                       capture: bool = True) -> asyncio.Future:
-            tdi = BitString(_Wire.pack(rnw, addr, data), 35)
-            f = tap.APACC(tdi, read_tdo=capture)
-            shift_futures.append(f)
-            emit_idle()
-            return f
-
-        def flush_pending_via_rdbuff():
-            """Drain a pending AP/DP read at the end of a sequence.
-            Per JTAG-DP wire spec the result of a posted read is
-            returned on the *next* transfer — for the trailing read
-            in a batch that means we issue an RDBUFF DP read to
-            *trigger* fetching the buffered data, then a second
-            idempotent DPACC read whose TDO data field carries the
-            actual value. Capturing the RDBUFF shift's own TDO would
-            give us the response of the prior op, not the buffered
-            AP read result."""
-            nonlocal pending
-            if pending is None:
-                return
-            emit_dpacc(rnw=True, addr=dpmod.Dp.RDBUFF, capture=False)
-            f = emit_dpacc(rnw=True, addr=dpmod.Dp.RDBUFF, capture=True)
-            result_shifts.append((f, pending[0], pending[1]))
-            pending = None
-
-        for op, user_future in batch:
-            if isinstance(op, dpmod.Run):
-                shift_futures.append(tap.run(op.cycles))
-                user_future.set_result(None)
-                continue
-
-            if isinstance(op, dpmod.Abort):
-                # ABORT IR + 35-bit DR shift; data is left-shifted
-                # by 3 to land in the data field (RnW + addr fields
-                # are ignored by the abort path).
-                tdi = BitString((op.what & 0xffffffff) << 3, 35)
-                f = tap.ABORT_IR(tdi, read_tdo=False)
-                shift_futures.append(f)
-                emit_idle()
-                user_future.set_result(None)
-                continue
-
-            new_select = self._select_for(op)
-            if select != new_select:
-                # SELECT-write breaks the AP-read pipeline, so flush
-                # any pending response first.
-                flush_pending_via_rdbuff()
-                emit_dpacc(rnw=False, addr=dpmod.Dp.SELECT,
-                           data=new_select, capture=False)
-                select = new_select
-
-            wire_addr = op.addr & 0xc
-
-            if isinstance(op, dpmod.ApRead):
-                f = emit_apacc(rnw=True, addr=wire_addr, capture=True)
-            elif isinstance(op, dpmod.ApWrite):
-                f = emit_apacc(rnw=False, addr=wire_addr,
-                               data=op.data, capture=True)
-            elif isinstance(op, dpmod.DpRead):
-                f = emit_dpacc(rnw=True, addr=wire_addr, capture=True)
-            elif isinstance(op, dpmod.DpWrite):
-                f = emit_dpacc(rnw=False, addr=wire_addr,
-                               data=op.data, capture=True)
-            else:
-                user_future.set_exception(
-                    TypeError(f"Unhandled DP op: {type(op).__name__}"))
-                continue
-
-            # The shift we just emitted carries the TDO of the
-            # *previous* request — hand it to the pending user future.
-            if pending is not None:
-                result_shifts.append((f, pending[0], pending[1]))
-                pending = None
-
-            # If the current op is a read, mark its (user_future, op)
-            # as the next pending pair: its data will arrive on the
-            # next shift's TDO. Writes resolve immediately — their
-            # ACK is not currently propagated back, so a write that
-            # WAITs goes undetected (a known limitation; reads are
-            # what surface in practice).
-            if isinstance(op, (dpmod.ApRead, dpmod.DpRead)):
-                pending = (user_future, op)
-            else:
-                user_future.set_result(None)
-
-        # End-of-batch: drain any trailing pending read with RDBUFF.
-        flush_pending_via_rdbuff()
-
-        # Always read CTRL/STAT at end of batch to surface AP errors
-        # that ACK'd OK at the wire (writes are fire-and-forget on
-        # this driver, so a write to a misconfigured / power-gated
-        # region can fault silently and only show up as STICKYERR).
-        # Same trailing-shift pattern: CTRL/STAT read triggers the
-        # fetch; the next idempotent DP read's TDO carries the
-        # CTRL/STAT value.
-        ctrlstat_select = (select & 0xFFFFFFF0) if select is not None else 0
-        if select != ctrlstat_select:
-            emit_dpacc(rnw=False, addr=dpmod.Dp.SELECT,
-                       data=ctrlstat_select, capture=False)
-            select = ctrlstat_select
-        emit_dpacc(rnw=True, addr=dpmod.Dp.CTRL_STAT, capture=False)
-        ctrlstat_data_f = emit_dpacc(rnw=True, addr=dpmod.Dp.RDBUFF,
-                                     capture=True)
-
-        self._select = select
-
-        if shift_futures:
-            await asyncio.gather(*shift_futures)
-
-        # Inspect CTRL/STAT before resolving anything — a sticky error
-        # invalidates everything that came after it in the batch.
-        ack, ctrlstat = _Wire.unpack(ctrlstat_data_f.result())
-        sticky_mask = (dpmod.Dp.STICKYERR | dpmod.Dp.STICKYORUN
-                       | dpmod.Dp.WDATAERR)
-        sticky = ctrlstat & sticky_mask if ack in (
-            _Wire.ACK_OK_FAULT, _Wire.ACK_V1_OK) else 0
-
-        # Resolve user futures from the shifts that carry their
-        # responses. WAIT triggers an inline wire-level retry; OK /
-        # FAULT / WAIT-after-retries-exhausted resolve via
-        # ``_resolve_response``.
-        for shift_f, user_f, op in result_shifts:
-            if user_f.done():
-                continue
-            tdo = shift_f.result()
-            ack, data = _Wire.unpack(tdo)
-            if ack == _Wire.ACK_WAIT and op is not None:
-                await self._retry_on_wait(user_f, op)
-            else:
-                self._resolve_response(user_f, ack, data)
-
-        if sticky:
-            self.logger.warning(
-                "DP CTRL/STAT sticky bits set: 0x%08x — clearing via ABORT",
-                ctrlstat)
-            # ABORT to clear sticky state; subsequent batches have a
-            # clean slate. Posted via the DP's own batcher so it goes
-            # out as part of the next flush; we don't await it here
-            # (the user's batch is already done).
-            self.post(dpmod.Abort(dpmod.Dp.ABORT_ALL))
-            raise dpmod.DpAccessFailure(
-                f"AP transaction faulted (CTRL/STAT=0x{ctrlstat:08x}, "
-                f"sticky={sticky:#x})")
-
-    async def _retry_on_wait(self, user_f: asyncio.Future, op) -> None:
-        """Inline wire-level retry for an op whose pipelined response
-        was WAIT.
-
-        Re-issues the same DP/AP access directly to the parent TAP up
-        to :attr:`MAX_WAIT_RETRIES` times, separated by
-        :attr:`WAIT_RETRY_IDLE` idle TCKs each. Each retry shift is
-        followed by an RDBUFF read whose TDO carries the retry's ACK
-        and (for reads) data. Resolves ``user_f`` with the first
-        non-WAIT response, or fails it with :class:`DpAccessFailure`
-        once retries are exhausted.
-
-        Runs *after* the main batch flush, so SELECT might have moved
-        to a value that doesn't match this op's bank/AP — we restore
-        it as the first step."""
-        tap = self._parent
-        is_ap = isinstance(op, (dpmod.ApRead, dpmod.ApWrite))
-        rnw = isinstance(op, (dpmod.ApRead, dpmod.DpRead))
-        wire_addr = op.addr & 0xc
-        op_data = getattr(op, "data", 0)
-
-        # Restore SELECT for this op (later batch ops may have moved it).
-        target_select = self._select_for(op)
-        if self._select != target_select:
-            sel_tdi = BitString(
-                _Wire.pack(False, dpmod.Dp.SELECT, target_select), 35)
-            tap.DPACC(sel_tdi, read_tdo=False)
-            tap.run(self.INTER_SHIFT_RUN)
-            self._select = target_select
-
-        for attempt in range(self.MAX_WAIT_RETRIES):
-            # Idle to give the AP time to complete the prior transaction.
-            tap.run(self.WAIT_RETRY_IDLE)
-
-            # Re-issue the op (no need to capture this shift's TDO —
-            # the response of THIS shift is whatever was in flight
-            # before, which is uninteresting in retry context).
-            tdi = BitString(_Wire.pack(rnw, wire_addr, op_data), 35)
-            if is_ap:
-                tap.APACC(tdi, read_tdo=False)
-            else:
-                tap.DPACC(tdi, read_tdo=False)
-            tap.run(self.INTER_SHIFT_RUN)
-
-            # RDBUFF read to capture the retry's ACK + data.
-            rdbuff_tdi = BitString(
-                _Wire.pack(True, dpmod.Dp.RDBUFF, 0), 35)
-            ack_f = tap.DPACC(rdbuff_tdi, read_tdo=True)
-            tap.run(self.INTER_SHIFT_RUN)
-
-            tdo = await ack_f
-            ack, data_out = _Wire.unpack(tdo)
-
-            if ack != _Wire.ACK_WAIT:
-                self._resolve_response(user_f, ack, data_out)
-                return
-
-        user_f.set_exception(dpmod.DpAccessFailure(
-            f"JTAG-DP WAIT after {self.MAX_WAIT_RETRIES} retries on "
-            f"{type(op).__name__}(addr=0x{op.addr:x})"))
-
-    def _resolve_response(self, user_f: asyncio.Future,
-                          ack: int, data: int) -> None:
-        """Resolve ``user_f`` from the (ACK, data) carried by the shift
-        that piggybacked on the next request. Decoding depends on the
-        JTAG-DP protocol version selected at construction:
-
-          * v0 (ADIv5): 0b010 = OK_OR_FAULT (success), 0b001 = WAIT.
-          * v1 (ADIv6): 0b100 = OK,         0b010 = FAULT, 0b001 = WAIT.
-
-        WAIT is reached here only when the inline retry path
-        (:meth:`_retry_on_wait`) has exhausted its budget — the wire
-        is genuinely stuck."""
-        if ack == _Wire.ACK_WAIT:
-            user_f.set_exception(dpmod.DpAccessFailure(
-                "JTAG-DP WAIT response after retry exhaustion"))
-            return
-
-        if self._jtag_protocol_version == 0:
-            if ack == _Wire.ACK_OK_FAULT:
-                user_f.set_result(data)
-                return
-        else:  # v1 (ADIv6 / DPv3)
-            if ack == _Wire.ACK_V1_OK:
-                user_f.set_result(data)
-                return
-            if ack == _Wire.ACK_V1_FAULT:
-                user_f.set_exception(dpmod.DpAccessFailure(
-                    "JTAG-DP FAULT response (check CTRL/STAT sticky bits)"))
-                return
-
-        user_f.set_exception(dpmod.DpAccessFailure(
-            f"JTAG-DP invalid ACK 0b{ack:03b} "
-            f"(protocol v{self._jtag_protocol_version})"))
+        for op, result in batch:
+            self.logger.protocol("%s -> %#010x", op, result.result() or 0)

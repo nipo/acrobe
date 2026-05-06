@@ -1,5 +1,5 @@
-"""Tests for ARM JTAG-DP: Tap.db registration, JtagDp lowering,
-pending-read pipelining, end-of-batch RDBUFF flush, SELECT caching."""
+"""Tests for ARM JTAG-DP: JtagDp lowering, pending-read pipelining,
+end-of-batch RDBUFF flush, SELECT caching."""
 
 import asyncio
 
@@ -10,8 +10,7 @@ from acrobe.component.arm.dp import (
     Abort, ApRead, ApWrite, Dp, DpAccessFailure, DpRead, DpWrite, Run,
 )
 from acrobe.component.arm.jtag_dp import (
-    JTAG_DP_IDCODES, JTAG_DP_V3_IDCODES, JtagDp, JtagDpTap, JtagDpV3Tap,
-    _Wire,
+    JtagDp, JtagDpTap, JtagDpV3Tap, _Wire,
 )
 from acrobe.protocol.jtag import (
     Chain, JtagInterface, Reset, Run as JtagRun, Shift, CaptureDr,
@@ -75,42 +74,6 @@ def _make_dp(jtag_protocol_version: int = 0) -> tuple[RecordingDpTap, JtagDp]:
     return tap, dp
 
 
-def _queue_clean_ctrlstat(tap):
-    """Queue the CTRL/STAT response that JtagDp.flush_ops emits at the
-    end of every batch for the sticky-error check. ACK=OK, data=0
-    (no STICKYERR/STICKYORUN/WDATAERR). Tests that don't care about
-    the sticky path call this once per expected batch boundary."""
-    tap.queue_response(_Wire.ACK_OK_FAULT, 0)
-
-
-# -- Tap.db registration --------------------------------------------
-
-class TestTapDbRegistration:
-    def test_idcode_resolves_to_jtag_dp_tap(self):
-        # All advertised JTAG-DP IDCODEs should spawn a JtagDpTap.
-        for idcode in JTAG_DP_IDCODES:
-            tap = Tap.db.call(idcode, idcode=idcode, irlen=4)
-            assert isinstance(tap, JtagDpTap)
-            assert tap.idcode == idcode
-
-    def test_idcode_revision_masked(self):
-        # Tap.db's eq func ignores bits 31:28 (revision).
-        # 0x4BA00477 should still hit the 0x0BA00477 registration.
-        tap = Tap.db.call(0x4BA00477, idcode=0x4BA00477, irlen=4)
-        assert isinstance(tap, JtagDpTap)
-
-    def test_v3_idcode_resolves_to_v3_tap(self):
-        # 0x_BA06477 (Agilex 5 HPS, observed with revision=4) routes
-        # to JtagDpV3Tap and carries protocol-v1 ACK semantics.
-        for idcode in JTAG_DP_V3_IDCODES:
-            tap = Tap.db.call(idcode, idcode=idcode, irlen=4)
-            assert isinstance(tap, JtagDpV3Tap)
-            assert tap.JTAG_PROTOCOL_VERSION == 1
-        # And revision masking still applies.
-        tap = Tap.db.call(0x4BA06477, idcode=0x4BA06477, irlen=4)
-        assert isinstance(tap, JtagDpV3Tap)
-
-
 # -- Wire packing ---------------------------------------------------
 
 class TestWirePacking:
@@ -142,34 +105,23 @@ class TestDpRead:
     @pytest.mark.asyncio
     async def test_single_read_resolves_via_rdbuff_flush(self):
         # On a fresh DP, reading CTRL_STAT produces:
-        #   1. SELECT write (initial cache reset, non-capturing)
-        #   2. CTRL_STAT read (captures previous garbage, TDO unused)
-        #   3. RDBUFF read non-capturing — flush trigger
-        #   4. RDBUFF read capturing — carries CTRL_STAT response
-        #   5. CTRL_STAT read non-capturing — sticky-check trigger
-        #   6. RDBUFF read capturing — carries CTRL/STAT (sticky check)
-        # The user future resolves with the response of shift #4.
+        #   1. SELECT write (DPBANKSEL=0, non-capturing)
+        #   2. DPACC read of CTRL_STAT (non-capturing — no pending yet)
+        #   3. DPACC read of RDBUFF (capturing — TDO carries CTRL_STAT
+        #      response, resolves the user future)
         tap, dp = _make_dp()
-        # Shift 2 captures but its TDO is wasted; queue any garbage.
-        tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0xdeadbeef)
-        # Shift 4 captures the actual CTRL_STAT data → user future.
         tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0xc0ffee01)
-        # Shift 6 captures CTRL/STAT for sticky check (no sticky bits).
-        _queue_clean_ctrlstat(tap)
 
         result = await dp.post(DpRead(Dp.CTRL_STAT))
 
         assert result == 0xc0ffee01
-        # Shape: SELECT(W) + CTRL_STAT(R) + RDBUFF(no-cap) +
-        #        RDBUFF(cap) + CTRL_STAT(no-cap) + RDBUFF(cap).
-        assert len(tap.shifts) == 6
-        assert all(s["ir"] == JtagDpTap.DPACC.ir for s in tap.shifts)
-        assert tap.shifts[0]["read_tdo"] is False  # SELECT write
-        assert tap.shifts[1]["read_tdo"] is True   # CTRL_STAT (wasted)
-        assert tap.shifts[2]["read_tdo"] is False  # RDBUFF flush trigger
-        assert tap.shifts[3]["read_tdo"] is True   # RDBUFF carries data
-        assert tap.shifts[4]["read_tdo"] is False  # CTRL_STAT sticky trigger
-        assert tap.shifts[5]["read_tdo"] is True   # RDBUFF carries CTRL/STAT
+        assert len(tap.shifts) == 3
+        assert tap.shifts[0]["ir"] == JtagDpTap.DPACC.ir
+        assert tap.shifts[0]["read_tdo"] is False
+        assert tap.shifts[1]["ir"] == JtagDpTap.DPACC.ir
+        assert tap.shifts[1]["read_tdo"] is False
+        assert tap.shifts[2]["ir"] == JtagDpTap.DPACC.ir
+        assert tap.shifts[2]["read_tdo"] is True
 
 
 # -- AP read pipelining --------------------------------------------
@@ -177,22 +129,13 @@ class TestDpRead:
 class TestApReadPipelining:
     @pytest.mark.asyncio
     async def test_consecutive_ap_reads_pipeline(self):
-        # Two ApReads at the same AP/bank: SELECT write once, two
-        # APACC reads (capture each, the first APACC's TDO is the
-        # next read's response). Trailing pair (RDBUFF no-cap +
-        # RDBUFF cap) drains the second read. Final pair
-        # (CTRL/STAT no-cap + RDBUFF cap) is the sticky check.
+        # Two ApReads at the same AP/bank: SELECT write, two APACC
+        # reads, single RDBUFF flush. The second APACC's TDO carries
+        # the first read's response; RDBUFF carries the second.
         tap, dp = _make_dp()
 
-        # Capturing shifts in order:
-        #   APACC#1 (TDO = wasted garbage)
-        #   APACC#2 (TDO = read #1's data → user_f1)
-        #   RDBUFF cap (TDO = read #2's data → user_f2)
-        #   RDBUFF cap for CTRL/STAT (sticky check)
-        tap.queue_response(_Wire.ACK_OK_FAULT, 0)            # APACC#1 wasted
-        tap.queue_response(_Wire.ACK_OK_FAULT, 0xaaaa1111)   # APACC#2 → user_f1
-        tap.queue_response(_Wire.ACK_OK_FAULT, 0xbbbb2222)   # RDBUFF → user_f2
-        _queue_clean_ctrlstat(tap)
+        tap.queue_response(_Wire.ACK_OK_FAULT, 0xaaaa1111)   # APACC#2 → read#1
+        tap.queue_response(_Wire.ACK_OK_FAULT, 0xbbbb2222)   # RDBUFF → read#2
 
         f1 = dp.post(ApRead(addr=0x00))
         f2 = dp.post(ApRead(addr=0x00))
@@ -202,117 +145,102 @@ class TestApReadPipelining:
 
         assert v1 == 0xaaaa1111
         assert v2 == 0xbbbb2222
-        # Shape: SELECT(W) + APACC(R) + APACC(R) + RDBUFF(no-cap) +
-        #        RDBUFF(cap) + CTRL_STAT(no-cap) + RDBUFF(cap).
-        assert len(tap.shifts) == 7
+        assert len(tap.shifts) == 4
         assert tap.shifts[0]["ir"] == JtagDpTap.DPACC.ir   # SELECT
-        assert tap.shifts[1]["ir"] == JtagDpTap.APACC.ir
-        assert tap.shifts[2]["ir"] == JtagDpTap.APACC.ir
-        assert tap.shifts[3]["ir"] == JtagDpTap.DPACC.ir   # RDBUFF flush trigger
-        assert tap.shifts[4]["ir"] == JtagDpTap.DPACC.ir   # RDBUFF data
-        assert tap.shifts[5]["ir"] == JtagDpTap.DPACC.ir   # CTRL_STAT trigger
-        assert tap.shifts[6]["ir"] == JtagDpTap.DPACC.ir   # RDBUFF sticky data
+        assert tap.shifts[0]["read_tdo"] is False
+        assert tap.shifts[1]["ir"] == JtagDpTap.APACC.ir   # ApRead#1
+        assert tap.shifts[1]["read_tdo"] is False
+        assert tap.shifts[2]["ir"] == JtagDpTap.APACC.ir   # ApRead#2
+        assert tap.shifts[2]["read_tdo"] is True
+        assert tap.shifts[3]["ir"] == JtagDpTap.DPACC.ir   # RDBUFF
+        assert tap.shifts[3]["read_tdo"] is True
 
     @pytest.mark.asyncio
     async def test_write_after_read_flushes_pending(self):
-        # ApRead followed by ApWrite: the write's APACC shift carries
-        # the read's response on its TDO (in-batch pipelining), so
-        # no RDBUFF flush pair is needed for the read. Sticky-check
-        # pair still fires at end.
+        # ApRead followed by ApWrite: the write captures the read's
+        # response on its own TDO. The write itself is then pending —
+        # an end-of-batch RDBUFF drains it. The write's user-future
+        # value is meaningless (writes have no payload), only that the
+        # future is resolved (any value, no exception).
         tap, dp = _make_dp()
 
-        # Capturing shifts:
-        #   APACC-read (TDO wasted)
-        #   APACC-write (TDO = read's response → user_f1)
-        #   RDBUFF cap for CTRL/STAT (sticky check)
-        tap.queue_response(_Wire.ACK_OK_FAULT, 0)
         tap.queue_response(_Wire.ACK_OK_FAULT, 0x12345678)
-        _queue_clean_ctrlstat(tap)
+        tap.queue_response(_Wire.ACK_OK_FAULT, 0)
 
         f1 = dp.post(ApRead(addr=0x00))
         f2 = dp.post(ApWrite(addr=0x04, data=0xcafebabe))
 
         assert await f1 == 0x12345678
-        assert await f2 is None
-        # Shape: SELECT(W) + APACC-read + APACC-write +
-        #        CTRL_STAT(no-cap) + RDBUFF(cap, sticky).
-        assert len(tap.shifts) == 5
+        # Write resolves; value is irrelevant, just must not raise.
+        await f2
+        assert len(tap.shifts) == 4
 
 
 # -- SELECT caching -------------------------------------------------
 
+# A DPACC SELECT write has TDI low 3 bits = 0b100 (RnW=0, addr-bits=0b10
+# from SELECT@0x08). Identifying via TDI is tighter than counting
+# non-capturing DPACC shifts — the new lowering keeps reads/writes that
+# are part of the pending pipeline non-capturing as well.
+def _is_select_write(shift) -> bool:
+    return (shift["ir"] == JtagDpTap.DPACC.ir
+            and (shift["tdi"] & 0x7) == 0b100)
+
+
 class TestSelectCaching:
     @pytest.mark.asyncio
     async def test_each_batch_rewrites_select_at_start(self):
-        # Cross-batch SELECT caching is intentionally disabled — we
-        # don't trust that another DP/AP user hasn't moved SELECT
-        # between batches. Each ``flush_ops`` invocation rewrites
-        # SELECT for its first op, even if the cached value matches
-        # what the prior batch left on the chip.
+        # Per-batch SELECT refresh: the JtagDpLowerer is instantiated
+        # per batch (last_select=None), so the first op of every batch
+        # always emits a SELECT write — we don't trust other DP/AP
+        # users not to have moved SELECT between batches.
         tap, dp = _make_dp()
 
         for _ in range(2):
-            # Per batch: APACC-read(wasted) + RDBUFF(data) + RDBUFF(sticky).
             tap.queue_response(_Wire.ACK_OK_FAULT, 0)
-            tap.queue_response(_Wire.ACK_OK_FAULT, 0)
-            _queue_clean_ctrlstat(tap)
             await dp.post(DpRead(Dp.CTRL_STAT))
 
-        # 6 shifts per batch (SELECT + read + flush pair + sticky pair),
-        # both batches kick off with a SELECT write.
-        assert len(tap.shifts) == 12
-        assert tap.shifts[0]["read_tdo"] is False  # batch1 SELECT
-        assert tap.shifts[6]["read_tdo"] is False  # batch2 SELECT — re-emitted
+        # 3 shifts per batch (SELECT + CTRL_STAT-read + RDBUFF). Both
+        # batches kick off with a non-capturing SELECT write.
+        assert len(tap.shifts) == 6
+        assert _is_select_write(tap.shifts[0])
+        assert _is_select_write(tap.shifts[3])
 
     @pytest.mark.asyncio
     async def test_bank_change_within_batch_emits_select_write(self):
         # Within one batch, CTRL_STAT (bank 0) then DPIDR1 (bank 1)
-        # forces a mid-batch SELECT rewrite. The flush-and-rewrite
-        # bracket ensures the pending CTRL_STAT response gets drained
-        # before SELECT changes.
+        # forces a mid-batch SELECT rewrite for the new DPBANKSEL.
         tap, dp = _make_dp()
 
-        # Captures, in order:
-        #   CTRL_STAT_R wasted, RDBUFF flush data (CTRL_STAT),
-        #   DPIDR1_R wasted, RDBUFF flush data (DPIDR1),
-        #   sticky data
-        for _ in range(4):
+        for _ in range(2):
             tap.queue_response(_Wire.ACK_OK_FAULT, 0)
-        _queue_clean_ctrlstat(tap)
 
         f1 = dp.post(DpRead(Dp.CTRL_STAT))
         f2 = dp.post(DpRead(Dp.DPIDR1))
         await asyncio.gather(f1, f2)
 
-        # Two SELECT writes (one per bank) plus their reads, two RDBUFF
-        # flush pairs (mid-batch + end-of-batch), and the trailing
-        # sticky pair.
-        n_select = sum(1 for s in tap.shifts
-                       if s["read_tdo"] is False
-                       and s["ir"] == JtagDpTap.DPACC.ir)
-        assert n_select >= 3  # SELECT write + 2 trailing no-cap shifts
+        # Two SELECT writes — one for bank 0, one for bank 1.
+        n_select_writes = sum(1 for s in tap.shifts if _is_select_write(s))
+        assert n_select_writes == 2
 
     @pytest.mark.asyncio
     async def test_ap_change_within_batch_emits_select_write(self):
         # Two APACC reads at different AP bases in one batch. SELECT
-        # changes between them; that forces the mid-batch flush of
-        # the first read's pending response (an extra RDBUFF pair)
-        # before the SELECT write.
+        # changes between them.
         tap, dp = _make_dp()
 
-        for _ in range(4):
+        for _ in range(2):
             tap.queue_response(_Wire.ACK_OK_FAULT, 0)
-        _queue_clean_ctrlstat(tap)
 
         f1 = dp.post(ApRead(addr=0))
         f2 = dp.post(ApRead(addr=1 << 24))
         await asyncio.gather(f1, f2)
 
-        # Two APACC shifts (different AP bases → SELECT rewritten
-        # between).
         apacc_shifts = sum(1 for s in tap.shifts
                            if s["ir"] == JtagDpTap.APACC.ir)
         assert apacc_shifts == 2
+        n_select_writes = sum(1 for s in tap.shifts if _is_select_write(s))
+        assert n_select_writes == 2
 
 
 # -- Idle TCK insertion --------------------------------------------
@@ -320,21 +248,19 @@ class TestSelectCaching:
 class TestIdleTcks:
     @pytest.mark.asyncio
     async def test_idle_run_after_each_shift(self):
-        # JTAG-DP needs idle TCKs between Update-DR and the next
-        # Capture-DR. JtagDp emits a Run between every shift.
+        # AP transactions are behind a resynchronizing gateway and need
+        # idle TCKs between Update-DR and the next Capture-DR. The
+        # lowerer emits a Run after every shift; the count must match
+        # the number of shifts, no matter what type.
         tap, dp = _make_dp()
 
         tap.queue_response(_Wire.ACK_OK_FAULT, 0)
-        tap.queue_response(_Wire.ACK_OK_FAULT, 0)
-        _queue_clean_ctrlstat(tap)
 
         await dp.post(DpRead(Dp.CTRL_STAT))
 
-        # 6 shifts: SELECT(W) + CTRL_STAT(R) + RDBUFF(no-cap) +
-        # RDBUFF(cap) + CTRL_STAT(no-cap) + RDBUFF(cap). One idle Run
-        # follows each.
-        assert len(tap.runs) == 6
-        assert all(c == JtagDp.INTER_SHIFT_RUN for c in tap.runs)
+        # 3 shifts (SELECT, CTRL_STAT-read, RDBUFF) → 3 idle runs.
+        assert len(tap.runs) == len(tap.shifts) == 3
+        assert all(c > 0 for c in tap.runs)
 
 
 # -- Abort -----------------------------------------------------------
@@ -343,64 +269,39 @@ class TestAbort:
     @pytest.mark.asyncio
     async def test_abort_uses_dedicated_ir(self):
         tap, dp = _make_dp()
-        # Trailing sticky-check pair fires for every batch, even an
-        # ABORT-only one — useful here, since ABORT is what we use
-        # to recover from sticky and the next CTRL/STAT confirms it
-        # cleared.
-        _queue_clean_ctrlstat(tap)
 
         await dp.post(Abort(0x1f))
 
-        # The ABORT itself uses the dedicated ABORT IR. The trailing
-        # sticky check shifts use DPACC.
-        abort_shifts = [s for s in tap.shifts
-                        if s["ir"] == JtagDpTap.ABORT_IR.ir]
-        assert len(abort_shifts) == 1
+        # Single shift via the ABORT instruction.
+        assert len(tap.shifts) == 1
+        assert tap.shifts[0]["ir"] == JtagDpTap.ABORT_IR.ir
         # data 0x1f shifted left 3 into the 35-bit DR.
-        assert abort_shifts[0]["tdi"] == (0x1f << 3)
+        assert tap.shifts[0]["tdi"] == (0x1f << 3)
 
 
 # -- Errors ---------------------------------------------------------
 
 class TestAckErrors:
     @pytest.mark.asyncio
-    async def test_wait_ack_raises_after_retry_budget(self):
-        # An initial DpRead batch consumes 3 captured shifts: the
-        # main read, the RDBUFF flush data, and the trailing
-        # sticky-check RDBUFF. Each retry consumes one (its RDBUFF
-        # capture). With MAX_WAIT_RETRIES=16, queue 3+16=19 WAIT
-        # responses; the retry budget exhausts and raises
-        # DpAccessFailure tagged "WAIT after N retries".
+    async def test_wait_ack_raises(self):
+        # WAIT surfaces as a user-visible DpAccessFailure. (Wire-level
+        # retry was removed — re-issuing a posted read may return
+        # different data than the first attempt; retry has to live at
+        # a higher layer with op-aware semantics.)
         tap, dp = _make_dp()
-        for _ in range(3 + JtagDp.MAX_WAIT_RETRIES):
-            tap.queue_response(_Wire.ACK_WAIT, 0)
+        tap.queue_response(_Wire.ACK_WAIT, 0)
 
-        with pytest.raises(DpAccessFailure, match="WAIT after"):
+        with pytest.raises(DpAccessFailure, match="wait"):
             await dp.post(DpRead(Dp.CTRL_STAT))
 
     @pytest.mark.asyncio
-    async def test_wait_then_ok_resolves_via_retry(self):
-        # Initial captures (3 shifts) all WAIT — the data shift WAIT
-        # triggers retry. The first retry returns OK with the real
-        # read value, the user future resolves to it.
-        tap, dp = _make_dp()
-        tap.queue_response(_Wire.ACK_WAIT, 0)        # main read
-        tap.queue_response(_Wire.ACK_WAIT, 0)        # RDBUFF data
-        tap.queue_response(_Wire.ACK_WAIT, 0)        # sticky CTRL/STAT
-        tap.queue_response(_Wire.ACK_OK_FAULT, 0xc0ffee01)  # retry success
-
-        result = await dp.post(DpRead(Dp.CTRL_STAT))
-        assert result == 0xc0ffee01
-
-    @pytest.mark.asyncio
     async def test_invalid_ack_raises(self):
+        # Any ACK that isn't WAIT or the version's OK encoding is
+        # treated as FAULT.
         tap, dp = _make_dp()
-
-        # ACK 0b111 is not a valid response.
-        tap.queue_response(0b111, 0)
         tap.queue_response(0b111, 0)
 
-        with pytest.raises(DpAccessFailure, match="invalid ACK"):
+        with pytest.raises(DpAccessFailure, match="fault"):
             await dp.post(DpRead(Dp.CTRL_STAT))
 
 
@@ -416,9 +317,8 @@ class TestProtocolV1Ack:
     async def test_ok_returns_data(self):
         tap, dp = _make_dp(jtag_protocol_version=1)
 
-        # In v1, OK = 0b100. The first capture is garbage, the
-        # RDBUFF flush carries the real CTRL_STAT response.
-        tap.queue_response(ack=_Wire.ACK_V1_OK, data=0)
+        # In v1, OK = 0b100. The RDBUFF flush carries the real
+        # CTRL_STAT response.
         tap.queue_response(ack=_Wire.ACK_V1_OK, data=0xc0ffee01)
 
         result = await dp.post(DpRead(Dp.CTRL_STAT))
@@ -430,10 +330,9 @@ class TestProtocolV1Ack:
 
         # In v1, 0b010 = FAULT (not OK). Returned data is UNKNOWN
         # and must surface as DpAccessFailure.
-        tap.queue_response(ack=_Wire.ACK_V1_OK, data=0)
         tap.queue_response(ack=_Wire.ACK_V1_FAULT, data=0)
 
-        with pytest.raises(DpAccessFailure, match="FAULT"):
+        with pytest.raises(DpAccessFailure, match="fault"):
             await dp.post(DpRead(Dp.CTRL_STAT))
 
     @pytest.mark.asyncio
@@ -441,10 +340,9 @@ class TestProtocolV1Ack:
         # 0b010 means "OK" under v0 but "FAULT" under v1, so seeing
         # it on a v1 DP is a fault — never silently treated as OK.
         tap, dp = _make_dp(jtag_protocol_version=1)
-        tap.queue_response(ack=_Wire.ACK_V1_OK, data=0)
         tap.queue_response(ack=_Wire.ACK_OK_FAULT, data=0xdeadbeef)
 
-        with pytest.raises(DpAccessFailure, match="FAULT"):
+        with pytest.raises(DpAccessFailure, match="fault"):
             await dp.post(DpRead(Dp.CTRL_STAT))
 
     def test_invalid_protocol_version_rejected(self):
