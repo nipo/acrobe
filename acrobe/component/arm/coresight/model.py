@@ -110,12 +110,23 @@ class ComponentIds:
             MemoryMappedComponent.DEVID,
             MemoryMappedComponent.DEVTYPE,
         )
-        futures = [bus.read32(base + a) for a in addrs]
-        values = await asyncio.gather(*futures)
-        (p4, _p5, _p6, _p7,
-         p0, p1, p2, p3,
-         c0, c1, c2, c3,
-         devarch_raw, devid_raw, devtype_raw) = values
+
+        value_fut = {a: bus.read32(base + a) for a in sorted(addrs)}
+        p0 = await value_fut[MemoryMappedComponent.PIDR0]
+        p1 = await value_fut[MemoryMappedComponent.PIDR1]
+        p2 = await value_fut[MemoryMappedComponent.PIDR2]
+        p3 = await value_fut[MemoryMappedComponent.PIDR3]
+        p4 = await value_fut[MemoryMappedComponent.PIDR4]
+        _p5 = await value_fut[MemoryMappedComponent.PIDR5]
+        _p6 = await value_fut[MemoryMappedComponent.PIDR6]
+        _p7 = await value_fut[MemoryMappedComponent.PIDR7]
+        c0 = await value_fut[MemoryMappedComponent.CIDR0]
+        c1 = await value_fut[MemoryMappedComponent.CIDR1]
+        c2 = await value_fut[MemoryMappedComponent.CIDR2]
+        c3 = await value_fut[MemoryMappedComponent.CIDR3]
+        devarch_raw = await value_fut[MemoryMappedComponent.DEVARCH]
+        devid_raw = await value_fut[MemoryMappedComponent.DEVID]
+        devtype_raw = await value_fut[MemoryMappedComponent.DEVTYPE]
 
         # Validate CIDR preamble: 0xB1_05_xx_0D spread across the
         # low byte of each word. PRMBL_1 (CIDR1[3:0]) is always 0.
