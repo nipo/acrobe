@@ -126,7 +126,7 @@ class _TapShift:
     def __repr__(self):
         ir = f"{self.ir_value:#x}" if self.ir_value is not None else '-'
         tdi = repr(self.tdi) if self.tdi is not None else '-'
-        no_tdo = ', notdo' if not self.read_tdo else ''
+        no_tdo = ', -' if not self.read_tdo else ''
         return f"TapShift({ir}, {tdi}{no_tdo})"
 
 @dataclass(frozen=True)
@@ -160,7 +160,7 @@ class TapOp:
         self.op = op
 
     def __repr__(self):
-        return f"TapOp({self.tap.name!r}, {self.op!r})"
+        return f"{self.tap.name}.{self.op!r}"
 
 
 # Instruction Registry
