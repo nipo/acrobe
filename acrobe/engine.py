@@ -17,6 +17,7 @@ class Batcher:
     def __init__(self):
         self._pending: list[tuple[Any, asyncio.Future]] = []
         self._flush_task: asyncio.Task | None = None
+        self._lock = asyncio.Lock()
 
     def post(self, op) -> asyncio.Future:
         """
@@ -37,12 +38,13 @@ class Batcher:
 
     async def _run_flush(self):
         """
-        Drain and process pending ops. Loops because flush_ops() may await
-        lower layers, during which new ops can be posted.
+        Drain and process pending ops. Decouple from future
+        iterations (they will spawn another task.
         """
-        while self._pending:
-            batch = self._pending
-            self._pending = []
+        async with self._lock:
+            self._pending, batch = [], self._pending
+            self._flush_task = None
+
             try:
                 self.logger.protocol("Batching %s", [top for top, _ in batch])
                 await self.flush_ops(batch)
