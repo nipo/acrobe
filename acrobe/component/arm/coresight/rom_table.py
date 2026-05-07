@@ -193,9 +193,9 @@ class RomTable(MemoryMappedComponent):
         """Read a ROM entry as an int. 64-bit entries combine two
         32-bit reads (low word at +offset, high word at +offset+4)."""
         if entry_size == 4:
-            return await self._bus.read32(self.base + offset)
-        lo = await self._bus.read32(self.base + offset)
-        hi = await self._bus.read32(self.base + offset + 4)
+            return await self.reg_read(offset)
+        lo = await self.reg_read(offset)
+        hi = await self.reg_read(offset + 4)
         return (hi << 32) | lo
 
     @staticmethod

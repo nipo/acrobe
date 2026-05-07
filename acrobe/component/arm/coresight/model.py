@@ -277,6 +277,21 @@ class MemoryMappedComponent(Node):
         """Component footprint in bytes, derived from PIDR4.SIZE."""
         return 0x1000 << self.ids.size_log2
 
+    # -- Register access ------------------------------------------
+
+    def reg_read(self, offset: int):
+        """Read the 32-bit register at ``self.base + offset``. Returns
+        a Future that resolves with the register value. Sugar over
+        ``self._bus.read32`` for the common case where a component
+        accesses its own aperture; ``self._bus`` is still the right
+        path for absolute or out-of-aperture addresses."""
+        return self._bus.read32(self.base + offset)
+
+    def reg_write(self, offset: int, data: int):
+        """Write a 32-bit register at ``self.base + offset``. Returns
+        a Future that resolves once the write commits."""
+        return self._bus.write32(self.base + offset, data)
+
     # -- Friendly default naming ------------------------------------
 
     def _default_name(self, ids: ComponentIds, base: int) -> str:

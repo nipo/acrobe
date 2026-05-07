@@ -138,7 +138,7 @@ class Scs(MemoryMappedComponent):
 
     async def read_cpuid(self) -> Cpuid:
         """Read and decode the SCS CPUID register."""
-        raw = await self._bus.read32(self.base + self.CPUID_OFFSET)
+        raw = await self.reg_read(self.CPUID_OFFSET)
         return Cpuid.from_raw(raw)
 
     async def read_features(self) -> CpuFeatures:
@@ -153,7 +153,7 @@ class Scs(MemoryMappedComponent):
         exist on which core)."""
         async def safe(offset: int) -> int | None:
             try:
-                return await self._bus.read32(self.base + offset)
+                return await self.reg_read(offset)
             except DpAccessFailure:
                 return None
 
