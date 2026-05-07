@@ -1,16 +1,22 @@
 """ARM Memory Access Port (MEM-AP).
 
 A MEM-AP bridges the DP into a connected memory system (AHB / APB /
-AXI / AHB5 / AXI5). MemAp is a Batcher whose operations are
-``Read{8,16,32}`` / ``Write{8,16,32}``; flush_ops translates these
-into AP register accesses (CSW / TAR / DRW) on the parent DP, with
-state caching to skip redundant CSW / TAR writes and TAR
-auto-incrementing for sequential same-size streams.
+AXI / AHB5 / AXI5). MemAp is a Batcher whose operations are:
 
-Also exposes ``mem_read(addr, size) -> bytes`` and
-``mem_write(addr, data)`` convenience coroutines for byte-granular
-access; these decompose unaligned head/tail into byte/halfword
-accesses and bulk-handle aligned middles as word streams.
+* ``Read{8,16,32}`` / ``Write{8,16,32}`` — single-word ops that
+  ``flush_ops`` lowers into AP register accesses (CSW / TAR / DRW)
+  on the parent DP, with state caching to skip redundant CSW / TAR
+  writes and TAR auto-incrementing for sequential same-size streams.
+* ``ReadBlob(addr, size)`` / ``WriteBlob(addr, data)`` — byte-granular
+  block ops. flush_ops splits each blob into one or many
+  Read*/Write* sub-ops (head/middle/tail decomposition); a
+  :class:`_PendingBlob` aggregator hooks each sub-op's future via
+  ``add_done_callback`` and resolves the user-facing blob future
+  once all sub-ops have completed (with reassembled bytes for reads,
+  or ``None`` for writes).
+
+``mem_read(addr, size) -> bytes`` and ``mem_write(addr, data)`` are
+thin coroutines that just post the corresponding blob op.
 
 Two flavours of MEM-AP register layout are supported:
 
@@ -82,6 +88,139 @@ class Write32:
 
     def __repr__(self):
         return f"Write32({self.addr:#x}, {self.data:#010x})"
+
+
+@dataclass(frozen=True)
+class ReadBlob:
+    """Byte-granular read of ``size`` bytes from ``addr``. Lowered by
+    flush_ops into Read{8,16,32} sub-ops; results are reassembled
+    into bytes by :class:`_PendingBlob`."""
+    addr: int
+    size: int
+
+    def __repr__(self):
+        return f"ReadBlob({self.addr:#x}, {self.size})"
+
+
+@dataclass(frozen=True)
+class WriteBlob:
+    """Byte-granular write of ``data`` at ``addr``. Lowered by
+    flush_ops into Write{8,16,32} sub-ops."""
+    addr: int
+    data: bytes
+
+    def __repr__(self):
+        return f"WriteBlob({self.addr:#x}, {len(self.data)} B)"
+
+
+# --- Blob completion aggregator -----------------------------------
+
+class _PendingBlob:
+    """One-shot aggregator that resolves a blob op's user future once
+    all the Read*/Write* sub-ops it was split into have completed.
+
+    Sub-op futures are hooked via :py:meth:`asyncio.Future.add_done_callback`
+    so this class never awaits — it just counts completions and runs
+    a final assembly step.
+
+    For ReadBlob: the aggregator collects sub-op result ints into a
+    ``bytearray`` at the right offsets and resolves the user future
+    with ``bytes`` of the requested length. For WriteBlob: it just
+    resolves with ``None``. Either way, the first sub-op exception
+    short-circuits and surfaces on the user future."""
+
+    def __init__(self, user_future: asyncio.Future, size: int,
+                 is_read: bool):
+        self.user_future = user_future
+        self.size = size
+        self.is_read = is_read
+        # (offset_in_blob, size_bytes, sub_future)
+        self.sub_futures: list[tuple[int, int, asyncio.Future]] = []
+        self.remaining = 0
+        self.exception: BaseException | None = None
+
+    def attach(self, offset: int, size_bytes: int,
+               sub_future: asyncio.Future) -> None:
+        self.sub_futures.append((offset, size_bytes, sub_future))
+        self.remaining += 1
+        sub_future.add_done_callback(self._on_done)
+
+    def _on_done(self, sub_future: asyncio.Future) -> None:
+        self.remaining -= 1
+        if self.exception is None:
+            exc = sub_future.exception()
+            if exc is not None:
+                self.exception = exc
+        if self.remaining == 0:
+            self._resolve()
+
+    def _resolve(self) -> None:
+        if self.user_future.done():
+            return
+        if self.exception is not None:
+            self.user_future.set_exception(self.exception)
+            return
+        if not self.is_read:
+            self.user_future.set_result(None)
+            return
+        buf = bytearray(self.size)
+        for offset, sz, fut in self.sub_futures:
+            v = fut.result()
+            buf[offset:offset + sz] = v.to_bytes(sz, "little")
+        self.user_future.set_result(bytes(buf))
+
+
+def _decompose_byte_io(
+    addr: int, size: int, data: bytes | None
+) -> list[tuple[object, int, int]]:
+    """Decompose a byte-level address range into Read*/Write* sub-ops.
+
+    Strategy: peel a leading byte (if ``addr % 2 == 1``), peel a
+    leading halfword (if ``addr % 4 == 2`` and ≥ 2 bytes left), stream
+    the aligned middle as 32-bit words, peel a trailing halfword
+    (if ≥ 2 bytes left), peel a trailing byte (if 1 byte left).
+
+    Returns a list of ``(op, offset_in_blob, size_bytes)`` tuples.
+    ``data`` is the bytes object for writes, ``None`` for reads."""
+    is_write = data is not None
+    out: list[tuple[object, int, int]] = []
+    cursor = addr
+    end = addr + size
+    offset = 0
+
+    def peel(chunk_size: int) -> None:
+        nonlocal cursor, offset
+        if is_write:
+            chunk = data[offset:offset + chunk_size]
+            if chunk_size == 1:
+                op: object = Write8(cursor, chunk[0])
+            elif chunk_size == 2:
+                op = Write16(cursor, struct.unpack_from("<H", chunk)[0])
+            else:
+                op = Write32(cursor, struct.unpack_from("<I", chunk)[0])
+        else:
+            if chunk_size == 1:
+                op = Read8(cursor)
+            elif chunk_size == 2:
+                op = Read16(cursor)
+            else:
+                op = Read32(cursor)
+        out.append((op, offset, chunk_size))
+        cursor += chunk_size
+        offset += chunk_size
+
+    if (cursor & 1) and end > cursor:
+        peel(1)
+    if (cursor & 3) == 2 and end - cursor >= 2:
+        peel(2)
+    while end - cursor >= 4:
+        peel(4)
+    if end - cursor >= 2:
+        peel(2)
+    if end - cursor >= 1:
+        peel(1)
+
+    return out
 
 # --- MEM-AP --------------------------------------------------------
 
@@ -306,101 +445,63 @@ class MemAp(Ap, Batcher):
 
     # -- Convenience: byte-granular memory access ------------------
 
-    async def mem_read(self, addr: int, size: int) -> bytes:
-        """Read ``size`` bytes from ``addr``. Decomposes unaligned
-        head/tail into byte/halfword accesses; bulk-reads aligned
-        middle as 32-bit words."""
+    def mem_read(self, addr: int, size: int) -> bytes:
+        """Read ``size`` bytes from ``addr`` as a single :class:`ReadBlob`
+        op. The blob is decomposed into Read{8,16,32} sub-ops by
+        flush_ops; bytes are reassembled by :class:`_PendingBlob`."""
         if size == 0:
             return b""
-        return await self._byte_io(addr, size, data=None)
+        return self.post(ReadBlob(addr=addr, size=size))
 
-    async def mem_write(self, addr: int, data: bytes) -> None:
+    def mem_write(self, addr: int, data: bytes) -> None:
         if not data:
             return
-        await self._byte_io(addr, len(data), data=data)
-
-    async def _byte_io(self, addr: int, size: int,
-                       data: bytes | None) -> bytes:
-        """Unified head/middle/tail decomposition for read and write.
-
-        Strategy:
-          * Peel an unaligned leading byte (if addr % 2 == 1).
-          * Peel a leading halfword (if addr % 4 == 2 and >= 2 bytes).
-          * Stream the aligned middle as 32-bit words.
-          * Peel a trailing halfword (if remaining >= 2).
-          * Peel a trailing byte (if remaining == 1).
-
-        Each peeled-off chunk is one MEM-AP op; the middle is one op
-        per word. All ops are posted synchronously, then awaited
-        together — the Batcher pipelines them through the DP."""
-        is_write = data is not None
-        offset = 0
-        cursor = addr
-        end = addr + size
-
-        ops: list[tuple[str, int, int, asyncio.Future]] = []
-
-        def peel(chunk_size: int):
-            nonlocal cursor, offset
-            if is_write:
-                chunk = data[offset:offset + chunk_size]
-                if chunk_size == 1:
-                    f = self.write8(cursor, chunk[0])
-                    ops.append(("w", cursor, 1, f))
-                elif chunk_size == 2:
-                    val = struct.unpack_from("<H", chunk)[0]
-                    f = self.write16(cursor, val)
-                    ops.append(("w", cursor, 2, f))
-                else:  # 4
-                    val = struct.unpack_from("<I", chunk)[0]
-                    f = self.write32(cursor, val)
-                    ops.append(("w", cursor, 4, f))
-            else:
-                if chunk_size == 1:
-                    f = self.read8(cursor)
-                elif chunk_size == 2:
-                    f = self.read16(cursor)
-                else:
-                    f = self.read32(cursor)
-                ops.append(("r", cursor, chunk_size, f))
-            cursor += chunk_size
-            offset += chunk_size
-
-        # Leading byte to reach 2-aligned.
-        if (cursor & 1) and end > cursor:
-            peel(1)
-        # Leading halfword to reach 4-aligned.
-        if (cursor & 3) == 2 and end - cursor >= 2:
-            peel(2)
-        # Aligned middle: stream of 32-bit words.
-        while end - cursor >= 4:
-            peel(4)
-        # Trailing halfword.
-        if end - cursor >= 2:
-            peel(2)
-        # Trailing byte.
-        if end - cursor >= 1:
-            peel(1)
-
-        # Await everything; gather is fine because all futures share
-        # this MemAp's batcher (and the DP below).
-        await asyncio.gather(*(o[3] for o in ops))
-
-        if is_write:
-            return None
-
-        # Reconstruct output bytes from per-chunk reads.
-        buf = bytearray(size)
-        for kind, op_addr, sz, fut in ops:
-            v = fut.result()
-            chunk = v.to_bytes(sz, "little")
-            buf_offset = op_addr - addr
-            buf[buf_offset:buf_offset + sz] = chunk
-        return bytes(buf)
+        self.post(WriteBlob(addr=addr, data=bytes(data)))
 
     # -- Lowering --------------------------------------------------
 
+    @staticmethod
+    def _expand_blobs(batch, loop):
+        """Expand any ReadBlob / WriteBlob ops into Read*/Write* sub-ops.
+
+        Single-word ops pass through untouched. Each blob op gets a
+        :class:`_PendingBlob` aggregator wired to its sub-ops via
+        ``add_done_callback``; once all sub-ops resolve, the blob's
+        user future resolves with reassembled bytes (read) or ``None``
+        (write).
+
+        Returns a flat list of ``(op, future)`` ready for the
+        single-word lowering loop. The futures for sub-ops are fresh
+        internal futures — the corresponding user future is held in
+        the aggregator and resolved indirectly."""
+        expanded: list[tuple[object, asyncio.Future]] = []
+        for op, user_future in batch:
+            if isinstance(op, ReadBlob):
+                pending = _PendingBlob(user_future, op.size, is_read=True)
+                for sub_op, offset, sz in _decompose_byte_io(
+                        op.addr, op.size, None):
+                    sub_fut = loop.create_future()
+                    pending.attach(offset, sz, sub_fut)
+                    expanded.append((sub_op, sub_fut))
+            elif isinstance(op, WriteBlob):
+                pending = _PendingBlob(
+                    user_future, len(op.data), is_read=False)
+                for sub_op, offset, sz in _decompose_byte_io(
+                        op.addr, len(op.data), op.data):
+                    sub_fut = loop.create_future()
+                    pending.attach(offset, sz, sub_fut)
+                    expanded.append((sub_op, sub_fut))
+            else:
+                expanded.append((op, user_future))
+        return expanded
+
     async def flush_ops(self, batch):
+        loop = asyncio.get_running_loop()
+        # Blob ops are expanded into Read*/Write* sub-ops before the
+        # single-word lowering loop runs. After expansion, the loop
+        # only sees Read{8,16,32} / Write{8,16,32}.
+        expanded = self._expand_blobs(batch, loop)
+
         # AP-level futures we need to await before resolving user
         # futures (CSW writes, TAR writes, DRW reads/writes).
         ap_futures: list[asyncio.Future] = []
@@ -416,7 +517,7 @@ class MemAp(Ap, Batcher):
         csw = None
         tar = None
 
-        for op, user_future in batch:
+        for op, user_future in expanded:
             try:
                 size_field = self._size_for(op)
             except TypeError as exc:
@@ -430,12 +531,6 @@ class MemAp(Ap, Batcher):
                 ap_futures.append(self._dp.post(dpmod.ApWrite(
                     addr=self.base + self.CSW, data=new_csw)))
                 csw = new_csw
-                # CSW change invalidates any auto-incremented TAR
-                # assumption — the AP's TAR isn't actually re-issued,
-                # but the size is changing, so be safe.
-                # (In practice the AP's TAR retains its value across
-                # CSW writes, but mixing sizes is rare and not worth
-                # micro-optimising.)
 
             if tar != op.addr:
                 ap_futures.append(self._dp.post(dpmod.ApWrite(
@@ -473,7 +568,9 @@ class MemAp(Ap, Batcher):
             try:
                 await asyncio.gather(*ap_futures)
             except Exception as exc:
-                # Propagate to all unresolved user futures.
+                # Propagate to all unresolved sub-op futures; the
+                # _PendingBlob callbacks will surface the exception
+                # on the blob's user future.
                 for op, uf, _ in read_results:
                     if not uf.done():
                         uf.set_exception(exc)
@@ -716,22 +813,17 @@ class MemApV2(MemoryMappedComponent, Batcher):
     def write32(self, addr: int, data: int):
         return self.post(Write32(addr=addr, data=data))
 
-    # Byte-granular convenience helpers — the implementation only
-    # depends on read{8,16,32} / write{8,16,32}, so we delegate.
-    # ``MemAp._byte_io`` is the byte-granular decomposer; it only
-    # touches ``self.read{8,16,32}``/``self.write{8,16,32}`` so it
-    # works with any object that exposes those — including a
-    # ``MemApV2`` which doesn't inherit from ``MemAp``. Bind the
-    # unbound method to keep one implementation.
+    # Byte-granular convenience helpers — same blob-op contract as
+    # MemAp; flush_ops handles the decomposition.
     async def mem_read(self, addr: int, size: int) -> bytes:
         if size == 0:
             return b""
-        return await MemAp._byte_io(self, addr, size, data=None)
+        return await self.post(ReadBlob(addr=addr, size=size))
 
     async def mem_write(self, addr: int, data: bytes) -> None:
         if not data:
             return
-        await MemAp._byte_io(self, addr, len(data), data=data)
+        await self.post(WriteBlob(addr=addr, data=bytes(data)))
 
     # -- Lowering ---------------------------------------------------
 
@@ -740,6 +832,9 @@ class MemApV2(MemoryMappedComponent, Batcher):
         the bus. Mirrors :meth:`MemAp.flush_ops`; the only difference
         is the access path: ``self._bus.read32/write32`` here vs.
         ``self._dp.post(ApRead/ApWrite)`` there. Same wire effect."""
+        loop = asyncio.get_running_loop()
+        expanded = MemAp._expand_blobs(batch, loop)
+
         ap_futures: list[asyncio.Future] = []
         read_results: list[tuple[object, asyncio.Future, asyncio.Future]] = []
 
@@ -749,7 +844,7 @@ class MemApV2(MemoryMappedComponent, Batcher):
         csw = None
         tar = None
 
-        for op, user_future in batch:
+        for op, user_future in expanded:
             try:
                 size_field = self._size_for(op)
             except TypeError as exc:
