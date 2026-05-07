@@ -224,6 +224,25 @@ def _decompose_byte_io(
 
 # --- MEM-AP --------------------------------------------------------
 
+# --- Registry against Ap.db ----------------------------------------
+#
+# IDR equality (Ap.db) masks REVISION (31:28) and VARIANT (7:4), so
+# one registration per (DESIGNER, CLASS, TYPE) covers all silicon
+# revisions and variants. Standard ARM-designer types:
+#
+#   0x04770001  AHB-AP   (TYPE=1)
+#   0x04770002  APB-AP   (TYPE=2)
+#   0x04770004  AXI-AP   (TYPE=4)
+#   0x04770005  AHB5-AP  (TYPE=5)
+#   0x04770006  APB4-AP  (TYPE=6)
+#   0x04770007  AXI5-AP  (TYPE=7)
+#   0x04770008  AHB5-AP with enhanced HPROT (TYPE=8)
+
+@Ap.db.register(*[ApIdr.from_idr(_idr)
+                  for _idr in (0x04770001, 0x04770002,
+                               0x04770004, 0x04770005,
+                               0x04770006, 0x04770007,
+                               0x04770008)])
 class MemAp(Ap, Batcher):
     """MEM-AP base class. Concrete bus types (AHB / APB / AXI) all
     use the same register layout and operation flow; they're
@@ -613,27 +632,15 @@ class MemAp(Ap, Batcher):
                 | (size & 0b111))
 
 
-# --- Registry against Ap.db ----------------------------------------
-#
-# IDR equality (Ap.db) masks REVISION (31:28) and VARIANT (7:4), so
-# one registration per (DESIGNER, CLASS, TYPE) covers all silicon
-# revisions and variants. Standard ARM-designer types:
-#
-#   0x04770001  AHB-AP   (TYPE=1)
-#   0x04770002  APB-AP   (TYPE=2)
-#   0x04770004  AXI-AP   (TYPE=4)
-#   0x04770005  AHB5-AP  (TYPE=5)
-#   0x04770006  APB4-AP  (TYPE=6)
-#   0x04770007  AXI5-AP  (TYPE=7)
-#   0x04770008  AHB5-AP with enhanced HPROT (TYPE=8)
-
-for _idr in (0x04770001, 0x04770002, 0x04770004,
-             0x04770005, 0x04770006, 0x04770007, 0x04770008):
-    Ap.db.register(ApIdr.from_idr(_idr))(MemAp)
-
 
 # --- ADIv6 / APv2 MEM-AP -------------------------------------------
 
+# DEVARCH for APv2 MEM-AP per IHI0074F: ARCHITECT=0x23B (ARM),
+# ARCHID=0x0A17. devarch_db's eq func masks REVISION, so one
+# registration covers all silicon revisions.
+@MemoryMappedComponent.devarch_db.register(
+    DevArch(architect=0x23B, archid=0x0A17, revision=0, present=True)
+)
 class MemApV2(MemoryMappedComponent, Batcher):
     """ADIv6 / APv2 MEM-AP. Registered against
     ``MemoryMappedComponent.devarch_db`` keyed on ARCHID 0x0A17 so
@@ -901,10 +908,3 @@ class MemApV2(MemoryMappedComponent, Batcher):
             mask = (1 << (self._SIZE_BYTES[self._size_for(op)] * 8)) - 1
             user_future.set_result((raw >> shift) & mask)
 
-
-# DEVARCH for APv2 MEM-AP per IHI0074F: ARCHITECT=0x23B (ARM),
-# ARCHID=0x0A17. devarch_db's eq func masks REVISION, so one
-# registration covers all silicon revisions.
-MemoryMappedComponent.devarch_db.register(
-    DevArch(architect=0x23B, archid=0x0A17, revision=0, present=True)
-)(MemApV2)
