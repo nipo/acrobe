@@ -49,6 +49,51 @@ def ftdi_baudrate_divisor(baudrate):
     encoded = integer | (_FRAC_CODE[frac] << 14)
     return actual, encoded
 
+class WriteOp:
+    def __init__(self, blob):
+        self.blob = blob
+        self.future = asyncio.Future()
+
+    async def run(self, ep, mps):
+        for offset in range(0, len(self.blob), mps):
+            await ep.write(self.blob[offset:offset + mps])
+        self.future.set_result(None)
+
+class ReadOp:
+    def __init__(self, size, timeout = 1):
+        self.size = size
+        self.blob = b""
+        self.future = asyncio.Future()
+        self.timeout = timeout
+
+    async def run(self, ep, mps):
+        stall_count = 0
+        deadline = time.monotonic() + self.timeout
+        while len(self.blob) < self.size:
+            if time.monotonic() > deadline:
+                self.future.set_exception(TransferTimeout(
+                    f"FTDI read timeout: got {len(self.blob)}/{self.size} "
+                    f"payload bytes in {self.timeout}s"))
+                return
+
+            try:
+                data = await ep.read(mps)
+            except TransferTimeout:
+                continue
+            except TransferStalled as e:
+                stall_count += 1
+                if stall_count > 3:
+                    self.future.set_exception(e)
+                    return
+                self._pair.in_.resume()
+                continue
+
+            if len(data) <= 2:
+                continue
+            self.blob += data[2:]
+            deadline = time.monotonic() + self.timeout
+
+        self.future.set_result(self.blob)
 
 class FtdiTransport:
     """FTDI USB transport implementing the MPSSE Transport protocol.
@@ -64,6 +109,12 @@ class FtdiTransport:
         self._interface_index = interface_index
         self._pair = pair
         self._max_packet_size = max_packet_size
+        self._read_queue = asyncio.Queue()
+        self._write_queue = asyncio.Queue()
+        self._lock = asyncio.Lock()
+        self._reader = None
+        self._writer = None
+
         if ctx is not None:
             # Ctx-owning transports register a fallback close so the
             # USB device handle is released even if .close() never
@@ -234,10 +285,46 @@ class FtdiTransport:
     # needs to stay within the host-controller's transfer limits.
     _WRITE_CHUNK = 65536
 
-    async def write(self, data: bytes):
+    def write(self, data: bytes):
         """Write data to the FTDI bulk OUT endpoint."""
-        for offset in range(0, len(data), self._WRITE_CHUNK):
-            await self._pair.out.write(data[offset:offset + self._WRITE_CHUNK])
+        w = WriteOp(data)
+        self._write_queue.put_nowait(w)
+        if self._writer is None:
+            self._writer = asyncio.create_task(self._writer_worker())
+        return w.future
+
+    async def _writer_worker(self):
+        while True:
+            async with self._lock:
+                try:
+                    todo = self._write_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    self._writer = None
+                    return
+            await todo.run(self._pair.out, self._max_packet_size)
+
+    # Maximum time to spend in read() before raising a timeout.
+    _READ_DEADLINE = 1.0
+
+    def read(self, size: int, timeout: float|None = None):
+        """Read data from the FTDI bulk IN endpoint."""
+        if timeout is None:
+            timeout = self._READ_DEADLINE
+        r = ReadOp(size, timeout = timeout)
+        self._read_queue.put_nowait(r)
+        if self._reader is None:
+            self._reader = asyncio.create_task(self._reader_worker())
+        return r.future
+
+    async def _reader_worker(self):
+        while True:
+            async with self._lock:
+                try:
+                    todo = self._read_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    self._reader = None
+                    return
+            await todo.run(self._pair.in_, self._max_packet_size)
 
     async def transfer(self, data: bytes, byte_count: int) -> bytes:
         """Write data and read byte_count bytes concurrently.
@@ -252,57 +339,6 @@ class FtdiTransport:
             self.read(byte_count))
         return rsp
 
-    # Maximum time to spend in read() before raising a timeout.
-    _READ_DEADLINE = 1.0
-
-    async def read(self, byte_count: int) -> bytes:
-        """Read byte_count bytes from the FTDI bulk IN endpoint.
-
-        Strips the 2 modem status bytes that FTDI prepends to every
-        USB IN packet, accumulating payload bytes until byte_count
-        bytes are collected.
-
-        Handles transient USB conditions:
-        - Timeout: retried (normal when read starts before device
-          has data, e.g. during concurrent write+read)
-        - Overflow: doubles read buffer and retries
-        - Stall: clears halt and retries (max 3 times)
-
-        Raises TransferTimeout if no progress after _READ_DEADLINE
-        seconds, preventing infinite loops from modem-only packets.
-        """
-        mps = self._max_packet_size
-        read_size = mps
-        stall_count = 0
-        deadline = time.monotonic() + self._READ_DEADLINE
-        result = bytearray()
-        while len(result) < byte_count:
-            if time.monotonic() > deadline:
-                raise TransferTimeout(
-                    f"FTDI read timeout: got {len(result)}/{byte_count} "
-                    f"payload bytes in {self._READ_DEADLINE}s")
-            try:
-                data = await self._pair.in_.read(read_size)
-            except TransferTimeout:
-                continue
-            except TransferOverflow:
-                read_size *= 2
-                continue
-            except TransferStalled:
-                stall_count += 1
-                if stall_count > 3:
-                    raise
-                self._pair.in_.resume()
-                continue
-            prev_len = len(result)
-            for offset in range(0, len(data), mps):
-                chunk = data[offset:offset + mps]
-                if len(chunk) > 2:
-                    result.extend(chunk[2:])
-            if len(result) > prev_len:
-                deadline = time.monotonic() + self._READ_DEADLINE
-        return bytes(result[:byte_count])
-
     async def close(self):
         """Reset FTDI bitmode and release device.
 
@@ -310,6 +346,15 @@ class FtdiTransport:
         interface — the caller owns the device lifetime.
         """
         from ...lifecycle import cancel_shutdown
+        async with self._lock:
+            while not self._read_queue.empty():
+                self._read_queue.get_nowait().future.set_exception(asyncio.CancelledError())
+            while not self._write_queue.empty():
+                self._write_queue.get_nowait().future.set_exception(asyncio.CancelledError())
+        if x := self._reader:
+            await x
+        if x := self._writer:
+            await x
         cancel_shutdown(self.close)
         idx = self._interface_index + 1
         await self._device.vendor_control(
