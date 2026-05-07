@@ -345,8 +345,3 @@ class JtagDp(dpmod.Dp):
         except Exception as e:
             import traceback
             traceback.print_exc()
-
-        await asyncio.gather(*[r for (_,r) in batch])
-
-        for op, result in batch:
-            self.logger.protocol("%s -> %#010x", op, result.result() or 0)
