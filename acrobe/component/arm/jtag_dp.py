@@ -210,10 +210,16 @@ class JtagDpLowerer:
     def ap_access(self, read: bool, address: int, data: int):
         """
         Low-level APACC shift, no upper address update.
+
+        The AP needs ``INTER_AP_RUN`` idle TCKs in Run-Test/Idle
+        between successive APACC shifts. We bake that into the
+        APACC's ``post_dr_run`` so the adapter folds those cycles
+        into the same MPSSE submission instead of queuing a separate
+        ``Tap.run()`` op cascading through every layer.
         """
         lower = self.tap.APACC(_Wire.pack(read, address, data),
-                               read_tdo = self.pending is not None)
-        self.tap.run(self.INTER_AP_RUN)
+                               read_tdo = self.pending is not None,
+                               post_dr_run = self.INTER_AP_RUN)
         if self.pending:
             self.chain_data(self.pending, lower)
             self.pending = None

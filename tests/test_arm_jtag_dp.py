@@ -50,6 +50,8 @@ class RecordingDpTap(JtagDpTap):
                     "tdi": int(op.tdi) if op.tdi is not None else None,
                     "len": len(op.tdi) if op.tdi is not None else 0,
                     "read_tdo": op.read_tdo,
+                    "pre_dr_run": op.pre_dr_run,
+                    "post_dr_run": op.post_dr_run,
                 })
                 if op.read_tdo:
                     bits = len(op.tdi) if op.tdi is not None else 35
@@ -250,9 +252,11 @@ class TestIdleTcks:
     async def test_inter_ap_run_after_apacc(self):
         # AP transactions are behind a resynchronizing gateway and need
         # idle TCKs between Update-DR and the next Capture-DR. The
-        # lowerer emits a Run with INTER_AP_RUN cycles after every
-        # APACC shift; DPACC shifts (SELECT writes, RDBUFF reads) don't
-        # need them.
+        # lowerer bakes those into the APACC TapShift's post_dr_run so
+        # the adapter folds them into the same MPSSE submission rather
+        # than emitting a separate _TapRun cascading through the
+        # layers. DPACC shifts (SELECT writes, RDBUFF reads) carry no
+        # post-shift idle.
         tap, dp = _make_dp()
 
         tap.queue_response(_Wire.ACK_OK_FAULT, 0)
@@ -260,12 +264,15 @@ class TestIdleTcks:
         await dp.post(ApRead(0x1234))
 
         # 3 shifts: SELECT (DPACC), ApRead (APACC), RDBUFF (DPACC).
-        # Only the APACC is followed by a Run.
         assert len(tap.shifts) == 3
         assert tap.shifts[0]["ir"] == JtagDpTap.DPACC.ir
+        assert tap.shifts[0]["post_dr_run"] == 0
         assert tap.shifts[1]["ir"] == JtagDpTap.APACC.ir
+        assert tap.shifts[1]["post_dr_run"] == JtagDpLowerer.INTER_AP_RUN
         assert tap.shifts[2]["ir"] == JtagDpTap.DPACC.ir
-        assert tap.runs == [JtagDpLowerer.INTER_AP_RUN]
+        assert tap.shifts[2]["post_dr_run"] == 0
+        # No standalone _TapRun ops anymore.
+        assert tap.runs == []
 
 
 # -- Abort -----------------------------------------------------------

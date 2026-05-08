@@ -257,7 +257,13 @@ class JtagMpsse(jtag.JtagInterface):
         self._state = self.STATE_PAUSE
 
     def _emit_shift(self, mpsse_ops, op):
-        """Emit Pause → Shift → data → Exit1 → Pause.
+        """Emit Pause → Shift → data → Exit1 → Pause/RTI.
+
+        If ``op.post_run`` is non-zero, the trailing framing goes
+        Exit1 → Update → RTI and runs the requested number of idle
+        TCKs in RTI rather than parking in Pause-DR. Saves a separate
+        Run op cascade for protocols (e.g. ARM AP) that need
+        inter-shift idle.
 
         Returns (mpsse_start, mpsse_end) indices of ops contributing to TDO.
         """
@@ -265,12 +271,19 @@ class JtagMpsse(jtag.JtagInterface):
 
         tdi = op.tdi
         read = op.read_tdo
+        post_run = op.post_run
 
         if not isinstance(tdi, BitStringBase):
             raise TypeError(f"Expected BitString for tdi, got {type(tdi)}")
 
         cycle_count = len(tdi)
         if cycle_count == 0:
+            if post_run:
+                # Empty shift but caller still wants trailing idle.
+                # Pause → Exit2 → Update → RTI, then idle.
+                mpsse_ops.append(ShiftTms(0b011, 3))
+                self._state = self.STATE_RTI
+                self._emit_idle_in_rti(mpsse_ops, post_run)
             return (len(mpsse_ops), len(mpsse_ops))
 
         # Pause → Exit2 → Shift
@@ -301,8 +314,28 @@ class JtagMpsse(jtag.JtagInterface):
 
         mpsse_end = len(mpsse_ops)
 
-        # Exit1 → Pause
-        mpsse_ops.append(ShiftTms(0b0, 1))
+        if post_run:
+            # Exit1 → Update → RTI (TMS=0,1 LSB-first → 0b01 sent
+            # over 2 cycles), then idle TCKs.
+            mpsse_ops.append(ShiftTms(0b01, 2))
+            self._state = self.STATE_RTI
+            self._emit_idle_in_rti(mpsse_ops, post_run)
+        else:
+            # Exit1 → Pause
+            mpsse_ops.append(ShiftTms(0b0, 1))
+            # State remains PAUSE
 
-        # State remains PAUSE
         return (mpsse_start, mpsse_end)
+
+    @staticmethod
+    def _emit_idle_in_rti(mpsse_ops, cycles):
+        """Emit ``cycles`` idle TCKs assuming the FSM is already in
+        Run-Test/Idle (TMS held low). Splits into ClockBytes for full
+        bytes and a tail ClockBits."""
+        left = cycles
+        while left >= 8:
+            c = min(left, 65536 * 8) & ~7
+            mpsse_ops.append(ClockBytes(c // 8))
+            left -= c
+        if left:
+            mpsse_ops.append(ClockBits(left))

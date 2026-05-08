@@ -26,15 +26,24 @@ from ..part_id import PartId
 @wire.op("9a3b4125-5192-4298-9cb8-4400ed9735e0")
 @dataclass(frozen=True, slots=True)
 class Shift:
-    """Shift data through TDI/TDO."""
+    """Shift data through TDI/TDO.
+
+    ``post_run`` requests ``post_run`` idle TCKs in Run-Test/Idle
+    *immediately after* the data shift, baked into the same MPSSE
+    submission. Used by upper layers (e.g. ARM JTAG-DP) to insert
+    inter-transaction idle without paying for a separate Run op
+    cascading through Tap → Chain → JtagInterface.
+    """
 
     tdi: BitString
     read_tdo: bool = True
+    post_run: int = 0
 
     def __repr__(self):
         tdi = repr(self.tdi) if self.tdi is not None else '-'
         no_tdo = ', notdo' if not self.read_tdo else ''
-        return f"Shift({tdi}{no_tdo})"
+        post = f", run+{self.post_run}" if self.post_run else ''
+        return f"Shift({tdi}{no_tdo}{post})"
 
 @wire.op("d21e382f-f032-41ac-8355-5a48f4cfada7")
 @dataclass(frozen=True, slots=True)
@@ -106,12 +115,25 @@ class _TapShift:
     ir_value: int | None
     tdi: BitString | None
     read_tdo: bool
+    # Idle TCKs to insert in Run-Test/Idle either side of this shift.
+    # ``pre_dr_run`` runs before DR selection (still issued even when
+    # ``tdi`` is ``None``). ``post_dr_run`` runs after the DR shift,
+    # baked into the bit-level Shift's framing so it doesn't cost a
+    # separate _TapRun op cascading through the layers — used by
+    # ARM JTAG-DP for inter-AP idle.
+    pre_dr_run: int = 0
+    post_dr_run: int = 0
 
     def __repr__(self):
         ir = f"{self.ir_value:#x}" if self.ir_value is not None else '-'
         tdi = repr(self.tdi) if self.tdi is not None else '-'
         no_tdo = ', -' if not self.read_tdo else ''
-        return f"TapShift({ir}, {tdi}{no_tdo})"
+        runs = ""
+        if self.pre_dr_run:
+            runs += f", pre+{self.pre_dr_run}"
+        if self.post_dr_run:
+            runs += f", post+{self.post_dr_run}"
+        return f"TapShift({ir}, {tdi}{no_tdo}{runs})"
 
 @dataclass(frozen=True, slots=True)
 class _TapRun:
@@ -196,9 +218,18 @@ class TapInstruction:
         self.ir = ir
         self.dr = dr
 
-    def __call__(self, tdi=None, read_tdo=None):
-        """Post a DR shift with this instruction. Returns Future -> TDO value."""
-        return self.tap._post_instruction(self, tdi, read_tdo)
+    def __call__(self, tdi=None, read_tdo=None,
+                 pre_dr_run: int = 0, post_dr_run: int = 0):
+        """Post a DR shift with this instruction. Returns Future -> TDO value.
+
+        ``pre_dr_run`` / ``post_dr_run`` request idle TCKs in
+        Run-Test/Idle either side of the DR shift — useful for
+        protocols (e.g. ARM AP transactions) that need settling time
+        between consecutive accesses, without paying for a separate
+        ``Tap.run()`` op cascading through every layer."""
+        return self.tap._post_instruction(
+            self, tdi, read_tdo,
+            pre_dr_run=pre_dr_run, post_dr_run=post_dr_run)
 
     def __int__(self):
         return int(self.ir) & ((1 << self.tap.irlen) - 1)
@@ -323,7 +354,8 @@ class Tap(Batcher, Node, InstructionRegistry):
         """
         return self.post(_TapIrStatus())
 
-    def _post_instruction(self, instr, tdi, read_tdo):
+    def _post_instruction(self, instr, tdi, read_tdo,
+                          pre_dr_run: int = 0, post_dr_run: int = 0):
         """Post a DR shift for a given instruction. Called by TapInstruction.__call__."""
         ir_value = int(instr.ir) & ((1 << self.irlen) - 1)
 
@@ -349,7 +381,8 @@ class Tap(Batcher, Node, InstructionRegistry):
             elif not isinstance(tdi, BitStringBase):
                 raise TypeError("tdi must be int, BitString, or None")
 
-        op = _TapShift(ir_value, tdi, read_tdo)
+        op = _TapShift(ir_value, tdi, read_tdo,
+                       pre_dr_run=pre_dr_run, post_dr_run=post_dr_run)
         return self.post(op)
 
     async def flush_ops(self, batch):
@@ -796,12 +829,25 @@ class Chain(Batcher, Node):
                     ir_done = self._parent.post(Shift(ir_tdi, read_tdo=False))
                     self._invalidate_ir_cache_for_shift(tap, op.ir_value)
 
+                # pre_dr_run: idle TCKs in RTI before DR selection.
+                # Issued unconditionally so the cycles still happen
+                # even when the op carries no DR shift.
+                pre_run_future = None
+                if op.pre_dr_run:
+                    pre_run_future = self._parent.post(Run(op.pre_dr_run))
+
                 if op.tdi is not None:
                     self._parent.post(CaptureDr())
                     dr_tdi = self._pad_with(self._pad_zeros, ctx.dr_pre,
                                             op.tdi, ctx.dr_post)
+                    # post_dr_run is baked into the Shift itself so the
+                    # adapter can fold the trailing idle into the shift's
+                    # MPSSE submission — no separate Run op cascading
+                    # through the layers.
                     shift_future = self._parent.post(
-                        Shift(dr_tdi, read_tdo=op.read_tdo))
+                        Shift(dr_tdi,
+                              read_tdo=op.read_tdo,
+                              post_run=op.post_dr_run))
                     if op.read_tdo:
                         resolutions.append(
                             (top_future, shift_future,
@@ -809,6 +855,16 @@ class Chain(Batcher, Node):
                     else:
                         resolutions.append((top_future, shift_future, None))
                     last_anchor = shift_future
+                elif op.post_dr_run:
+                    # No DR shift but caller still asked for trailing
+                    # idle — emit it as a standalone Run.
+                    run_future = self._parent.post(Run(op.post_dr_run))
+                    resolutions.append((top_future, run_future, None))
+                    last_anchor = run_future
+                elif pre_run_future is not None:
+                    # Only pre_dr_run was emitted; anchor on it.
+                    resolutions.append((top_future, pre_run_future, None))
+                    last_anchor = pre_run_future
                 elif ir_done is not None:
                     resolutions.append((top_future, ir_done, None))
                     last_anchor = ir_done
