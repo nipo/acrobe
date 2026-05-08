@@ -240,7 +240,8 @@ class TestTapShift:
 
     @pytest.mark.asyncio
     async def test_dr_padding(self):
-        """DR shift should include pre/post bypass bits."""
+        """DR shift should include pre/post bypass bits, combined into a
+        single chain-wide Shift so the FSM stays in Shift-DR throughout."""
         class MyTap(Tap):
             DATA_REG = Dr(length=8)
             DATA = Instruction(0x01, "DATA_REG")
@@ -260,11 +261,9 @@ class TestTapShift:
         dr_start = next(i for i, op in enumerate(iface.ops) if isinstance(op, CaptureDr))
         dr_shifts = [op for op in iface.ops[dr_start + 1:] if isinstance(op, Shift)]
 
-        # 3 shifts: pre (2 bits), data (8 bits), post (3 bits)
-        assert len(dr_shifts) == 3
-        assert len(dr_shifts[0].tdi) == 2
-        assert len(dr_shifts[1].tdi) == 8
-        assert len(dr_shifts[2].tdi) == 3
+        # One combined shift: dr_pre (2) + data (8) + dr_post (3) = 13 bits.
+        assert len(dr_shifts) == 1
+        assert len(dr_shifts[0].tdi) == 2 + 8 + 3
 
     @pytest.mark.asyncio
     async def test_batching(self):
@@ -360,17 +359,13 @@ class TestIrStatus:
 
         await tap.ir_status()
         shifts = [op for op in iface.ops if isinstance(op, Shift)]
-        # 3 shifts: pre (4 bits, no read), data (6 bits, read), post (5 bits, no read)
-        assert len(shifts) == 3
-        assert len(shifts[0].tdi) == 4
-        assert shifts[0].read_tdo is False
-        assert int(shifts[0].tdi) == 0xf
-        assert len(shifts[1].tdi) == 6
-        assert shifts[1].read_tdo is True
-        assert int(shifts[1].tdi) == 0x3f
-        assert len(shifts[2].tdi) == 5
-        assert shifts[2].read_tdo is False
-        assert int(shifts[2].tdi) == 0x1f
+        # One combined shift: ir_pre (4 ones) + ir (6 ones, BYPASS)
+        # + ir_post (5 ones) = 15 bits, all ones, with read_tdo to
+        # capture the IR status.
+        assert len(shifts) == 1
+        assert len(shifts[0].tdi) == 4 + 6 + 5
+        assert shifts[0].read_tdo is True
+        assert int(shifts[0].tdi) == (1 << 15) - 1
 
     @pytest.mark.asyncio
     async def test_ir_status_no_padding_when_zero(self):

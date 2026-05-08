@@ -1,6 +1,8 @@
 import asyncio
 from typing import Any
 
+from .log import PROTOCOL
+
 
 class Batcher:
     """
@@ -46,7 +48,13 @@ class Batcher:
             self._flush_task = None
 
             try:
-                self.logger.protocol("Batching %s", [top for top, _ in batch])
+                # Skip building the per-op list when PROTOCOL logging
+                # is off — for the deepest layers this list spans
+                # thousands of items per batch and the formatting cost
+                # dominates the actual flush work.
+                if self.logger.isEnabledFor(PROTOCOL):
+                    self.logger.protocol(
+                        "Batching %s", [top for top, _ in batch])
                 await self.flush_ops(batch)
             except Exception as exc:
                 import traceback

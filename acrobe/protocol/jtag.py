@@ -485,6 +485,26 @@ class Chain(Batcher, Node):
         self._contexts = {}  # tap → ChainContext
         self.total_irlen = 0
         self.total_drlen = 0
+        # Per-length BitString caches: dr-pad (zeros) and ir-pad (ones).
+        # Pre-/post-padding for any given context has constant content
+        # but is built fresh for every TapShift; cache it once per
+        # length and reuse across the whole chunk.
+        self._zeros: dict[int, BitString] = {}
+        self._ones: dict[int, BitString] = {}
+
+    def _pad_zeros(self, n: int) -> BitString:
+        bs = self._zeros.get(n)
+        if bs is None:
+            bs = BitString(0, n)
+            self._zeros[n] = bs
+        return bs
+
+    def _pad_ones(self, n: int) -> BitString:
+        bs = self._ones.get(n)
+        if bs is None:
+            bs = BitString(-1, n)
+            self._ones[n] = bs
+        return bs
 
     def context(self, tap) -> ChainContext:
         return self._contexts[tap]
@@ -727,12 +747,17 @@ class Chain(Batcher, Node):
         posted to the JtagInterface parent.
 
         Fire-and-forget: each top-future is chained via
-        ``add_done_callback`` to the last bit-level future posted for
-        the matching TapOp (read shifts additionally pluck the captured
-        TDO from the data shift). flush_ops returns as soon as the
-        translation is done, so the Batcher's lock releases right away
-        and the next Chain batch can lower in parallel with the in-flight
-        bit-level work.
+        ``add_done_callback`` to the bit-level future of the matching
+        TapOp's combined Shift (with TDO sliced for read shifts).
+        flush_ops returns as soon as the translation is done, so the
+        Batcher's lock releases right away and the next Chain batch can
+        lower in parallel with the in-flight bit-level work.
+
+        Pre-/post-padding for the target tap is concatenated into a
+        single Shift covering the whole chain DR (or IR), instead of
+        emitting separate pre/data/post Shifts. This keeps the chain in
+        Shift-DR throughout, halving the TMS framing in MPSSE for
+        multi-tap chains.
         """
         if self._parent is None:
             raise RuntimeError(f"Chain {self.name!r} has no parent to forward to")
@@ -757,43 +782,35 @@ class Chain(Batcher, Node):
 
             if isinstance(op, _TapIrStatus):
                 self._parent.post(CaptureIr())
-                if ctx.ir_pre:
-                    self._parent.post(
-                        Shift(BitString(-1, ctx.ir_pre), read_tdo=False))
-                data_future = self._parent.post(
-                    Shift(BitString(bypass_val, tap.irlen), read_tdo=True))
-                last_future = data_future
-                if ctx.ir_post:
-                    last_future = self._parent.post(
-                        Shift(BitString(-1, ctx.ir_post), read_tdo=False))
+                tdi = self._pad_with(self._pad_ones, ctx.ir_pre,
+                                     BitString(bypass_val, tap.irlen),
+                                     ctx.ir_post)
+                shift_future = self._parent.post(Shift(tdi, read_tdo=True))
                 self._invalidate_ir_cache_for_shift(tap, bypass_val)
-                self._chain_data(top_future, data_future, last_future)
+                self._chain_tdo(top_future, shift_future,
+                                ctx.ir_pre, tap.irlen)
 
             elif isinstance(op, _TapShift):
                 ir_done = None
                 if op.ir_value is not None and op.ir_value != ctx.current_ir:
-                    ir_data = (BitString(-1, ctx.ir_pre)
-                               + BitString(op.ir_value, tap.irlen)
-                               + BitString(-1, ctx.ir_post))
+                    ir_tdi = self._pad_with(self._pad_ones, ctx.ir_pre,
+                                            BitString(op.ir_value, tap.irlen),
+                                            ctx.ir_post)
                     self._parent.post(CaptureIr())
-                    ir_done = self._parent.post(Shift(ir_data, read_tdo=False))
+                    ir_done = self._parent.post(Shift(ir_tdi, read_tdo=False))
                     self._invalidate_ir_cache_for_shift(tap, op.ir_value)
 
                 if op.tdi is not None:
                     self._parent.post(CaptureDr())
-                    if ctx.dr_pre:
-                        self._parent.post(
-                            Shift(BitString(0, ctx.dr_pre), read_tdo=False))
-                    data_future = self._parent.post(
-                        Shift(op.tdi, read_tdo=op.read_tdo))
-                    last_future = data_future
-                    if ctx.dr_post:
-                        last_future = self._parent.post(
-                            Shift(BitString(0, ctx.dr_post), read_tdo=False))
+                    dr_tdi = self._pad_with(self._pad_zeros, ctx.dr_pre,
+                                            op.tdi, ctx.dr_post)
+                    shift_future = self._parent.post(
+                        Shift(dr_tdi, read_tdo=op.read_tdo))
                     if op.read_tdo:
-                        self._chain_data(top_future, data_future, last_future)
+                        self._chain_tdo(top_future, shift_future,
+                                        ctx.dr_pre, len(op.tdi))
                     else:
-                        self._chain_completion(top_future, last_future)
+                        self._chain_completion(top_future, shift_future)
                 elif ir_done is not None:
                     self._chain_completion(top_future, ir_done)
                 else:
@@ -808,6 +825,21 @@ class Chain(Batcher, Node):
                 if not top_future.done():
                     top_future.set_exception(
                         ValueError(f"Unknown tap op: {type(op).__name__}"))
+
+    @staticmethod
+    def _pad_with(pad_fn, pre: int, data: BitString,
+                  post: int) -> BitString:
+        """Concatenate ``pre`` bits of padding (from ``pad_fn``), the
+        ``data`` BitString, and ``post`` bits of padding. Skips the
+        empty concatenations so the common single-tap case (pre==post==0)
+        returns ``data`` unchanged."""
+        if pre and post:
+            return pad_fn(pre) + data + pad_fn(post)
+        if pre:
+            return pad_fn(pre) + data
+        if post:
+            return data + pad_fn(post)
+        return data
 
     @staticmethod
     def _chain_completion(upper, lower):
@@ -825,23 +857,25 @@ class Chain(Batcher, Node):
         lower.add_done_callback(cb)
 
     @staticmethod
-    def _chain_data(upper, data_future, anchor_future):
-        """Resolve ``upper`` with ``data_future``'s captured TDO once
-        ``anchor_future`` (the last bit-level op of this TapOp)
-        completes. Either future's exception propagates to ``upper``."""
+    def _chain_tdo(upper, lower, offset: int, length: int):
+        """Resolve ``upper`` with ``lower``'s TDO sliced to
+        ``[offset:offset + length]`` once ``lower`` completes. The
+        slice picks the target tap's bits out of a chain-wide combined
+        shift; for ``offset == 0`` and ``length == len(tdo)`` the slice
+        is the whole TDO."""
         def cb(lf):
             if upper.done():
                 return
             try:
-                lf.result()
+                tdo = lf.result()
             except Exception as exc:
                 upper.set_exception(exc)
                 return
-            try:
-                upper.set_result(data_future.result())
-            except Exception as exc:
-                upper.set_exception(exc)
-        anchor_future.add_done_callback(cb)
+            if offset == 0 and length == len(tdo):
+                upper.set_result(tdo)
+            else:
+                upper.set_result(tdo[offset:offset + length])
+        lower.add_done_callback(cb)
 
     def _invalidate_ir_cache_for_shift(self, tap, new_ir):
         """An IR shift just happened: this tap loaded `new_ir`, all
