@@ -203,7 +203,6 @@ class JtagDpLowerer:
 
         acc = self.tap.DPACC(_Wire.pack(read, address, data),
                              read_tdo = self.pending is not None)
-        self.tap.run(42)
         if self.pending:
             self.chain_data(self.pending, acc)
             self.pending = None
@@ -214,8 +213,7 @@ class JtagDpLowerer:
         """
         lower = self.tap.APACC(_Wire.pack(read, address, data),
                                read_tdo = self.pending is not None)
-#        self.tap.run(self.INTER_AP_RUN)
-        self.tap.run(42)
+        self.tap.run(self.INTER_AP_RUN)
         if self.pending:
             self.chain_data(self.pending, lower)
             self.pending = None
