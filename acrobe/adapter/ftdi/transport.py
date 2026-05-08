@@ -66,7 +66,21 @@ class ReadOp:
         self.future = asyncio.Future()
         self.timeout = timeout
 
-    async def run(self, ep, mps):
+    async def run(self, ep, mps, residual: bytes) -> bytes:
+        """Resolve the future with exactly ``self.size`` payload bytes.
+
+        ``residual`` is bytes left over from the previous ReadOp; we
+        consume those first. Any payload pulled past ``self.size`` is
+        returned to be carried over to the next ReadOp — without this,
+        when the FTDI device bundles multiple batches' responses into
+        one USB IN packet the next ReadOp will time out waiting for
+        bytes that have already been read and discarded.
+        """
+        if len(residual) >= self.size:
+            self.future.set_result(residual[:self.size])
+            return residual[self.size:]
+
+        self.blob = residual
         stall_count = 0
         deadline = time.monotonic() + self.timeout
         while len(self.blob) < self.size:
@@ -74,7 +88,7 @@ class ReadOp:
                 self.future.set_exception(TransferTimeout(
                     f"FTDI read timeout: got {len(self.blob)}/{self.size} "
                     f"payload bytes in {self.timeout}s"))
-                return
+                return b""
 
             try:
                 data = await ep.read(mps)
@@ -84,7 +98,7 @@ class ReadOp:
                 stall_count += 1
                 if stall_count > 3:
                     self.future.set_exception(e)
-                    return
+                    return b""
                 self._pair.in_.resume()
                 continue
 
@@ -93,7 +107,10 @@ class ReadOp:
             self.blob += data[2:]
             deadline = time.monotonic() + self.timeout
 
+        leftover = self.blob[self.size:]
+        self.blob = self.blob[:self.size]
         self.future.set_result(self.blob)
+        return leftover
 
 class FtdiTransport:
     """FTDI USB transport implementing the MPSSE Transport protocol.
@@ -114,6 +131,12 @@ class FtdiTransport:
         self._lock = asyncio.Lock()
         self._reader = None
         self._writer = None
+        # Payload bytes pulled from the IN endpoint past the previous
+        # ReadOp's requested size, carried over to the next ReadOp.
+        # FTDI may bundle multiple batches' responses into a single USB
+        # packet — without this carry-over, the bytes belonging to the
+        # next ReadOp would be silently discarded.
+        self._read_residual = b""
 
         if ctx is not None:
             # Ctx-owning transports register a fallback close so the
@@ -324,7 +347,8 @@ class FtdiTransport:
                 except asyncio.QueueEmpty:
                     self._reader = None
                     return
-            await todo.run(self._pair.in_, self._max_packet_size)
+            self._read_residual = await todo.run(
+                self._pair.in_, self._max_packet_size, self._read_residual)
 
     async def transfer(self, data: bytes, byte_count: int) -> bytes:
         """Write data and read byte_count bytes concurrently.
