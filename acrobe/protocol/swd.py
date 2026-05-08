@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import IntEnum
 
+from .. import wire
 from ..db import Db
 from ..engine import Batcher
 from ..freq_capper import FreqCapper
@@ -41,6 +42,7 @@ class Ack(IntEnum):
 # natural result value (int for Read, None otherwise).
 
 
+@wire.op("5586fd6c-2331-4baa-b4c6-cb64b6ebd014")
 @dataclass(frozen=True, slots=True)
 class Read:
     """Read a DP or AP register.
@@ -57,6 +59,7 @@ class Read:
     addr: int
 
 
+@wire.op("b2dee1b7-e97e-40cf-8c2a-3cd47e90c26e")
 @dataclass(frozen=True, slots=True)
 class Write:
     """Write a DP or AP register. Future resolves to ``None``."""
@@ -66,6 +69,7 @@ class Write:
     data: int
 
 
+@wire.op("436acd28-e821-4fbc-9f78-63c79481e09c")
 @dataclass(frozen=True, slots=True)
 class Run:
     """``cycles`` idle cycles with SWDIO held LOW.
@@ -77,6 +81,7 @@ class Run:
     cycles: int
 
 
+@wire.op("95e6b9b2-d19a-4f2d-b598-37b6ac73ce7d")
 @dataclass(frozen=True, slots=True)
 class Wakeup:
     """``cycles`` cycles with SWDIO held HIGH (a partial line reset).
@@ -87,6 +92,7 @@ class Wakeup:
     cycles: int = 50
 
 
+@wire.op("badc53e2-f662-4f87-8d75-7a30a5d5caf4")
 @dataclass(frozen=True, slots=True)
 class JtagToSwd:
     """JTAG-to-SWD switch sequence: line reset + 0x79E7 (MSB-first
@@ -95,6 +101,7 @@ class JtagToSwd:
     primitive at adapter init."""
 
 
+@wire.op("60ab22a0-f913-4de0-94ae-a60de00ad212")
 @dataclass(frozen=True, slots=True)
 class LineReset:
     """SWD line reset: ≥50 cycles SWDIO=1 followed by ≥2 idle
@@ -105,10 +112,19 @@ class LineReset:
 # --- Errors -----------------------------------------------------------
 
 
+@wire.error("bd47eb9a-4760-4ead-8a02-0074851310c2")
+@dataclass
 class SwdAccessFailure(Exception):
     """SWD transaction failed (FAULT, parity error, invalid ACK, …)."""
 
+    detail: str = ""
 
+    def __post_init__(self):
+        super().__init__(self.detail)
+
+
+@wire.error("fbf9342f-2c8a-430d-b298-7bec41f3275d")
+@dataclass
 class SwdWait(SwdAccessFailure):
     """SWD ACK = WAIT. Caller should clear sticky bits via ABORT and
     retry, or insert idle cycles and retry."""
@@ -117,6 +133,9 @@ class SwdWait(SwdAccessFailure):
 # --- Abstract Interface ------------------------------------------------
 
 
+@wire.node("7dc3ddc3-71ce-4dbf-9b83-6cded77a9b73",
+           uses=[Read, Write, Run, Wakeup, JtagToSwd, LineReset,
+                 SwdAccessFailure, SwdWait])
 class Interface(Batcher, FreqCapper, Node):
     """SWD wire interface.
 
