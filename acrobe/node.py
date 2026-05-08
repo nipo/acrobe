@@ -260,6 +260,12 @@ class Node:
         self._children = []
         self._started = False
         self._metadata = {}
+        # Single-flight bookkeeping so concurrent child_summon /
+        # start_tree calls don't open the same hardware twice. Lazy
+        # to avoid bind-to-loop on Nodes that are constructed before
+        # an event loop exists.
+        self._summon_inflight: dict[str, asyncio.Future] = {}
+        self._start_lock: asyncio.Lock | None = None
 
     def __str__(self):
         return self._name
@@ -546,24 +552,64 @@ class Node:
 
         Supports "name(key=value,...)" syntax (D10): options are
         applied via option_set() before the node is started.
+
+        Concurrent calls for the same ``parts`` are single-flight:
+        spawn-and-attach happens once per (parent, name), and
+        ``start()`` is exclusive per node. Two parallel commands
+        targeting the same chain therefore share one spawned chain
+        and one ``start()`` call.
         """
         if not parts:
             return self
         raw_name, *rest = parts
         bare_name, opts = self._parse_options(raw_name)
-        child = self.child_lookup(bare_name)
-        if child is None:
-            child = await self._child_spawn_mro(bare_name)
-            if child._parent is None:
-                self._child_attach(child)
+        child = await self._lookup_or_spawn(bare_name)
         for k, v in opts.items():
             child.option_set(k, v)
-        if not child._started:
-            await child.start()
-            child._started = True
+        await child._ensure_started()
         if not rest:
             return child
         return await child.child_summon(*rest)
+
+    async def _lookup_or_spawn(self, name):
+        """Return the child named *name*, spawning + attaching once
+        across concurrent callers."""
+        child = self.child_lookup(name)
+        if child is not None:
+            return child
+        fut = self._summon_inflight.get(name)
+        if fut is not None:
+            return await fut
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._summon_inflight[name] = fut
+        try:
+            child = self.child_lookup(name)
+            if child is None:
+                child = await self._child_spawn_mro(name)
+                if child._parent is None:
+                    self._child_attach(child)
+            fut.set_result(child)
+            return child
+        except BaseException as exc:
+            if not fut.done():
+                fut.set_exception(exc)
+            raise
+        finally:
+            self._summon_inflight.pop(name, None)
+
+    async def _ensure_started(self):
+        """Idempotent, concurrency-safe start. Multiple awaits race
+        through one ``start()`` call."""
+        if self._started:
+            return
+        if self._start_lock is None:
+            self._start_lock = asyncio.Lock()
+        async with self._start_lock:
+            if self._started:
+                return
+            await self.start()
+            self._started = True
 
     async def start(self):
         pass
@@ -572,9 +618,7 @@ class Node:
         pass
 
     async def start_tree(self):
-        if not self._started:
-            await self.start()
-            self._started = True
+        await self._ensure_started()
         for child in self._children:
             await child.start_tree()
 
