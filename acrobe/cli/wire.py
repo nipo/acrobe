@@ -2,7 +2,6 @@ import asyncclick as click
 
 from . import base
 from .. import wire
-from ..adapter.model import make_hw_root
 
 
 @base.cli.group(help="Wire (client/server transport) tools")
@@ -31,12 +30,12 @@ async def dump_idl():
               help="Bind address (default: all interfaces)")
 @click.option("--port", default=8080, type=int,
               help="Bind port (default: 8080)")
-async def serve(host, port):
+@click.pass_context
+async def serve(ctx, host, port):
     from aiohttp import web
     from ..wire.server import make_app
 
-    hw_root = make_hw_root()
-    app = make_app(hw_root)
+    app = make_app(ctx.obj.hw_root)
 
     runner = web.AppRunner(app)
     await runner.setup()

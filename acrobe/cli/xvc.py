@@ -3,7 +3,6 @@
 import asyncclick as click
 
 from . import base
-from ..adapter.model import make_hw_root
 from ..protocol.jtag import JtagInterface
 from ..xvc.listener import XvcListener
 
@@ -20,15 +19,13 @@ from ..xvc.listener import XvcListener
                    f"{XvcListener.DEFAULT_PORT})")
 @click.option("-H", "--host", type=str, default="0.0.0.0",
               help="Bind address (default 0.0.0.0)")
-async def xvc_server(root_path, tcp_port, host):
-    parts = root_path.strip("/").split("/")
-    hw_root = make_hw_root()
-    leaf = await hw_root.child_summon(*parts)
+@click.pass_context
+async def xvc_server(ctx, root_path, tcp_port, host):
+    leaf = await ctx.obj.resolve(root_path)
     if not isinstance(leaf, JtagInterface):
         raise click.ClickException(
             f"{root_path!r} does not resolve to a JtagInterface "
             f"(got {type(leaf).__name__})")
-    await leaf.start_tree()
     listener = XvcListener(leaf, host=host, port=tcp_port)
     click.echo(f"XVC server on {host}:{tcp_port} for {leaf.fqdn}")
     await listener.serve_forever()

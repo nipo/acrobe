@@ -8,9 +8,7 @@ import sys
 import asyncclick as click
 
 from . import base
-from ..adapter.model import make_hw_root
 from ..target import Target, Field
-from ..node import Node
 
 
 @base.cli.group(help="Chip programming")
@@ -20,15 +18,7 @@ from ..node import Node
               help="Target index or name (default: 0)")
 @click.pass_context
 async def chip(ctx, root_paths, target_sel):
-    hw_root = make_hw_root()
-
-    roots = []
-    for path in root_paths:
-        parts = path.strip("/").split("/")
-        leaf = await hw_root.child_summon(*parts)
-        if isinstance(leaf, Node):
-            await leaf.start_tree()
-        roots.append(leaf)
+    roots = [await ctx.obj.resolve(path) for path in root_paths]
 
     field = Field()
     await field.discover(*roots)
@@ -38,7 +28,6 @@ async def chip(ctx, root_paths, target_sel):
         click.echo("No targets found.", err=True)
         sys.exit(1)
 
-    # Select target by index or name
     target = None
     try:
         idx = int(target_sel)
@@ -56,9 +45,7 @@ async def chip(ctx, root_paths, target_sel):
         sys.exit(1)
 
     click.echo(f"Target: {target.name}")
-    ctx.ensure_object(dict)
-    ctx.obj["target"] = target
-    ctx.obj["hw_root"] = hw_root
+    ctx.obj.target = target
 
 
 @chip.command(help="Program target with a single resource")
@@ -69,7 +56,7 @@ async def chip(ctx, root_paths, target_sel):
 @click.option('-C', '--assume-clean', is_flag=True, help="Assume flash is blank")
 @click.pass_context
 async def program(ctx, resource, erase, verify, run, assume_clean):
-    target = ctx.obj["target"]
+    target = ctx.obj.target
     node = await resource.resolve()
     await target.write(node, do_erase=erase, do_verify=verify,
                        do_start=run, assume_clean=assume_clean)
@@ -80,7 +67,7 @@ async def program(ctx, resource, erase, verify, run, assume_clean):
 @click.argument('resource', required=True, type=base.RESOURCE)
 @click.pass_context
 async def check(ctx, resource):
-    target = ctx.obj["target"]
+    target = ctx.obj.target
     node = await resource.resolve()
     ok = await target.verify(node)
     if ok:
@@ -97,7 +84,7 @@ async def check(ctx, resource):
 @click.pass_context
 async def readback(ctx, filename, begin, end):
     from ..memory_map import save
-    target = ctx.obj["target"]
+    target = ctx.obj.target
     m = await target.read(begin=begin, end=end)
     save(m, filename)
     click.echo(f"Read back to {filename}.")
@@ -106,6 +93,6 @@ async def readback(ctx, filename, begin, end):
 @chip.command(help="Reset target")
 @click.pass_context
 async def reset(ctx):
-    target = ctx.obj["target"]
+    target = ctx.obj.target
     await target.reset()
     click.echo("Reset.")

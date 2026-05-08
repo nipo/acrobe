@@ -4,6 +4,42 @@ import asyncclick as click
 from .. import log
 
 
+class CliContext:
+    """Shared per-invocation CLI state.
+
+    Holds a lazily-built :class:`HwRoot` so that multiple subcommands
+    in the same invocation — and, once command chaining lands,
+    multiple commands run via operators like ``&`` or ``;`` —
+    operate on the same hardware tree. One USB open per adapter,
+    one ``Batcher`` per chain, and operations from concurrent
+    commands naturally interleave through the asyncio engine.
+
+    Subcommands access this via ``@click.pass_context`` and
+    ``ctx.obj``. Group-specific state (e.g. ``chip``'s selected
+    target) attaches as plain attributes.
+    """
+
+    def __init__(self):
+        self._hw_root = None
+
+    @property
+    def hw_root(self):
+        if self._hw_root is None:
+            from ..adapter.model import make_hw_root
+            self._hw_root = make_hw_root()
+        return self._hw_root
+
+    async def resolve(self, path):
+        """Walk *path* through the shared :class:`HwRoot`, start its
+        subtree, and return the leaf :class:`Node`."""
+        from ..node import Node
+        parts = path.strip("/").split("/")
+        leaf = await self.hw_root.child_summon(*parts)
+        if isinstance(leaf, Node):
+            await leaf.start_tree()
+        return leaf
+
+
 @click.group()
 @click.option('-v', '--verbose', count=True, help="More verbosity")
 @click.option('-q', '--quiet', count=True, help="Less verbosity")
@@ -15,7 +51,12 @@ from .. import log
               help="Silent components by regex")
 @click.option('--only-re', type=str, default=None,
               help="Only show components matching regex")
-async def cli(verbose, quiet, timestamp, no_color, silent, silent_re, only_re):
+@click.pass_context
+async def cli(ctx, verbose, quiet, timestamp, no_color,
+              silent, silent_re, only_re):
+    if ctx.obj is None:
+        ctx.obj = CliContext()
+
     base_index = log.LEVELS.index(logging.ERROR)
     target = min(max(0, base_index + verbose - quiet), len(log.LEVELS) - 1)
     level = log.LEVELS[target]

@@ -1,7 +1,7 @@
 import asyncclick as click
 
 from . import base
-from ..adapter.model import make_hw_root, make_adapter_name
+from ..adapter.model import make_adapter_name
 from ..node import Node
 
 
@@ -18,8 +18,9 @@ async def info():
 
 
 @info.command(help="List recognized adapters")
-async def adapters():
-    hw_root = make_hw_root()
+@click.pass_context
+async def adapters(ctx):
+    hw_root = ctx.obj.hw_root
     any_found = False
     for enum in hw_root._enumerators:
         found = await enum.scan()
@@ -43,16 +44,9 @@ async def adapters():
 @info.command(help="Resolve root path, discover, dump component tree")
 @click.option('-r', '--root', 'root_path', required=True,
               help="Component path (e.g. proby-9/jtag)")
-async def enumerate(root_path):
-    parts = root_path.strip("/").split("/")
-    hw_root = make_hw_root()
-
-    leaf = await hw_root.child_summon(*parts)
-
-    # Start the leaf's subtree so children are populated
-    # (e.g. Chain.start() discovers TAPs)
-    if isinstance(leaf, Node):
-        await leaf.start_tree()
+@click.pass_context
+async def enumerate(ctx, root_path):
+    leaf = await ctx.obj.resolve(root_path)
 
     click.echo("Node tree:")
     component_dump(leaf, "  ")
@@ -66,12 +60,9 @@ async def enumerate(root_path):
               help="--full prints every feature register field by "
                    "field via Bitfield.dump_pretty; default is a "
                    "one-line headline summary")
-async def cpu(root_path, full):
-    parts = root_path.strip("/").split("/")
-    hw_root = make_hw_root()
-    leaf = await hw_root.child_summon(*parts)
-    if isinstance(leaf, Node):
-        await leaf.start_tree()
+@click.pass_context
+async def cpu(ctx, root_path, full):
+    leaf = await ctx.obj.resolve(root_path)
 
     # Lazy import — keeps the CLI import-cheap when ARM components
     # aren't loaded as a plugin.

@@ -3,7 +3,6 @@
 import asyncclick as click
 
 from . import base
-from ..adapter.model import make_hw_root
 from ..protocol.serial import SerialPort
 from ..rfc2217 import Rfc2217Listener
 
@@ -16,15 +15,13 @@ from ..rfc2217 import Rfc2217Listener
               help="TCP port to listen on (default 2217)")
 @click.option("-H", "--host", type=str, default="0.0.0.0",
               help="Bind address (default 0.0.0.0)")
-async def serial_server(root_path, tcp_port, host):
-    parts = root_path.strip("/").split("/")
-    hw_root = make_hw_root()
-    leaf = await hw_root.child_summon(*parts)
+@click.pass_context
+async def serial_server(ctx, root_path, tcp_port, host):
+    leaf = await ctx.obj.resolve(root_path)
     if not isinstance(leaf, SerialPort):
         raise click.ClickException(
             f"{root_path!r} does not resolve to a SerialPort "
             f"(got {type(leaf).__name__})")
-    await leaf.start_tree()
     listener = Rfc2217Listener(leaf, host=host, port=tcp_port)
     click.echo(f"RFC 2217 server on {host}:{tcp_port} for {leaf.fqdn}")
     await listener.serve_forever()

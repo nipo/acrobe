@@ -275,11 +275,11 @@ def dump(filename, no_crc):
 @click.option('--no-crc', is_flag=True, help="Skip CRC verification")
 @click.option('--include', 'includes', multiple=True,
               help='Include optional procedure (may repeat)')
-async def run(filename, root_path, action_name, no_crc, includes):
+@click.pass_context
+async def run(ctx, filename, root_path, action_name, no_crc, includes):
     import logging
     from ..stapl import load, Interpreter, StaplExit
     from ..stapl.player import JtagPlayer
-    from ..adapter.model import make_hw_root
     from ..protocol.jtag import JtagInterface
     from .. import log
 
@@ -294,12 +294,8 @@ async def run(filename, root_path, action_name, no_crc, includes):
     actions = list(prog.actions.keys())
     click.echo(f"Available actions: {', '.join(actions)}")
 
-    hw_root = make_hw_root()
-
     if root_path:
-        parts = root_path.strip('/').split('/')
-        leaf = await hw_root.child_summon(*parts)
-        await leaf.start_tree()
+        leaf = await ctx.obj.resolve(root_path)
         if not isinstance(leaf, JtagInterface):
             click.echo(f"Error: {root_path} resolved to {type(leaf).__name__}, "
                         "expected a JtagInterface component", err=True)

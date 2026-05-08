@@ -3,7 +3,6 @@
 import asyncclick as click
 
 from . import base
-from ..adapter.model import make_hw_root
 from ..protocol.jtag import JtagInterface
 from ..jop.listener import JopListener
 
@@ -23,15 +22,13 @@ from ..jop.listener import JopListener
               help="Advertise MGMT_SUPPORT=1 in the welcome banner. "
                    "Default off — we don't decode the MGMT side-channel "
                    "yet, and Quartus skips it when MGMT_SUPPORT=0.")
-async def jop_server(root_path, tcp_port, host, mgmt_support):
-    parts = root_path.strip("/").split("/")
-    hw_root = make_hw_root()
-    leaf = await hw_root.child_summon(*parts)
+@click.pass_context
+async def jop_server(ctx, root_path, tcp_port, host, mgmt_support):
+    leaf = await ctx.obj.resolve(root_path)
     if not isinstance(leaf, JtagInterface):
         raise click.ClickException(
             f"{root_path!r} does not resolve to a JtagInterface "
             f"(got {type(leaf).__name__})")
-    await leaf.start_tree()
     listener = JopListener(leaf, host=host, port=tcp_port,
                            mgmt_support=mgmt_support)
     click.echo(f"JoP server on {host}:{tcp_port} for {leaf.fqdn}")
