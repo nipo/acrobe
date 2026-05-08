@@ -387,7 +387,7 @@ class MpsseEngine(Batcher):
         cmd_parts.append(bytes([mpsse_cmd.SEND_IMMEDIATE]))
 
         cmd = b"".join(cmd_parts)
-        self.logger.log(5, "USB >> %d bytes, expect %d back", len(cmd), total_rsp)
+        self.logger.protocol("USB >> %d bytes, expect %d back", len(cmd), total_rsp)
         self._transport.write(cmd)
 
         def read_done(rsp):
@@ -401,7 +401,7 @@ class MpsseEngine(Batcher):
                         future.set_exception(exc)
                 return
 
-            self.logger.log(5, "USB << %d bytes", len(data))
+            self.logger.protocol("USB << %d bytes", len(data))
 
             for (op, future), (start, end) in zip(batch, rsp_ranges):
                 if start < end:
