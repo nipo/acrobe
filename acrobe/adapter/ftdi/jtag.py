@@ -164,33 +164,44 @@ class JtagMpsse(jtag.JtagInterface):
                     future.set_result(None)
             return
 
-        mpsse_futures = [self._engine.post(op) for op in mpsse_ops]
-        last_future = mpsse_futures[-1]
+        # Only the *last* MPSSE op needs a future — it serves as the
+        # batched-callback anchor. The MpsseEngine still calls
+        # rsp_handle on every op (so .data is populated for read
+        # shifts), but skipping per-op futures saves thousands of
+        # asyncio.Future allocations per chunk.
+        for op in mpsse_ops[:-1]:
+            self._engine.post_no_wait(op)
+        last_future = self._engine.post(mpsse_ops[-1])
+
         last_future.add_done_callback(
             lambda _lf,
                    anchors=op_anchors,
-                   futures=mpsse_futures,
-                   ops=mpsse_ops:
-                JtagMpsse._resolve_batch(anchors, futures, ops))
+                   ops=mpsse_ops,
+                   anchor=last_future:
+                JtagMpsse._resolve_batch(anchors, ops, anchor))
 
     @staticmethod
-    def _resolve_batch(op_anchors, mpsse_futures, mpsse_ops):
+    def _resolve_batch(op_anchors, mpsse_ops, anchor_future):
         """Single-pass resolution of every batch-op future. Reads
-        directly from each anchor's MPSSE future and assembles TDO
-        from ``mpsse_ops[start:end]`` for read shifts."""
+        directly from ``mpsse_ops[start:end].data`` for read shifts —
+        those attributes are populated by MpsseEngine.read_done in
+        batch order before the anchor future fires.
+
+        ``anchor_future`` is the only MPSSE-level future in the batch.
+        Its exception (if any) propagates to every batch-op future
+        because per-op MPSSE futures don't exist anymore."""
+        try:
+            anchor_future.result()
+        except Exception as exc:
+            for future, _anchor, _tdo_range in op_anchors:
+                if not future.done():
+                    future.set_exception(exc)
+            return
+
         for future, anchor, tdo_range in op_anchors:
             if future.done():
                 continue
-            if anchor is None:
-                future.set_result(None)
-                continue
-            anchor_future = mpsse_futures[anchor]
-            try:
-                anchor_future.result()
-            except Exception as exc:
-                future.set_exception(exc)
-                continue
-            if tdo_range is None:
+            if anchor is None or tdo_range is None:
                 future.set_result(None)
                 continue
             start, end = tdo_range

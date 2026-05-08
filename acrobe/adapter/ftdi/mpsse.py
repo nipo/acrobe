@@ -460,8 +460,9 @@ class MpsseEngine(Batcher):
             except BaseException as exc:
                 # USB failure: every batch future would otherwise dangle,
                 # which deadlocks upper layers chained via add_done_callback.
+                # Ops posted via post_no_wait() have no future — skip those.
                 for _op, future in batch:
-                    if not future.done():
+                    if future is not None and not future.done():
                         future.set_exception(exc)
                 return
 
@@ -474,6 +475,7 @@ class MpsseEngine(Batcher):
                 if rsp_size:
                     op.rsp_handle(data[offset:offset + rsp_size])
                     offset += rsp_size
-                future.set_result(op)
+                if future is not None:
+                    future.set_result(op)
 
         self._transport.read(total_rsp).add_done_callback(read_done)

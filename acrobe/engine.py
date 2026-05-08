@@ -33,6 +33,21 @@ class Batcher:
         self._ensure_flush()
         return future
 
+    def post_no_wait(self, op) -> None:
+        """Enqueue an op without creating a Future for it.
+
+        Use when an upstream future is already anchored on a *different*
+        op in the same batch — typical for the bottom of a batched
+        callback chain, where the layer reads each op's side-effects
+        (e.g. ``op.data``) directly out of the recorded list and only
+        needs ONE future on the last op to fire its batched callback.
+        Skips a per-op ``loop.create_future()`` plus the per-op
+        set_result on resolution; both are nontrivial in tight inner
+        loops with thousands of ops per chunk.
+        """
+        self._pending.append((op, None))
+        self._ensure_flush()
+
     def _ensure_flush(self):
         """Schedule a flush task if one isn't already running."""
         if self._flush_task is None or self._flush_task.done():
@@ -60,7 +75,7 @@ class Batcher:
                 import traceback
                 traceback.print_exc()
                 for _, future in batch:
-                    if not future.done():
+                    if future is not None and not future.done():
                         future.set_exception(exc)
 
     async def flush_ops(self, batch: list[tuple[Any, asyncio.Future]]):
