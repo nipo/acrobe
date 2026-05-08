@@ -1,9 +1,18 @@
 import asyncio
 import pytest
 from acrobe.engine import Batcher
+from acrobe.node import Node
 
 
-class Accumulator(Batcher):
+class _NodeBatcher(Batcher, Node):
+    """Base for test batchers — combines Batcher + Node so self.logger works."""
+
+    def __init__(self, name: str = None):
+        Batcher.__init__(self)
+        Node.__init__(self, name or self.__class__.__name__.lower())
+
+
+class Accumulator(_NodeBatcher):
     """Test batcher that accumulates ops and resolves futures with the op."""
 
     def __init__(self):
@@ -18,12 +27,12 @@ class Accumulator(Batcher):
             future.set_result(op)
 
 
-class FailingBatcher(Batcher):
+class FailingBatcher(_NodeBatcher):
     async def flush_ops(self, batch):
         raise RuntimeError("flush failed")
 
 
-class LowerLayer(Batcher):
+class LowerLayer(_NodeBatcher):
     """Simulates a lower layer that doubles the value."""
 
     async def flush_ops(self, batch):
@@ -31,7 +40,7 @@ class LowerLayer(Batcher):
             future.set_result(op * 2)
 
 
-class UpperLayer(Batcher):
+class UpperLayer(_NodeBatcher):
     """Simulates an upper layer that translates ops to the lower layer."""
 
     def __init__(self, lower):
@@ -135,7 +144,7 @@ class TestReentrancy:
         """Ops posted during flush_ops are processed in the next iteration."""
         results = []
 
-        class ReentrantBatcher(Batcher):
+        class ReentrantBatcher(_NodeBatcher):
             def __init__(self):
                 super().__init__()
                 self.call_count = 0

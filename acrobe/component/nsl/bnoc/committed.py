@@ -12,8 +12,8 @@ class Committed(Framed):
     COMMIT = 0x01
     CANCEL = 0x00
 
-    def __init__(self, channel: Framed):
-        super().__init__()
+    def __init__(self, channel: Framed, name: str = "committed"):
+        super().__init__(name)
         self._channel = channel
 
     async def flush_ops(self, batch):

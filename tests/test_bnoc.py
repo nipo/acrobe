@@ -29,8 +29,8 @@ class MockFifo:
 class MockFramed(Framed):
     """In-memory Framed that captures sent data and returns canned responses."""
 
-    def __init__(self, rx_frames=None):
-        super().__init__()
+    def __init__(self, rx_frames=None, name: str = "mock-framed"):
+        super().__init__(name)
         self.sent = []
         self._rx_frames = list(rx_frames or [])
 

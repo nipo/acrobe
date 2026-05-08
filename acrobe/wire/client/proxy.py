@@ -23,10 +23,11 @@ import types
 from typing import Any
 
 from ...engine import Batcher
+from ...node import Node
 from .ws import WireClient
 
 
-class RemoteBatcher(Batcher):
+class RemoteBatcher(Batcher, Node):
     """Generic forwarder — every batch posted goes over the wire.
 
     The ops in the batch are encoded by the client's Session (which
@@ -34,8 +35,9 @@ class RemoteBatcher(Batcher):
     know about will fail at encode time, with a clear error.
     """
 
-    def __init__(self, wire_client: WireClient):
+    def __init__(self, wire_client: WireClient, name: str = "wire"):
         Batcher.__init__(self)
+        Node.__init__(self, name)
         self._wire = wire_client
 
     async def flush_ops(self, batch):

@@ -1,11 +1,12 @@
 import math
 
 from ....engine import Batcher
+from ....node import Node
 from ....protocol.spi import Cs, Shift
 from ..bnoc.framed import Framed
 
 
-class SpiTransactor(Batcher):
+class SpiTransactor(Batcher, Node):
     """Encodes spi.Cs/Shift ops as NSL SPI transactor commands.
 
     Command encoding (matches RTL nsl_spi_transactor):
@@ -29,8 +30,10 @@ class SpiTransactor(Batcher):
 
     MAX_CHUNK = 0x40  # 64 bytes
 
-    def __init__(self, channel: Framed, base_freq: float):
-        super().__init__()
+    def __init__(self, channel: Framed, base_freq: float,
+                 name: str = "spi-xact"):
+        Batcher.__init__(self)
+        Node.__init__(self, name)
         self._channel = channel
         self.base_freq = base_freq
         self._divisor = max(0, int(base_freq / 1e6) - 1) & 0x1f

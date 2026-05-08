@@ -7,6 +7,7 @@ from acrobe.component.nsl.transactor.spi import SpiTransactor
 from acrobe.component.jtag_spi_bridge import jtag_spi_bridge
 from acrobe.protocol.spi import Cs, Shift, Interface, Target
 from acrobe.engine import Batcher
+from acrobe.node import Node
 from acrobe.protocol.jtag import Chain, JtagInterface
 from acrobe.bitstring import BitString
 
@@ -16,8 +17,8 @@ from acrobe.bitstring import BitString
 class MockChannel(Framed):
     """In-memory Framed that captures command frames and returns canned responses."""
 
-    def __init__(self, response_fn=None):
-        super().__init__()
+    def __init__(self, response_fn=None, name: str = "mock-channel"):
+        super().__init__(name)
         self.sent_frames = []
         self._response_fn = response_fn or self._default_response
 
@@ -193,15 +194,16 @@ class TestSpiTransactor:
 
 # -- FifoSimulator --
 
-class FifoSimulator(Batcher):
+class FifoSimulator(Batcher, Node):
     """Mock Batcher simulating JTAG interface with FIFO firmware.
 
     Handles _DynamicInstruction calls (which go through Tap.post → flush_ops).
     Maintains internal tx/rx FIFOs and optionally simulates status register.
     """
 
-    def __init__(self, status_ir=None):
-        super().__init__()
+    def __init__(self, status_ir=None, name: str = "fifo-sim"):
+        Batcher.__init__(self)
+        Node.__init__(self, name)
         self.rx_fifo = []       # words to send TO the host (device → host)
         self.tx_captured = []   # words received FROM the host
         self._status_ir = status_ir

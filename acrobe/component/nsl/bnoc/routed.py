@@ -3,6 +3,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 
 from ....engine import Batcher
+from ....node import Node
 from .framed import Framed, FrameSend, FrameRecv
 
 
@@ -38,14 +39,15 @@ class RouterRecv:
         return f"<RouterRecv ctx={self.context}>"
 
 
-class Router(Batcher):
+class Router(Batcher, Node):
     """Routing dispatch over Framed. Matches RTL nsl_bnoc_routed.
 
     Packet format: [dst(3:0) | src(7:4)] [payload...]
     """
 
-    def __init__(self, framed: Framed):
-        super().__init__()
+    def __init__(self, framed: Framed, name: str = "router"):
+        Batcher.__init__(self)
+        Node.__init__(self, name)
         self._framed = framed
         self._rx_queues: dict[Context, deque] = defaultdict(deque)
 
@@ -108,8 +110,10 @@ class Router(Batcher):
 class Route(Framed):
     """Single route pair. Inherits from Framed so isinstance(route, Framed) is True."""
 
-    def __init__(self, router, local_id, remote_id):
-        super().__init__()
+    def __init__(self, router, local_id, remote_id, name=None):
+        if name is None:
+            name = f"route-{local_id}-{remote_id}"
+        super().__init__(name)
         self._router = router
         self._outbound = Context(remote_id, local_id)
         self._inbound = Context(local_id, remote_id)

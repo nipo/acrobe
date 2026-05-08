@@ -3,13 +3,15 @@ import pytest
 from acrobe.component.spi_flash import SpiFlash
 from acrobe.protocol.spi import Cs, Shift, Interface
 from acrobe.engine import Batcher
+from acrobe.node import Node
 
 
-class MockSpiAdapter(Batcher):
+class MockSpiAdapter(Batcher, Node):
     """Mock SPI adapter that records ops and returns configurable data."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name: str = "mock-spi"):
+        Batcher.__init__(self)
+        Node.__init__(self, name)
         self.ops = []
         self._read_responses = []  # queue of bytes to return for Shift reads
         self._default_response = b"\xff"

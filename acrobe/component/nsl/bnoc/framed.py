@@ -1,6 +1,7 @@
 import asyncio
 
 from ....engine import Batcher
+from ....node import Node
 
 
 class FrameSend:
@@ -19,12 +20,16 @@ class FrameRecv:
         return "<FrameRecv>"
 
 
-class Framed(Batcher):
+class Framed(Batcher, Node):
     """Base class for framed communication.
     Matches RTL nsl_bnoc_framed: data stream with packet boundaries.
     """
 
     LAST = 0x100  # bit 8 of 9-bit word
+
+    def __init__(self, name: str):
+        Batcher.__init__(self)
+        Node.__init__(self, name)
 
     def send(self, data: bytes) -> asyncio.Future:
         return self.post(FrameSend(data))
@@ -63,8 +68,8 @@ class Framed(Batcher):
 class JtagFramed(Framed):
     """Concrete framed implementation over JTAG FIFO."""
 
-    def __init__(self, fifo):
-        super().__init__()
+    def __init__(self, fifo, name: str = "framed"):
+        super().__init__(name)
         self._fifo = fifo
 
     async def flush_ops(self, batch):

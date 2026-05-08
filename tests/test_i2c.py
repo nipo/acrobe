@@ -4,9 +4,16 @@ from acrobe.protocol.i2c import (
     Read, Write, WriteRead, Slave, Interface, AddressNack, DataNack,
 )
 from acrobe.engine import Batcher
+from acrobe.node import Node
 
 
-class MockI2cAdapter(Batcher):
+class _NodeBatcher(Batcher, Node):
+    def __init__(self, name: str = None):
+        Batcher.__init__(self)
+        Node.__init__(self, name or self.__class__.__name__.lower())
+
+
+class MockI2cAdapter(_NodeBatcher):
     """Records ops and populates Read/WriteRead results with dummy data."""
 
     def __init__(self):
@@ -23,7 +30,7 @@ class MockI2cAdapter(Batcher):
             future.set_result(op)
 
 
-class MockI2cInterface(Batcher):
+class MockI2cInterface(_NodeBatcher):
     """Interface-level mock (accepts Read/Write/WriteRead ops)."""
 
     def __init__(self):
@@ -40,7 +47,7 @@ class MockI2cInterface(Batcher):
             future.set_result(op)
 
 
-class FailI2cInterface(Batcher):
+class FailI2cInterface(_NodeBatcher):
     """Raises AddressNack for all operations."""
 
     async def flush_ops(self, batch):

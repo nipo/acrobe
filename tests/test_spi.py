@@ -2,14 +2,16 @@ import asyncio
 import pytest
 from acrobe.protocol.spi import Cs, Shift, Target, Interface
 from acrobe.engine import Batcher
+from acrobe.node import Node
 from acrobe.bitstring import BitString
 
 
-class MockSpiAdapter(Batcher):
+class MockSpiAdapter(Batcher, Node):
     """Records ops and populates Shift.miso with dummy data."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name: str = "mock-spi"):
+        Batcher.__init__(self)
+        Node.__init__(self, name)
         self.ops = []
 
     async def flush_ops(self, batch):
