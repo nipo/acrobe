@@ -50,28 +50,28 @@ from .coresight.model import (
 
 # --- Op dataclasses (frozen, inputs only) --------------------------
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Read8:
     addr: int
 
     def __repr__(self):
         return f"Read8({self.addr:#x})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Read16:
     addr: int
 
     def __repr__(self):
         return f"Read16({self.addr:#x})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Read32:
     addr: int
 
     def __repr__(self):
         return f"Read32({self.addr:#x})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Write8:
     addr: int
     data: int
@@ -79,7 +79,7 @@ class Write8:
     def __repr__(self):
         return f"Write8({self.addr:#x}, {self.data:#04x})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Write16:
     addr: int
     data: int
@@ -87,7 +87,7 @@ class Write16:
     def __repr__(self):
         return f"Write16({self.addr:#x}, {self.data:#06x})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Write32:
     addr: int
     data: int
@@ -96,7 +96,7 @@ class Write32:
         return f"Write32({self.addr:#x}, {self.data:#010x})"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReadBlob:
     """Byte-granular read of ``size`` bytes from ``addr``. Lowered by
     flush_ops into Read{8,16,32} sub-ops; results are reassembled
@@ -108,7 +108,7 @@ class ReadBlob:
         return f"ReadBlob({self.addr:#x}, {self.size})"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WriteBlob:
     """Byte-granular write of ``data`` at ``addr``. Lowered by
     flush_ops into Write{8,16,32} sub-ops."""

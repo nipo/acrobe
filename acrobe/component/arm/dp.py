@@ -31,7 +31,7 @@ from ...part_id import PartId
 
 # --- Op dataclasses (frozen, inputs only) --------------------------
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ApRead:
     """Read a 32-bit register at an absolute system address.
 
@@ -49,7 +49,7 @@ class ApRead:
     def __repr__(self):
         return f"ApRead({self.addr:#x})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ApWrite:
     addr: int
     data: int
@@ -57,7 +57,7 @@ class ApWrite:
     def __repr__(self):
         return f"ApWrite({self.addr:#x}, {self.data:#010x})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DpRead:
     """Read DP register. ``addr`` is byte offset; upper nibble is
     DPBANKSEL (which is loaded into SELECT before access)."""
@@ -66,7 +66,7 @@ class DpRead:
     def __repr__(self):
         return f"DpRead({self.addr:#x})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DpWrite:
     addr: int
     data: int
@@ -74,7 +74,7 @@ class DpWrite:
     def __repr__(self):
         return f"DpWrite({self.addr:#x}, {self.data:#010x})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Abort:
     """Issue ABORT (clear sticky flags). On JTAG, lowered via the
     dedicated ABORT IR; on SWD, lowered as a write to DP addr 0x00."""
@@ -83,7 +83,7 @@ class Abort:
     def __repr__(self):
         return f"Abort({self.what:#x})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Run:
     """Idle clock cycles between transactions."""
     cycles: int
@@ -91,7 +91,7 @@ class Run:
     def __repr__(self):
         return f"Run({self.cycles})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ChipId:
     """Best-available identifier for the chip behind a DP.
 

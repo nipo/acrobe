@@ -16,7 +16,7 @@ from ..dp import DpAccessFailure
 from .model import DevArch, MemoryMappedComponent, PartId
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CpuFeatures:
     """Snapshot of the SCS feature-ID registers an :class:`Scs`
     instance reports. Optional registers (``mvfr0..2`` for the FPU,

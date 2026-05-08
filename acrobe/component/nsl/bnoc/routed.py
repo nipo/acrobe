@@ -7,7 +7,7 @@ from ....node import Node
 from .framed import Framed, FrameSend, FrameRecv
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Context:
     destination: int  # 0-15
     source: int       # 0-15

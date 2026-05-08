@@ -28,7 +28,7 @@ class FlowControl(enum.Enum):
     DSR_DTR = "dsr_dtr"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SerialConfig:
     baud: int = 9600
     data_bits: int = 8
@@ -40,7 +40,7 @@ class SerialConfig:
         return replace(self, **kwargs)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Signals:
     """Modem status lines (input-to-DTE: driven by the remote end)."""
     cts: bool = False

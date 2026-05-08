@@ -8,7 +8,7 @@ real auth backends construct narrower instances.
 from dataclasses import dataclass, field
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Principal:
     """Identity of the caller. Anonymous by default."""
 
@@ -24,7 +24,7 @@ class Principal:
         return self.name == "anonymous"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Scope:
     """Set of capabilities granted to a Principal for an operation.
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PartId:
     """Part identifier — JEP106 designer + 12/16-bit part_no +
     optional 4-bit revision.

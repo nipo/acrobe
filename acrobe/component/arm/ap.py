@@ -28,7 +28,7 @@ from ...node import Node
 from . import dp as dpmod
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ApIdr:
     """Decoded AP Identification Register (offset 0xFC).
 

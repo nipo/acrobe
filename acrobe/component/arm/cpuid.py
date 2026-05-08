@@ -86,7 +86,7 @@ _ARM_PART_NAMES = {
 }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Cpuid:
     """Decoded CPUID register value.
 

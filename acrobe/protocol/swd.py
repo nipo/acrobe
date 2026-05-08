@@ -41,7 +41,7 @@ class Ack(IntEnum):
 # natural result value (int for Read, None otherwise).
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Read:
     """Read a DP or AP register.
 
@@ -57,7 +57,7 @@ class Read:
     addr: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Write:
     """Write a DP or AP register. Future resolves to ``None``."""
 
@@ -66,7 +66,7 @@ class Write:
     data: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Run:
     """``cycles`` idle cycles with SWDIO held LOW.
 
@@ -77,7 +77,7 @@ class Run:
     cycles: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Wakeup:
     """``cycles`` cycles with SWDIO held HIGH (a partial line reset).
 
@@ -87,7 +87,7 @@ class Wakeup:
     cycles: int = 50
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class JtagToSwd:
     """JTAG-to-SWD switch sequence: line reset + 0x79E7 (MSB-first
     on the wire) + line reset + idle. Idempotent on chips already
@@ -95,7 +95,7 @@ class JtagToSwd:
     primitive at adapter init."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LineReset:
     """SWD line reset: ≥50 cycles SWDIO=1 followed by ≥2 idle
     cycles. Resets the DP's SWD state machine and clears its

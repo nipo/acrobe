@@ -140,7 +140,7 @@ class StLinkError(Exception):
         super().__init__(msg)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StLinkVersion:
     """Decoded GET_VERSION / GET_VERSION_EXT response."""
     stlink: int        # major version (2 = v2, 3 = v3)

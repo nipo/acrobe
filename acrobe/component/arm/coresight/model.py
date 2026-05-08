@@ -52,7 +52,7 @@ def _devarch_eq(key: "DevArch", lookup: "DevArch") -> bool:
     return key.architect == lookup.architect and key.archid == lookup.archid
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DevArch:
     """Decoded DEVARCH register (class-0x9 only).
 
@@ -66,7 +66,7 @@ class DevArch:
     present: bool    # bit[20]; if 0, the rest is RAZ
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ComponentIds:
     """All identification data extracted by reading PIDR/CIDR/DEVARCH/
     DEVTYPE/DEVID at a component's base address.

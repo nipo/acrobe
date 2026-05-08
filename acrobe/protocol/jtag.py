@@ -39,7 +39,7 @@ TAP_UUID            = "00010001-0000-4000-8000-0000000000a2"
 
 
 @wire.op(SHIFT_UUID)
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Shift:
     """Shift data through TDI/TDO."""
 
@@ -52,7 +52,7 @@ class Shift:
         return f"Shift({tdi}{no_tdo})"
 
 @wire.op(CAPTURE_DR_UUID)
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CaptureDr:
     """Transition FSM to Capture-DR."""
 
@@ -60,7 +60,7 @@ class CaptureDr:
         return f"CaptureDr()"
 
 @wire.op(CAPTURE_IR_UUID)
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CaptureIr:
     """Transition FSM to Capture-IR."""
 
@@ -68,7 +68,7 @@ class CaptureIr:
         return f"CaptureIr()"
 
 @wire.op(RESET_UUID)
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Reset:
     """TAP reset via TMS. `count` is clamped to a 5-cycle minimum."""
 
@@ -82,7 +82,7 @@ class Reset:
         return f"Reset({self.count})"
 
 @wire.op(RUN_UUID)
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Run:
     """Run TCK cycles in Run-Test/Idle."""
 
@@ -98,7 +98,7 @@ _SWD_TO_JTAG_TMS = BitString(-1, 50) + BitString(0xe73c, 16) + BitString(-1, 5)
 
 
 @wire.op(SWD_TO_JTAG_UUID)
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SwdToJtag:
     """SWD-to-JTAG switch sequence."""
 
@@ -116,7 +116,7 @@ class SwdToJtag:
 # scope.
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _TapShift:
     ir_value: int | None
     tdi: BitString | None
@@ -128,14 +128,14 @@ class _TapShift:
         no_tdo = ', -' if not self.read_tdo else ''
         return f"TapShift({ir}, {tdi}{no_tdo})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _TapRun:
     cycles: int
 
     def __repr__(self):
         return f"TapRun({self.cycles})"
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _TapIrStatus:
     """No fields — purely a marker requesting an IR-status capture."""
 
