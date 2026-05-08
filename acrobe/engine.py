@@ -1,6 +1,6 @@
 import asyncio
 from typing import Any
-
+from collections import deque
 from .log import PROTOCOL
 
 
@@ -17,7 +17,7 @@ class Batcher:
     """
 
     def __init__(self):
-        self._pending: list[tuple[Any, asyncio.Future]] = []
+        self._pending = deque()
         self._flush_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
@@ -44,7 +44,7 @@ class Batcher:
         iterations (they will spawn another task.
         """
         async with self._lock:
-            self._pending, batch = [], self._pending
+            self._pending, batch = deque(), list(self._pending)
             self._flush_task = None
 
             try:
