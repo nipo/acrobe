@@ -1,11 +1,5 @@
 import asyncio
-import logging
 from typing import Any
-
-from . import log as _log  # registers CrobeLogger as the logger class
-
-_FALLBACK_LOGGER = logging.getLogger("batcher")
-del _log
 
 
 class Batcher:
@@ -51,9 +45,8 @@ class Batcher:
             self._pending, batch = [], self._pending
             self._flush_task = None
 
-            logger = getattr(self, "logger", _FALLBACK_LOGGER)
             try:
-                logger.protocol("Batching %s", [top for top, _ in batch])
+                self.logger.protocol("Batching %s", [top for top, _ in batch])
                 await self.flush_ops(batch)
             except Exception as exc:
                 import traceback
