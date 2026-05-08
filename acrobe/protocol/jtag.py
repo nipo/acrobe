@@ -1,4 +1,3 @@
-import asyncio
 import inspect
 import math
 from dataclasses import dataclass, field
@@ -371,27 +370,31 @@ class Tap(Batcher, Node, InstructionRegistry):
     async def flush_ops(self, batch):
         """Forward each TAP-level op to the parent wrapped in a TapOp.
 
-        The parent's future already resolves to the natural result
-        value (BitString for reads, None otherwise); we just relay it
-        to the user-facing future.
+        Fire-and-forget: each user future is chained to the matching
+        parent future via ``add_done_callback``. flush_ops returns as
+        soon as the wrapping is done, so the Batcher's lock releases
+        immediately and subsequent batches can flow through while the
+        wire round-trip for this one is still in flight.
         """
         if self._parent is None:
             raise RuntimeError(f"Tap {self.name!r} has no parent to forward to")
 
-        forwarded = []
         for op, future in batch:
             parent_future = self._parent.post(TapOp(self, op))
-            forwarded.append((parent_future, future))
+            self._chain_completion(future, parent_future)
 
-        for parent_future, future in forwarded:
+    @staticmethod
+    def _chain_completion(upper, lower):
+        """Resolve ``upper`` with ``lower``'s result (or exception) once
+        ``lower`` completes."""
+        def cb(lf):
+            if upper.done():
+                return
             try:
-                value = await parent_future
+                upper.set_result(lf.result())
             except Exception as exc:
-                if not future.done():
-                    future.set_exception(exc)
-                continue
-            if not future.done():
-                future.set_result(value)
+                upper.set_exception(exc)
+        lower.add_done_callback(cb)
 
     def __repr__(self):
         return f"<Tap {self._name} irlen={self.irlen}>"
@@ -721,111 +724,124 @@ class Chain(Batcher, Node):
 
     async def flush_ops(self, batch):
         """Translate TapOp envelopes from child Taps into bit-level ops
-        posted to the JtagInterface parent. Resolves each TapOp's
-        future once the bit-level work completes.
-        """
-        #self.logger.protocol("Chain batch: %s", [top for top, _ in batch])
+        posted to the JtagInterface parent.
 
+        Fire-and-forget: each top-future is chained via
+        ``add_done_callback`` to the last bit-level future posted for
+        the matching TapOp (read shifts additionally pluck the captured
+        TDO from the data shift). flush_ops returns as soon as the
+        translation is done, so the Batcher's lock releases right away
+        and the next Chain batch can lower in parallel with the in-flight
+        bit-level work.
+        """
         if self._parent is None:
             raise RuntimeError(f"Chain {self.name!r} has no parent to forward to")
 
-        bit_futures = []
-        # (top_future, data_future) — data_future.result() is the
-        # captured TDO BitString, forwarded as the top-future's value.
-        tdo_extracts = []
-        # (top_future,) — no TDO to extract; resolved with None.
-        plain_resolves = []
-
         for top, top_future in batch:
             if not isinstance(top, TapOp):
-                exc = TypeError(f"Chain expects TapOp, got {type(top).__name__}")
                 if not top_future.done():
-                    top_future.set_exception(exc)
+                    top_future.set_exception(
+                        TypeError(f"Chain expects TapOp, got {type(top).__name__}"))
                 continue
 
             tap = top.tap
             op = top.op
             ctx = self._contexts.get(tap)
             if ctx is None:
-                exc = ValueError(
-                    f"Tap {tap.name!r} not registered in chain {self.name!r}")
                 if not top_future.done():
-                    top_future.set_exception(exc)
+                    top_future.set_exception(ValueError(
+                        f"Tap {tap.name!r} not registered in chain {self.name!r}"))
                 continue
 
             bypass_val = (1 << tap.irlen) - 1
 
             if isinstance(op, _TapIrStatus):
-                bit_futures.append(self._parent.post(CaptureIr()))
+                self._parent.post(CaptureIr())
                 if ctx.ir_pre:
-                    bit_futures.append(self._parent.post(
-                        Shift(BitString(-1, ctx.ir_pre), read_tdo=False)))
-                data_shift = Shift(BitString(bypass_val, tap.irlen), read_tdo=True)
-                data_future = self._parent.post(data_shift)
-                bit_futures.append(data_future)
+                    self._parent.post(
+                        Shift(BitString(-1, ctx.ir_pre), read_tdo=False))
+                data_future = self._parent.post(
+                    Shift(BitString(bypass_val, tap.irlen), read_tdo=True))
+                last_future = data_future
                 if ctx.ir_post:
-                    bit_futures.append(self._parent.post(
-                        Shift(BitString(-1, ctx.ir_post), read_tdo=False)))
+                    last_future = self._parent.post(
+                        Shift(BitString(-1, ctx.ir_post), read_tdo=False))
                 self._invalidate_ir_cache_for_shift(tap, bypass_val)
-                tdo_extracts.append((top_future, data_future))
+                self._chain_data(top_future, data_future, last_future)
 
             elif isinstance(op, _TapShift):
+                ir_done = None
                 if op.ir_value is not None and op.ir_value != ctx.current_ir:
-                    ir_data = (BitString(-1, ctx.ir_pre) +
-                               BitString(op.ir_value, tap.irlen) +
-                               BitString(-1, ctx.ir_post))
-                    bit_futures.append(self._parent.post(CaptureIr()))
-                    bit_futures.append(self._parent.post(
-                        Shift(ir_data, read_tdo=False)))
+                    ir_data = (BitString(-1, ctx.ir_pre)
+                               + BitString(op.ir_value, tap.irlen)
+                               + BitString(-1, ctx.ir_post))
+                    self._parent.post(CaptureIr())
+                    ir_done = self._parent.post(Shift(ir_data, read_tdo=False))
                     self._invalidate_ir_cache_for_shift(tap, op.ir_value)
 
                 if op.tdi is not None:
-                    bit_futures.append(self._parent.post(CaptureDr()))
+                    self._parent.post(CaptureDr())
                     if ctx.dr_pre:
-                        bit_futures.append(self._parent.post(
-                            Shift(BitString(0, ctx.dr_pre), read_tdo=False)))
-                    data_shift = Shift(op.tdi, read_tdo=op.read_tdo)
-                    data_future = self._parent.post(data_shift)
-                    bit_futures.append(data_future)
+                        self._parent.post(
+                            Shift(BitString(0, ctx.dr_pre), read_tdo=False))
+                    data_future = self._parent.post(
+                        Shift(op.tdi, read_tdo=op.read_tdo))
+                    last_future = data_future
                     if ctx.dr_post:
-                        bit_futures.append(self._parent.post(
-                            Shift(BitString(0, ctx.dr_post), read_tdo=False)))
+                        last_future = self._parent.post(
+                            Shift(BitString(0, ctx.dr_post), read_tdo=False))
                     if op.read_tdo:
-                        tdo_extracts.append((top_future, data_future))
+                        self._chain_data(top_future, data_future, last_future)
                     else:
-                        plain_resolves.append(top_future)
+                        self._chain_completion(top_future, last_future)
+                elif ir_done is not None:
+                    self._chain_completion(top_future, ir_done)
                 else:
-                    plain_resolves.append(top_future)
+                    if not top_future.done():
+                        top_future.set_result(None)
 
             elif isinstance(op, _TapRun):
-                bit_futures.append(self._parent.post(Run(op.cycles)))
-                plain_resolves.append(top_future)
+                run_future = self._parent.post(Run(op.cycles))
+                self._chain_completion(top_future, run_future)
 
             else:
-                exc = ValueError(f"Unknown tap op: {type(op).__name__}")
                 if not top_future.done():
-                    top_future.set_exception(exc)
+                    top_future.set_exception(
+                        ValueError(f"Unknown tap op: {type(op).__name__}"))
 
-        if bit_futures:
+    @staticmethod
+    def _chain_completion(upper, lower):
+        """Resolve ``upper`` with None when ``lower`` completes; on
+        exception, propagate it to ``upper``."""
+        def cb(lf):
+            if upper.done():
+                return
             try:
-                await asyncio.gather(*bit_futures)
+                lf.result()
             except Exception as exc:
-                # Bit-level failure: propagate to all unresolved top futures.
-                for top_future, _ in tdo_extracts:
-                    if not top_future.done():
-                        top_future.set_exception(exc)
-                for top_future in plain_resolves:
-                    if not top_future.done():
-                        top_future.set_exception(exc)
-                raise
+                upper.set_exception(exc)
+                return
+            upper.set_result(None)
+        lower.add_done_callback(cb)
 
-        for top_future, data_future in tdo_extracts:
-            if not top_future.done():
-                top_future.set_result(data_future.result())
-
-        for top_future in plain_resolves:
-            if not top_future.done():
-                top_future.set_result(None)
+    @staticmethod
+    def _chain_data(upper, data_future, anchor_future):
+        """Resolve ``upper`` with ``data_future``'s captured TDO once
+        ``anchor_future`` (the last bit-level op of this TapOp)
+        completes. Either future's exception propagates to ``upper``."""
+        def cb(lf):
+            if upper.done():
+                return
+            try:
+                lf.result()
+            except Exception as exc:
+                upper.set_exception(exc)
+                return
+            try:
+                upper.set_result(data_future.result())
+            except Exception as exc:
+                upper.set_exception(exc)
+        anchor_future.add_done_callback(cb)
 
     def _invalidate_ir_cache_for_shift(self, tap, new_ir):
         """An IR shift just happened: this tap loaded `new_ir`, all

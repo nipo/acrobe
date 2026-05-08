@@ -114,14 +114,26 @@ class JtagMpsse(jtag.JtagInterface):
         self._state = self.STATE_UNKNOWN
 
     async def flush_ops(self, batch):
-        """Translate JTAG operations to MPSSE and execute."""
-        #self.logger.log(5, "JTAG batch: %s", [op for op, _ in batch])
-        mpsse_ops = []
-        # Track Shift ops that need TDO extraction:
-        # (batch_index, mpsse_start_index, mpsse_end_index)
-        tdo_entries = []
+        """Translate JTAG operations to MPSSE and post them.
 
-        for idx, (op, future) in enumerate(batch):
+        Fire-and-forget: each batch-op future is chained via
+        ``add_done_callback`` to its last MPSSE op so flush_ops returns
+        as soon as the translation is done. The Batcher's lock releases
+        immediately, letting subsequent JTAG batches lower into MPSSE
+        while the current USB round-trip is still in flight.
+        """
+        mpsse_ops = []
+        # Per batch-op: (future, anchor_idx, tdo_range).
+        # anchor_idx is the index in mpsse_ops of the last op posted for
+        # the matching batch-op; None when no MPSSE work was emitted.
+        # tdo_range is (start, end) into mpsse_ops naming the data-bearing
+        # slice for a Shift with read_tdo, None otherwise.
+        op_anchors: list = []
+
+        for op, future in batch:
+            pre_len = len(mpsse_ops)
+            tdo_range = None
+
             if isinstance(op, (jtag.Reset, jtag.SwdToJtag)):
                 self._emit_tms_pattern(mpsse_ops, op.tms)
                 self._state = self.STATE_RESET
@@ -138,29 +150,67 @@ class JtagMpsse(jtag.JtagInterface):
             elif isinstance(op, jtag.Shift):
                 start, end = self._emit_shift(mpsse_ops, op)
                 if op.read_tdo:
-                    tdo_entries.append((idx, start, end))
+                    tdo_range = (start, end)
 
             else:
-                raise ValueError(f"Unknown JTAG op: {type(op).__name__}")
+                if not future.done():
+                    future.set_exception(
+                        ValueError(f"Unknown JTAG op: {type(op).__name__}"))
+                continue
 
-        # Post all MPSSE ops to engine and await
-        if mpsse_ops:
-            futures = [self._engine.post(op) for op in mpsse_ops]
-            await asyncio.gather(*futures)
+            anchor = len(mpsse_ops) - 1 if len(mpsse_ops) > pre_len else None
+            op_anchors.append((future, anchor, tdo_range))
 
-        # Reconstruct TDO from MPSSE results
-        captured: dict[int, BitString] = {}
-        for batch_idx, mpsse_start, mpsse_end in tdo_entries:
+        mpsse_futures = [self._engine.post(op) for op in mpsse_ops]
+
+        for future, anchor, tdo_range in op_anchors:
+            if anchor is None:
+                if not future.done():
+                    future.set_result(None)
+                continue
+            anchor_future = mpsse_futures[anchor]
+            if tdo_range is None:
+                self._chain_completion(future, anchor_future)
+            else:
+                start, end = tdo_range
+                self._chain_tdo(future, anchor_future, mpsse_ops[start:end])
+
+    @staticmethod
+    def _chain_completion(upper, lower):
+        """Resolve ``upper`` with None when ``lower`` completes; on
+        exception, propagate it."""
+        def cb(lf):
+            if upper.done():
+                return
+            try:
+                lf.result()
+            except Exception as exc:
+                upper.set_exception(exc)
+                return
+            upper.set_result(None)
+        lower.add_done_callback(cb)
+
+    @staticmethod
+    def _chain_tdo(upper, anchor_future, tdo_ops):
+        """Resolve ``upper`` with the concatenated TDO of ``tdo_ops``
+        once ``anchor_future`` completes. The MpsseEngine populates each
+        op's ``data`` attribute before resolving any future in its batch,
+        so by the time the callback fires every op in ``tdo_ops`` has
+        its captured data available."""
+        def cb(lf):
+            if upper.done():
+                return
+            try:
+                lf.result()
+            except Exception as exc:
+                upper.set_exception(exc)
+                return
             tdo = BitString()
-            for m_op in mpsse_ops[mpsse_start:mpsse_end]:
-                if hasattr(m_op, 'data') and m_op.data is not None:
+            for m_op in tdo_ops:
+                if getattr(m_op, "data", None) is not None:
                     tdo += m_op.data
-            captured[batch_idx] = tdo
-
-        # Resolve futures with the captured TDO (or None for ops with
-        # no read).
-        for idx, (_, future) in enumerate(batch):
-            future.set_result(captured.get(idx))
+            upper.set_result(tdo)
+        anchor_future.add_done_callback(cb)
 
     # --- State machine helpers ---
 
