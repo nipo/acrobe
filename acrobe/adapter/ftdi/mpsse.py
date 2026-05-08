@@ -378,10 +378,18 @@ class ShiftTms(Operation):
         self.write_pol = write_pol
         self.read_pol = read_pol
         self.read = read
-        self.tms = BitString(data, count)
+        # Defer the BitString construction until ``.tms`` is actually
+        # accessed (only by __repr__ / __add__ — never on the hot
+        # transfer path). Saves thousands of small BitString
+        # allocations per chunk.
+        self._tms_value = data
         self.tdi = int(bool(tdi))
         self.rsp_size = 1 if read else 0
         self.cycle_count = count
+
+    @property
+    def tms(self):
+        return BitString(self._tms_value, self.count)
 
     def encode(self, buf):
         buf.append(self._cmd_byte)

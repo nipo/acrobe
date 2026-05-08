@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 
 
 class BitStringBase(ABC):
+    __slots__ = ()
+
     @abstractmethod
     def __len__(self):
         ...
@@ -74,6 +76,8 @@ class BitStringBase(ABC):
 
 
 class BitStringSlice(BitStringBase):
+    __slots__ = ('_bs', '_begin', '_end')
+
     def __init__(self, bs, begin, end):
         self._bs = bs
         self._begin = begin
@@ -83,13 +87,13 @@ class BitStringSlice(BitStringBase):
         return self._end - self._begin
 
     def __int__(self):
-        length = len(self)
+        length = self._end - self._begin
         if length == 0:
             return 0
 
         # Extract only the bytes that span [begin, end)
-        begin_byte = self._begin // 8
-        end_byte = (self._end + 7) // 8
+        begin_byte = self._begin >> 3
+        end_byte = (self._end + 7) >> 3
         blob = self._bs.data[begin_byte:end_byte]
 
         # Shift right to drop bits below begin, then mask to length
@@ -98,10 +102,16 @@ class BitStringSlice(BitStringBase):
 
     @property
     def data(self):
-        length = len(self)
+        length = self._end - self._begin
         if length == 0:
             return b''
-        return int(self).to_bytes(length=(length + 7) // 8, byteorder='little')
+        # Byte-aligned slice: just take a substring of the underlying
+        # data without the int round-trip. Hot for JtagMpsse._emit_shift,
+        # which slices 8-aligned chunks out of a chain-wide BitString.
+        if (self._begin & 7) == 0 and (length & 7) == 0:
+            begin_byte = self._begin >> 3
+            return self._bs.data[begin_byte:begin_byte + (length >> 3)]
+        return int(self).to_bytes(length=(length + 7) >> 3, byteorder='little')
 
     def __getitem__(self, offset):
         length = len(self)
@@ -139,13 +149,49 @@ class BitStringSlice(BitStringBase):
 
 
 class BitString(BitStringBase):
-    def __init__(self, *args, **kwargs):
+    __slots__ = ('_bytes', '_last_byte', '_length', '_data_cache')
+
+    def __init__(self, data=None, length=None):
+        # Fast paths for the cases that dominate the hot transfer
+        # loop. The general path stays available via append() for
+        # everything else (mixed bytes/int, signed-int sentinels in a
+        # follow-up append, etc.).
+        if data is None:
+            self._bytes = []
+            self._last_byte = 0
+            self._length = 0
+            self._data_cache = None
+            return
+        if isinstance(data, int) and length is not None:
+            if data < 0:
+                data += 1 << length
+            data &= (1 << length) - 1
+            byte_count = (length + 7) >> 3
+            raw = data.to_bytes(length=byte_count, byteorder='little')
+            if length & 7:
+                self._bytes = [raw[:-1]]
+                self._last_byte = raw[-1]
+            else:
+                self._bytes = [raw]
+                self._last_byte = 0
+            self._length = length
+            self._data_cache = raw if length else None
+            return
+        if isinstance(data, BitString) and length is None:
+            # Cheap clone: chunk lists are immutable bytes objects so
+            # the shallow copy is safe even if the source mutates
+            # later (mutation always allocates a fresh bytes anyway).
+            self._bytes = data._bytes[:]
+            self._last_byte = data._last_byte
+            self._length = data._length
+            self._data_cache = data._data_cache
+            return
+        # Fallback: empty self + general append.
         self._bytes = []
         self._last_byte = 0
         self._length = 0
         self._data_cache = None
-        if args or kwargs:
-            self.append(*args, **kwargs)
+        self.append(data, length)
 
     def append(self, data, length=None):
         if isinstance(data, BitStringBase):
@@ -354,6 +400,8 @@ class MutableBitString(BitStringBase):
     is optimized for append-only construction and degrades sharply on
     per-bit mutation).
     """
+
+    __slots__ = ('_data', '_length')
 
     def __init__(self, *args, **kwargs):
         if not args and not kwargs:
