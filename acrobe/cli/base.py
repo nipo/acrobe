@@ -73,10 +73,18 @@ async def cli(ctx, verbose, quiet, timestamp, no_color,
 
 
 @cli.result_callback()
-async def _drain_lifecycle(result, **kwargs):
+@click.pass_context
+async def _drain_lifecycle(ctx, result, **kwargs):
     """Drain anything still registered with acrobe.lifecycle after a
     CLI command finishes. Library users call `acrobe.shutdown()`
-    themselves; for the CLI, this hook makes it automatic."""
+    themselves; for the CLI, this hook makes it automatic.
+
+    When chaining (`a & b ; c`), the dispatcher in :mod:`.chain`
+    pre-injects a shared :class:`CliContext` flagged ``_chained`` and
+    drains itself once at the end — this hook then steps aside so
+    resources opened in segment N stay alive for segment N+1."""
+    if getattr(ctx.obj, "_chained", False):
+        return
     from .. import lifecycle
     await lifecycle.shutdown()
 
