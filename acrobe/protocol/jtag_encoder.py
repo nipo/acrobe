@@ -69,8 +69,8 @@ class JtagOpEncoder:
             op = ops[i]
             next_op = ops[i + 1] if i + 1 < n else None
 
-            if isinstance(op, jtag.Reset):
-                self._emit_reset(tms, tdi, op)
+            if isinstance(op, (jtag.Reset, jtag.SwdToJtag)):
+                self._emit_tms_pattern(tms, tdi, op)
 
             elif isinstance(op, jtag.Run):
                 self._emit_run(tms, tdi, op)
@@ -89,7 +89,8 @@ class JtagOpEncoder:
             else:
                 raise ValueError(
                     f"{type(self).__name__} cannot lower {type(op).__name__}; "
-                    f"supported: Reset, Run, CaptureDr, CaptureIr, Shift")
+                    f"supported: Reset, SwdToJtag, Run, CaptureDr, CaptureIr, "
+                    f"Shift")
 
             i += 1
 
@@ -97,11 +98,10 @@ class JtagOpEncoder:
 
     # ----- per-op emitters ------------------------------------------------
 
-    def _emit_reset(self, tms: BitString, tdi: BitString,
-                    op: jtag.Reset) -> None:
-        # op.tms is all-ones for ``count`` bits — five ones from any
-        # state guarantee TLR. We mirror it onto the wire and zero
-        # TDI throughout.
+    def _emit_tms_pattern(self, tms: BitString, tdi: BitString, op) -> None:
+        # Reset and SwdToJtag both expose a fixed TMS pattern via ``op.tms``
+        # that ends with ≥5 ones, leaving the TAP in TLR. TDI is don't-care
+        # — zero it for the whole stretch.
         tms.append(op.tms)
         tdi.append(0, len(op.tms))
         self._state = self.TLR
@@ -216,6 +216,10 @@ class JtagOpEncoder:
             # The Cap→Shift edge bit was already emitted by the
             # capture op's exit. We're in Shift now.
             pass
+        elif self._state == "_IN_SHIFT":
+            # Continuation of a previous Shift — already in Shift state,
+            # no entry transition needed.
+            pass
         else:
             raise RuntimeError(
                 f"Shift op not preceded by Capture/Pause: state={self._state}")
@@ -258,10 +262,14 @@ class JtagOpEncoder:
         from "in Shift, no Cap edge yet".
         """
         if isinstance(next_op, jtag.Shift):
-            # Stay in Shift across the boundary (no exit bit yet).
-            # The next call will see _state == _IN_SHIFT and continue.
-            # This is rare in practice — Chain typically inserts a
-            # Capture between shifts — but handle it for completeness.
+            # Stay in Shift across the boundary. The last payload bit
+            # (if we have one) still needs to be clocked in, with
+            # TMS=0 so the TAP stays in Shift for the next op to
+            # continue from. Common pattern: Chain emits a Cap-DR
+            # followed by pre/data/post Shifts in a single batch.
+            if not skipped_payload:
+                tms.append(0, 1)
+                tdi.append(last_tdi_bit, 1)
             self._state = "_IN_SHIFT"
             return
 
