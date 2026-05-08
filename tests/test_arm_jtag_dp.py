@@ -10,7 +10,7 @@ from acrobe.component.arm.dp import (
     Abort, ApRead, ApWrite, Dp, DpAccessFailure, DpRead, DpWrite, Run,
 )
 from acrobe.component.arm.jtag_dp import (
-    JtagDp, JtagDpTap, JtagDpV3Tap, _Wire,
+    JtagDp, JtagDpLowerer, JtagDpTap, JtagDpV3Tap, _Wire,
 )
 from acrobe.protocol.jtag import (
     Chain, JtagInterface, Reset, Run as JtagRun, Shift, CaptureDr,
@@ -247,20 +247,25 @@ class TestSelectCaching:
 
 class TestIdleTcks:
     @pytest.mark.asyncio
-    async def test_idle_run_after_each_shift(self):
+    async def test_inter_ap_run_after_apacc(self):
         # AP transactions are behind a resynchronizing gateway and need
         # idle TCKs between Update-DR and the next Capture-DR. The
-        # lowerer emits a Run after every shift; the count must match
-        # the number of shifts, no matter what type.
+        # lowerer emits a Run with INTER_AP_RUN cycles after every
+        # APACC shift; DPACC shifts (SELECT writes, RDBUFF reads) don't
+        # need them.
         tap, dp = _make_dp()
 
         tap.queue_response(_Wire.ACK_OK_FAULT, 0)
 
-        await dp.post(DpRead(Dp.CTRL_STAT))
+        await dp.post(ApRead(0x1234))
 
-        # 3 shifts (SELECT, CTRL_STAT-read, RDBUFF) → 3 idle runs.
-        assert len(tap.runs) == len(tap.shifts) == 3
-        assert all(c > 0 for c in tap.runs)
+        # 3 shifts: SELECT (DPACC), ApRead (APACC), RDBUFF (DPACC).
+        # Only the APACC is followed by a Run.
+        assert len(tap.shifts) == 3
+        assert tap.shifts[0]["ir"] == JtagDpTap.DPACC.ir
+        assert tap.shifts[1]["ir"] == JtagDpTap.APACC.ir
+        assert tap.shifts[2]["ir"] == JtagDpTap.DPACC.ir
+        assert tap.runs == [JtagDpLowerer.INTER_AP_RUN]
 
 
 # -- Abort -----------------------------------------------------------
