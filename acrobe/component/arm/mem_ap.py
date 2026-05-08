@@ -357,43 +357,23 @@ class MemApLowering:
     # -- Blob expansion + chaining helpers ------------------------
 
     @staticmethod
-    def _expand_blobs(batch, loop):
-        """Expand any ReadBlob / WriteBlob ops into Read*/Write*
-        sub-ops with internal futures. Each blob gets a
-        :class:`_PendingBlob` aggregator wired to its sub-ops via
-        ``add_done_callback``; once all sub-ops resolve, the blob's
-        user future resolves with reassembled bytes (read) or ``None``
-        (write). Empty blobs (``size==0`` / ``data==b""``) resolve
-        their user future immediately and produce no sub-ops.
-
-        Returns a flat list of ``(op, future)`` ready for the
-        single-word lowering loop."""
-        expanded: list[tuple[object, asyncio.Future]] = []
-        for op, user_future in batch:
-            if isinstance(op, ReadBlob):
-                if op.size == 0:
-                    user_future.set_result(b"")
-                    continue
-                pending = _PendingBlob(user_future, op.size, is_read=True)
-                for sub_op, offset, sz in _decompose_byte_io(
-                        op.addr, op.size, None):
-                    sub_fut = loop.create_future()
-                    pending.attach(offset, sz, sub_fut)
-                    expanded.append((sub_op, sub_fut))
-            elif isinstance(op, WriteBlob):
-                if not op.data:
-                    user_future.set_result(None)
-                    continue
-                pending = _PendingBlob(
-                    user_future, len(op.data), is_read=False)
-                for sub_op, offset, sz in _decompose_byte_io(
-                        op.addr, len(op.data), op.data):
-                    sub_fut = loop.create_future()
-                    pending.attach(offset, sz, sub_fut)
-                    expanded.append((sub_op, sub_fut))
-            else:
-                expanded.append((op, user_future))
-        return expanded
+    def _expand_read_blob(blob, user_future, loop):
+        """Expand a ReadBlob into Read{8,16,32} sub-ops with internal
+        sub-futures; each is wired to a ``_PendingBlob`` aggregator
+        that reassembles the bytes once every sub-op resolves. Empty
+        reads short-circuit the user future to ``b""``. Returns a
+        list of ``(sub_op, sub_future)``."""
+        if blob.size == 0:
+            user_future.set_result(b"")
+            return []
+        pending = _PendingBlob(user_future, blob.size, is_read=True)
+        sub_pairs = []
+        for sub_op, offset, sz in _decompose_byte_io(
+                blob.addr, blob.size, None):
+            sub_fut = loop.create_future()
+            pending.attach(offset, sz, sub_fut)
+            sub_pairs.append((sub_op, sub_fut))
+        return sub_pairs
 
     @staticmethod
     def _consume_exception(fut: asyncio.Future) -> None:
@@ -446,16 +426,21 @@ class MemApLowering:
     async def flush_ops(self, batch):
         """Lower a MEM-AP batch to AP-register accesses.
 
-        After blob expansion, every op is a single-word
-        Read{8,16,32} / Write{8,16,32}. Each one emits up to three
-        register accesses: CSW write (if size changed), TAR write
-        (if address skipped), then DRW read/write. The DRW future is
-        hooked via ``add_done_callback`` to resolve the sub-op user
-        future. flush_ops itself doesn't await — the underlying
-        batcher dispatches independently and callbacks propagate
-        results all the way up to the user blob future."""
+        Dispatch by op type:
+
+        * ``WriteBlob`` is emitted directly (no per-byte sub-future,
+          no ``_PendingBlob``); the user future chains to the *last*
+          DRW write only. Pure writes don't need per-sub-op tracking
+          because every DRW in the blob commits in the same MPSSE
+          batch and only the final committal matters to the caller.
+        * ``ReadBlob`` still expands through ``_PendingBlob`` so the
+          per-byte data can be reassembled into a ``bytes``.
+        * Single-word ops emit one CSW/TAR/DRW set inline.
+
+        flush_ops itself never awaits — the underlying batcher
+        dispatches independently and callbacks propagate results all
+        the way up to the user future."""
         loop = asyncio.get_running_loop()
-        expanded = self._expand_blobs(batch, loop)
 
         # Always re-establish CSW/TAR at start of batch — interleaved
         # batches from another Mem-AP user (or any other DP/AP
@@ -465,48 +450,89 @@ class MemApLowering:
         csw = None
         tar = None
 
-        for op, user_future in expanded:
-            try:
-                size_field = self._size_for(op)
-            except TypeError as exc:
-                user_future.set_exception(exc)
-                continue
-            size_bytes = self._SIZE_BYTES[size_field]
-            new_csw = self._csw_with(size=size_field,
-                                     addrinc=self.CSW_ADDRINC_SINGLE)
-
-            if csw != new_csw:
-                f = self.reg_write(self.CSW, new_csw)
-                f.add_done_callback(self._consume_exception)
-                csw = new_csw
-
-            if tar != op.addr:
-                f = self.reg_write(self.TAR_LO, op.addr & 0xffffffff)
-                f.add_done_callback(self._consume_exception)
-                tar = op.addr
-
-            if isinstance(op, (Read8, Read16, Read32)):
-                drw_future = self.reg_read(self.DRW)
-                self._chain_read_lane(op, user_future, drw_future)
+        for top_op, user_future in batch:
+            if isinstance(top_op, WriteBlob):
+                csw, tar = self._emit_write_blob(
+                    top_op, csw, tar, user_future)
+            elif isinstance(top_op, ReadBlob):
+                for sub_op, sub_fut in self._expand_read_blob(
+                        top_op, user_future, loop):
+                    csw, tar = self._emit_single(sub_op, csw, tar, sub_fut)
             else:
-                # Shift data into the correct byte lane.
-                shift = (op.addr & 3) * 8
-                lane_data = (op.data << shift) & 0xffffffff
-                drw_future = self.reg_write(self.DRW, lane_data)
-                self._chain_write_completion(user_future, drw_future)
-
-            # Auto-increment cached TAR. If we'd cross a 1KB segment,
-            # invalidate the cache — auto-inc only guarantees 10-bit
-            # behavior (TARINC may say more, but we don't trust it
-            # without explicit detection).
-            next_tar = op.addr + size_bytes
-            if (next_tar & 0xFFFFFC00) != (op.addr & 0xFFFFFC00):
-                tar = None
-            else:
-                tar = next_tar
+                csw, tar = self._emit_single(top_op, csw, tar, user_future)
 
         self._csw_cache = csw
         self._tar_cache = tar
+
+    def _csw_tar_setup(self, addr: int, size_field: int,
+                       csw, tar):
+        """Issue CSW and TAR writes if their cached values don't match
+        the requested ones. Returns the updated cache values."""
+        new_csw = self._csw_with(size=size_field,
+                                 addrinc=self.CSW_ADDRINC_SINGLE)
+        if csw != new_csw:
+            f = self.reg_write(self.CSW, new_csw)
+            f.add_done_callback(self._consume_exception)
+            csw = new_csw
+        if tar != addr:
+            f = self.reg_write(self.TAR_LO, addr & 0xffffffff)
+            f.add_done_callback(self._consume_exception)
+            tar = addr
+        return csw, tar
+
+    @staticmethod
+    def _tar_advance(addr: int, size_bytes: int, tar):
+        """Auto-increment cached TAR after a write/read. If the next
+        address crosses the 1 KiB segment boundary auto-inc no longer
+        guarantees correctness, so invalidate the cache."""
+        next_tar = addr + size_bytes
+        if (next_tar & 0xFFFFFC00) != (addr & 0xFFFFFC00):
+            return None
+        return next_tar
+
+    def _emit_write_blob(self, blob, csw, tar, user_future):
+        """Emit one CSW/TAR/DRW set per sub-op for a WriteBlob, then
+        chain the user future to the last DRW future only — there's
+        no need to thread per-sub-op futures through _PendingBlob for
+        a write because the caller only needs to know when the whole
+        blob has committed on the wire."""
+        if not blob.data:
+            user_future.set_result(None)
+            return csw, tar
+
+        last_drw = None
+        for sub_op, _offset, _size_bytes in _decompose_byte_io(
+                blob.addr, len(blob.data), blob.data):
+            size_field = self._size_for(sub_op)
+            csw, tar = self._csw_tar_setup(sub_op.addr, size_field, csw, tar)
+            shift = (sub_op.addr & 3) * 8
+            lane_data = (sub_op.data << shift) & 0xffffffff
+            last_drw = self.reg_write(self.DRW, lane_data)
+            tar = self._tar_advance(sub_op.addr,
+                                    self._SIZE_BYTES[size_field], tar)
+
+        self._chain_write_completion(user_future, last_drw)
+        return csw, tar
+
+    def _emit_single(self, op, csw, tar, user_future):
+        """Emit one CSW/TAR/DRW set for a single Read*/Write* op and
+        chain the user future to its DRW future."""
+        try:
+            size_field = self._size_for(op)
+        except TypeError as exc:
+            user_future.set_exception(exc)
+            return csw, tar
+        csw, tar = self._csw_tar_setup(op.addr, size_field, csw, tar)
+        if isinstance(op, (Read8, Read16, Read32)):
+            drw_future = self.reg_read(self.DRW)
+            self._chain_read_lane(op, user_future, drw_future)
+        else:
+            shift = (op.addr & 3) * 8
+            lane_data = (op.data << shift) & 0xffffffff
+            drw_future = self.reg_write(self.DRW, lane_data)
+            self._chain_write_completion(user_future, drw_future)
+        tar = self._tar_advance(op.addr, self._SIZE_BYTES[size_field], tar)
+        return csw, tar
 
     # -- start() helpers ------------------------------------------
 

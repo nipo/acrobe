@@ -355,31 +355,35 @@ class Tap(Batcher, Node, InstructionRegistry):
     async def flush_ops(self, batch):
         """Forward each TAP-level op to the parent wrapped in a TapOp.
 
-        Fire-and-forget: each user future is chained to the matching
-        parent future via ``add_done_callback``. flush_ops returns as
-        soon as the wrapping is done, so the Batcher's lock releases
-        immediately and subsequent batches can flow through while the
-        wire round-trip for this one is still in flight.
+        Fire-and-forget with a single batched anchor: every user future
+        is paired with its parent future, and one ``add_done_callback``
+        on the *last* parent future resolves the whole list at once.
+        The parent (Chain) resolves its futures in batch order, so by
+        the time the last fires every earlier one is already settled.
+        Avoids ``len(batch)`` add_done_callback registrations and
+        ``len(batch)`` separate event-loop schedulings on resolution.
         """
         if self._parent is None:
             raise RuntimeError(f"Tap {self.name!r} has no parent to forward to")
 
+        forwarded = []
         for op, future in batch:
             parent_future = self._parent.post(TapOp(self, op))
-            self._chain_completion(future, parent_future)
+            forwarded.append((future, parent_future))
+
+        if forwarded:
+            forwarded[-1][1].add_done_callback(
+                lambda _lf, fwd=forwarded: Tap._resolve_batch(fwd))
 
     @staticmethod
-    def _chain_completion(upper, lower):
-        """Resolve ``upper`` with ``lower``'s result (or exception) once
-        ``lower`` completes."""
-        def cb(lf):
-            if upper.done():
-                return
+    def _resolve_batch(forwarded):
+        for future, parent_future in forwarded:
+            if future.done():
+                continue
             try:
-                upper.set_result(lf.result())
+                future.set_result(parent_future.result())
             except Exception as exc:
-                upper.set_exception(exc)
-        lower.add_done_callback(cb)
+                future.set_exception(exc)
 
     def __repr__(self):
         return f"<Tap {self._name} irlen={self.irlen}>"
@@ -731,21 +735,27 @@ class Chain(Batcher, Node):
         """Translate TapOp envelopes from child Taps into bit-level ops
         posted to the JtagInterface parent.
 
-        Fire-and-forget: each top-future is chained via
-        ``add_done_callback`` to the bit-level future of the matching
-        TapOp's combined Shift (with TDO sliced for read shifts).
-        flush_ops returns as soon as the translation is done, so the
-        Batcher's lock releases right away and the next Chain batch can
-        lower in parallel with the in-flight bit-level work.
-
         Pre-/post-padding for the target tap is concatenated into a
-        single Shift covering the whole chain DR (or IR), instead of
-        emitting separate pre/data/post Shifts. This keeps the chain in
-        Shift-DR throughout, halving the TMS framing in MPSSE for
-        multi-tap chains.
+        single chain-wide Shift instead of emitting separate
+        pre/data/post Shifts. The FSM stays in Shift-DR throughout,
+        which halves the TMS framing in MPSSE for multi-tap chains.
+
+        Resolution is batched: each TapOp's resolution is recorded as
+        a tuple, and one ``add_done_callback`` on the last bit-level
+        future resolves the whole list at once. The parent's batcher
+        resolves bit-level futures in batch order, so by the time the
+        last fires every earlier anchor is already settled — the
+        single callback can synchronously read every op's TDO.
         """
         if self._parent is None:
             raise RuntimeError(f"Chain {self.name!r} has no parent to forward to")
+
+        # Each entry: (top_future, anchor_future_or_None, slice_or_None).
+        # anchor_future None: nothing was posted; top_future is already
+        # resolved with None. slice: (offset, length) for slicing the
+        # anchor's TDO when reading; None means "set None".
+        resolutions = []
+        last_anchor = None
 
         for top, top_future in batch:
             if not isinstance(top, TapOp):
@@ -772,8 +782,9 @@ class Chain(Batcher, Node):
                                      ctx.ir_post)
                 shift_future = self._parent.post(Shift(tdi, read_tdo=True))
                 self._invalidate_ir_cache_for_shift(tap, bypass_val)
-                self._chain_tdo(top_future, shift_future,
-                                ctx.ir_pre, tap.irlen)
+                resolutions.append(
+                    (top_future, shift_future, (ctx.ir_pre, tap.irlen)))
+                last_anchor = shift_future
 
             elif isinstance(op, _TapShift):
                 ir_done = None
@@ -792,24 +803,32 @@ class Chain(Batcher, Node):
                     shift_future = self._parent.post(
                         Shift(dr_tdi, read_tdo=op.read_tdo))
                     if op.read_tdo:
-                        self._chain_tdo(top_future, shift_future,
-                                        ctx.dr_pre, len(op.tdi))
+                        resolutions.append(
+                            (top_future, shift_future,
+                             (ctx.dr_pre, len(op.tdi))))
                     else:
-                        self._chain_completion(top_future, shift_future)
+                        resolutions.append((top_future, shift_future, None))
+                    last_anchor = shift_future
                 elif ir_done is not None:
-                    self._chain_completion(top_future, ir_done)
+                    resolutions.append((top_future, ir_done, None))
+                    last_anchor = ir_done
                 else:
                     if not top_future.done():
                         top_future.set_result(None)
 
             elif isinstance(op, _TapRun):
                 run_future = self._parent.post(Run(op.cycles))
-                self._chain_completion(top_future, run_future)
+                resolutions.append((top_future, run_future, None))
+                last_anchor = run_future
 
             else:
                 if not top_future.done():
                     top_future.set_exception(
                         ValueError(f"Unknown tap op: {type(op).__name__}"))
+
+        if last_anchor is not None:
+            last_anchor.add_done_callback(
+                lambda _lf, r=resolutions: Chain._resolve_batch(r))
 
     @staticmethod
     def _pad_with(pad_fn, pre: int, data: BitString,
@@ -827,40 +846,26 @@ class Chain(Batcher, Node):
         return data
 
     @staticmethod
-    def _chain_completion(upper, lower):
-        """Resolve ``upper`` with None when ``lower`` completes; on
-        exception, propagate it to ``upper``."""
-        def cb(lf):
-            if upper.done():
-                return
+    def _resolve_batch(resolutions):
+        """Walk the recorded (top_future, anchor_future, slice) tuples
+        and resolve each top_future. Called once per batch when the
+        last anchor future fires."""
+        for top_future, anchor_future, slice_spec in resolutions:
+            if top_future.done():
+                continue
             try:
-                lf.result()
+                value = anchor_future.result()
             except Exception as exc:
-                upper.set_exception(exc)
-                return
-            upper.set_result(None)
-        lower.add_done_callback(cb)
-
-    @staticmethod
-    def _chain_tdo(upper, lower, offset: int, length: int):
-        """Resolve ``upper`` with ``lower``'s TDO sliced to
-        ``[offset:offset + length]`` once ``lower`` completes. The
-        slice picks the target tap's bits out of a chain-wide combined
-        shift; for ``offset == 0`` and ``length == len(tdo)`` the slice
-        is the whole TDO."""
-        def cb(lf):
-            if upper.done():
-                return
-            try:
-                tdo = lf.result()
-            except Exception as exc:
-                upper.set_exception(exc)
-                return
-            if offset == 0 and length == len(tdo):
-                upper.set_result(tdo)
+                top_future.set_exception(exc)
+                continue
+            if slice_spec is None:
+                top_future.set_result(None)
             else:
-                upper.set_result(tdo[offset:offset + length])
-        lower.add_done_callback(cb)
+                offset, length = slice_spec
+                if offset == 0 and length == len(value):
+                    top_future.set_result(value)
+                else:
+                    top_future.set_result(value[offset:offset + length])
 
     def _invalidate_ir_cache_for_shift(self, tap, new_ir):
         """An IR shift just happened: this tap loaded `new_ir`, all

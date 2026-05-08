@@ -116,18 +116,15 @@ class JtagMpsse(jtag.JtagInterface):
     async def flush_ops(self, batch):
         """Translate JTAG operations to MPSSE and post them.
 
-        Fire-and-forget: each batch-op future is chained via
-        ``add_done_callback`` to its last MPSSE op so flush_ops returns
-        as soon as the translation is done. The Batcher's lock releases
-        immediately, letting subsequent JTAG batches lower into MPSSE
-        while the current USB round-trip is still in flight.
+        Resolution is batched: each batch op records its (future,
+        anchor_idx, tdo_range) tuple, and one ``add_done_callback`` on
+        the last MPSSE future resolves every entry in one synchronous
+        pass. MpsseEngine populates each op's ``.data`` and resolves
+        futures in batch order, so by the time the last future fires
+        every earlier op's data is available.
         """
         mpsse_ops = []
-        # Per batch-op: (future, anchor_idx, tdo_range).
-        # anchor_idx is the index in mpsse_ops of the last op posted for
-        # the matching batch-op; None when no MPSSE work was emitted.
-        # tdo_range is (start, end) into mpsse_ops naming the data-bearing
-        # slice for a Shift with read_tdo, None otherwise.
+        # Per batch op: (future, anchor_idx_or_None, tdo_range_or_None).
         op_anchors: list = []
 
         for op, future in batch:
@@ -161,56 +158,48 @@ class JtagMpsse(jtag.JtagInterface):
             anchor = len(mpsse_ops) - 1 if len(mpsse_ops) > pre_len else None
             op_anchors.append((future, anchor, tdo_range))
 
-        mpsse_futures = [self._engine.post(op) for op in mpsse_ops]
-
-        for future, anchor, tdo_range in op_anchors:
-            if anchor is None:
+        if not mpsse_ops:
+            for future, _anchor, _tdo_range in op_anchors:
                 if not future.done():
                     future.set_result(None)
+            return
+
+        mpsse_futures = [self._engine.post(op) for op in mpsse_ops]
+        last_future = mpsse_futures[-1]
+        last_future.add_done_callback(
+            lambda _lf,
+                   anchors=op_anchors,
+                   futures=mpsse_futures,
+                   ops=mpsse_ops:
+                JtagMpsse._resolve_batch(anchors, futures, ops))
+
+    @staticmethod
+    def _resolve_batch(op_anchors, mpsse_futures, mpsse_ops):
+        """Single-pass resolution of every batch-op future. Reads
+        directly from each anchor's MPSSE future and assembles TDO
+        from ``mpsse_ops[start:end]`` for read shifts."""
+        for future, anchor, tdo_range in op_anchors:
+            if future.done():
+                continue
+            if anchor is None:
+                future.set_result(None)
                 continue
             anchor_future = mpsse_futures[anchor]
+            try:
+                anchor_future.result()
+            except Exception as exc:
+                future.set_exception(exc)
+                continue
             if tdo_range is None:
-                self._chain_completion(future, anchor_future)
-            else:
-                start, end = tdo_range
-                self._chain_tdo(future, anchor_future, mpsse_ops[start:end])
-
-    @staticmethod
-    def _chain_completion(upper, lower):
-        """Resolve ``upper`` with None when ``lower`` completes; on
-        exception, propagate it."""
-        def cb(lf):
-            if upper.done():
-                return
-            try:
-                lf.result()
-            except Exception as exc:
-                upper.set_exception(exc)
-                return
-            upper.set_result(None)
-        lower.add_done_callback(cb)
-
-    @staticmethod
-    def _chain_tdo(upper, anchor_future, tdo_ops):
-        """Resolve ``upper`` with the concatenated TDO of ``tdo_ops``
-        once ``anchor_future`` completes. The MpsseEngine populates each
-        op's ``data`` attribute before resolving any future in its batch,
-        so by the time the callback fires every op in ``tdo_ops`` has
-        its captured data available."""
-        def cb(lf):
-            if upper.done():
-                return
-            try:
-                lf.result()
-            except Exception as exc:
-                upper.set_exception(exc)
-                return
+                future.set_result(None)
+                continue
+            start, end = tdo_range
             tdo = BitString()
-            for m_op in tdo_ops:
-                if getattr(m_op, "data", None) is not None:
-                    tdo += m_op.data
-            upper.set_result(tdo)
-        anchor_future.add_done_callback(cb)
+            for m_op in mpsse_ops[start:end]:
+                data = getattr(m_op, "data", None)
+                if data is not None:
+                    tdo += data
+            future.set_result(tdo)
 
     # --- State machine helpers ---
 
