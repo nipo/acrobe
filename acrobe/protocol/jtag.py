@@ -11,21 +11,6 @@ from ..db import Db, NoMatch
 from ..part_id import PartId
 
 
-# UUIDs for transportable JTAG types. Stable, hand-minted; new types
-# get fresh UUIDs without renumbering existing ones.
-SHIFT_UUID         = "00010001-0000-4000-8000-000000000001"
-CAPTURE_DR_UUID    = "00010001-0000-4000-8000-000000000002"
-CAPTURE_IR_UUID    = "00010001-0000-4000-8000-000000000003"
-RESET_UUID         = "00010001-0000-4000-8000-000000000004"
-RUN_UUID           = "00010001-0000-4000-8000-000000000005"
-SWD_TO_JTAG_UUID   = "00010001-0000-4000-8000-000000000006"
-OPEN_CHAIN_UUID    = "00010001-0000-4000-8000-0000000000fe"
-
-JTAG_INTERFACE_UUID = "00010001-0000-4000-8000-0000000000a0"
-CHAIN_UUID          = "00010001-0000-4000-8000-0000000000a1"
-TAP_UUID            = "00010001-0000-4000-8000-0000000000a2"
-
-
 # JTAG Interface Operations
 #
 # All op classes are immutable. The future returned by Batcher.post()
@@ -38,7 +23,7 @@ TAP_UUID            = "00010001-0000-4000-8000-0000000000a2"
 # and futures already carry the value cleanly.
 
 
-@wire.op(SHIFT_UUID)
+@wire.op("9a3b4125-5192-4298-9cb8-4400ed9735e0")
 @dataclass(frozen=True, slots=True)
 class Shift:
     """Shift data through TDI/TDO."""
@@ -51,7 +36,7 @@ class Shift:
         no_tdo = ', notdo' if not self.read_tdo else ''
         return f"Shift({tdi}{no_tdo})"
 
-@wire.op(CAPTURE_DR_UUID)
+@wire.op("d21e382f-f032-41ac-8355-5a48f4cfada7")
 @dataclass(frozen=True, slots=True)
 class CaptureDr:
     """Transition FSM to Capture-DR."""
@@ -59,7 +44,7 @@ class CaptureDr:
     def __repr__(self):
         return f"CaptureDr()"
 
-@wire.op(CAPTURE_IR_UUID)
+@wire.op("7e14803d-230a-44eb-b2ce-e9fa2da813f6")
 @dataclass(frozen=True, slots=True)
 class CaptureIr:
     """Transition FSM to Capture-IR."""
@@ -67,7 +52,7 @@ class CaptureIr:
     def __repr__(self):
         return f"CaptureIr()"
 
-@wire.op(RESET_UUID)
+@wire.op("7e5f7d58-961d-43fa-9be7-6825633db5f7")
 @dataclass(frozen=True, slots=True)
 class Reset:
     """TAP reset via TMS. `count` is clamped to a 5-cycle minimum."""
@@ -81,7 +66,7 @@ class Reset:
     def __repr__(self):
         return f"Reset({self.count})"
 
-@wire.op(RUN_UUID)
+@wire.op("8c576220-b357-4559-a59a-4aa4c7c2a4f5")
 @dataclass(frozen=True, slots=True)
 class Run:
     """Run TCK cycles in Run-Test/Idle."""
@@ -97,7 +82,7 @@ class Run:
 _SWD_TO_JTAG_TMS = BitString(-1, 50) + BitString(0xe73c, 16) + BitString(-1, 5)
 
 
-@wire.op(SWD_TO_JTAG_UUID)
+@wire.op("ace0ffc5-715c-4938-8187-13bf021362b0")
 @dataclass(frozen=True, slots=True)
 class SwdToJtag:
     """SWD-to-JTAG switch sequence."""
@@ -402,7 +387,7 @@ class Tap(Batcher, Node, InstructionRegistry):
 
 # JTAG Interface
 
-@wire.node(JTAG_INTERFACE_UUID,
+@wire.node("fca89969-2aa1-40f3-9c48-7dacb5117091",
            uses=[Shift, CaptureDr, CaptureIr, Reset, Run, SwdToJtag])
 class JtagInterface(Batcher, FreqCapper, Node):
     """Bit-level JTAG master interface.
@@ -430,7 +415,7 @@ class JtagInterface(Batcher, FreqCapper, Node):
 
 # Chain
 
-@wire.error(OPEN_CHAIN_UUID)
+@wire.error("14b08152-1d47-43a5-b0cd-a3d19783b60f")
 @dataclass
 class OpenChain(Exception):
     """TDO line is stuck or disconnected."""
