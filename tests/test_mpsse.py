@@ -182,6 +182,10 @@ class TestShiftTms:
 
 
 class MockTransport:
+    """Synchronous-API mock matching the new fire-and-forget Transport
+    contract: ``write`` and ``read`` return resolved futures so the
+    engine can hook ``add_done_callback`` without awaiting."""
+
     def __init__(self):
         self.writes = []
         self.responses = []
@@ -189,16 +193,24 @@ class MockTransport:
     def queue_response(self, data: bytes):
         self.responses.append(data)
 
-    async def write(self, data: bytes):
-        self.writes.append(data)
+    @staticmethod
+    def _resolved(value):
+        f = asyncio.get_running_loop().create_future()
+        f.set_result(value)
+        return f
 
-    async def read(self, byte_count: int) -> bytes:
+    def write(self, data: bytes) -> asyncio.Future:
+        self.writes.append(data)
+        return self._resolved(None)
+
+    def read(self, byte_count: int) -> asyncio.Future:
         if self.responses:
             rsp = self.responses.pop(0)
             assert len(rsp) == byte_count, \
                 f"Mock response length {len(rsp)} != expected {byte_count}"
-            return rsp
-        return bytes(byte_count)
+        else:
+            rsp = bytes(byte_count)
+        return self._resolved(rsp)
 
     async def transfer(self, data: bytes, byte_count: int) -> bytes:
         await self.write(data)
@@ -268,11 +280,20 @@ class TestMpsseEngine:
 
     @pytest.mark.asyncio
     async def test_transport_error(self):
+        """A failed USB read future must propagate to every batch
+        future via the engine's read_done callback."""
         class FailTransport:
-            async def write(self, data):
-                raise IOError("USB error")
-            async def read(self, byte_count):
-                raise IOError("USB error")
+            @staticmethod
+            def _failed():
+                f = asyncio.get_running_loop().create_future()
+                f.set_exception(IOError("USB error"))
+                return f
+            def write(self, data):
+                f = asyncio.get_running_loop().create_future()
+                f.set_result(None)
+                return f
+            def read(self, byte_count):
+                return self._failed()
             async def transfer(self, data, byte_count):
                 raise IOError("USB error")
 

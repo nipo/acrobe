@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol
 
 from . import mpsse_cmd
@@ -8,8 +9,8 @@ from ...engine import Batcher
 
 
 class Transport(Protocol):
-    async def write(self, data: bytes) -> None: ...
-    async def read(self, byte_count: int) -> bytes: ...
+    def write(self, data: bytes) -> asyncio.Future: ...
+    def read(self, byte_count: int) -> asyncio.Future: ...
     async def transfer(self, data: bytes, byte_count: int) -> bytes: ...
 
 
@@ -390,12 +391,21 @@ class MpsseEngine(Batcher):
         self._transport.write(cmd)
 
         def read_done(rsp):
-            rsp = rsp.result()
-            self.logger.log(5, "USB << %d bytes", len(rsp))
+            try:
+                data = rsp.result()
+            except BaseException as exc:
+                # USB failure: every batch future would otherwise dangle,
+                # which deadlocks upper layers chained via add_done_callback.
+                for op, future in batch:
+                    if not future.done():
+                        future.set_exception(exc)
+                return
+
+            self.logger.log(5, "USB << %d bytes", len(data))
 
             for (op, future), (start, end) in zip(batch, rsp_ranges):
                 if start < end:
-                    op.rsp_handle(rsp[start:end])
+                    op.rsp_handle(data[start:end])
                 future.set_result(op)
 
         self._transport.read(total_rsp).add_done_callback(read_done)
