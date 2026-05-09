@@ -96,7 +96,11 @@ class BitStringSlice(BitStringBase):
         end_byte = (self._end + 7) >> 3
         blob = self._bs.data[begin_byte:end_byte]
 
-        # Shift right to drop bits below begin, then mask to length
+        # Shift right to drop bits below begin, then mask to length.
+        # An "aligned" shortcut here (skip shift+mask when begin_bit==0
+        # and length&7==0) was tried and regressed: the branch fires
+        # for ~1 in 64 random slices but the comparison costs every
+        # call. Keep the single-branch path.
         begin_bit = self._begin & 7
         return (int.from_bytes(blob, byteorder='little') >> begin_bit) & ((1 << length) - 1)
 
@@ -186,6 +190,21 @@ class BitString(BitStringBase):
             self._length = data._length
             self._data_cache = data._data_cache
             return
+        if isinstance(data, (bytes, bytearray)) and length is not None:
+            byte_count = (length + 7) >> 3
+            if len(data) == byte_count:
+                # Common case: caller passes exactly the right number
+                # of bytes. Skip the ljust call and the append() loop.
+                raw = bytes(data) if isinstance(data, bytearray) else data
+                if length & 7:
+                    self._bytes = [raw[:-1]]
+                    self._last_byte = raw[-1]
+                else:
+                    self._bytes = [raw]
+                    self._last_byte = 0
+                self._length = length
+                self._data_cache = raw
+                return
         # Fallback: empty self + general append.
         self._bytes = []
         self._last_byte = 0
@@ -384,9 +403,27 @@ class BitString(BitStringBase):
         return self
 
     def __add__(self, other):
+        # Fast path for small operands: build the combined int in
+        # one shot and run it through the (int, length) constructor
+        # path. Avoids the two-step "clone self, append other" the
+        # general path takes — relevant for the JTAG hot loop, which
+        # concats pad + tdi (+ pad) under 256 bits per APACC.
+        self_len = self._length
+        other_len = len(other)
+        if other_len == 0:
+            return BitString(self)
+        if self_len == 0:
+            if isinstance(other, BitString):
+                return BitString(other)
+            return BitString(int(other), other_len)
+        total = self_len + other_len
+        if total <= 256:
+            combined = int(self) | (int(other) << self_len)
+            return BitString(combined, total)
+        # Fallback for large concat — keeps the existing chunk-list
+        # path which is amortized O(1) on append().
         n = BitString(self)
-        if len(other):
-            n.append(other)
+        n.append(other)
         return n
 
 
