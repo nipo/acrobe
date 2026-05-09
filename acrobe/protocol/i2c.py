@@ -1,13 +1,46 @@
 from __future__ import annotations
 
-import asyncio
+from dataclasses import dataclass
 
 from ..engine import Batcher
 from ..node import Node
 
 
+# I2C operations, after the Transfer / WaitAck / Transaction model:
+#
+# * Transfer is the only wire-level primitive: one START, addressed
+#   slave, optional write payload, optional restart-then-read, STOP.
+#   This matches what real adapters (FTDI, Proby, kernel i2c-dev, …)
+#   actually expose; multi-restart sequences past write-then-read are
+#   not supported by typical hardware and are deliberately not
+#   modeled.
+# * WaitAck is a probe loop: START + addr + STOP repeatedly until the
+#   slave acknowledges or the timeout elapses. Useful only as a gate
+#   for a following Transfer (EEPROM write-cycle wait, ADC busy
+#   poll); it offloads polling latency to the adapter when supported.
+# * Transaction groups a sequence of Transfer / WaitAck items with
+#   cancel-on-failure semantics: an item that raises aborts every
+#   later item in the same Transaction.
+#
+# A naked Transfer or WaitAck posted to the Interface is wrapped into
+# a 1-item Transaction before reaching the adapter; the adapter's
+# contract is therefore uniform — it consumes Transactions and
+# resolves the future to ``tuple[bytes | None, ...]`` aligned with
+# ``Transaction.items`` (``bytes`` for read Transfers, ``None`` for
+# write-only Transfers and WaitAcks), or raises on failure.
+#
+# Per acrobe convention, op classes are frozen dataclasses; the
+# Future returned by Batcher.post() resolves to the natural result:
+#   - Transfer with size_r > 0  → bytes
+#   - Transfer write-only       → None
+#   - WaitAck                   → None
+#   - Transaction               → tuple of the above per item
+
+
+# ---- Exceptions ----
+
 class AddressNack(Exception):
-    """Raised when I2C slave does not acknowledge its address."""
+    """Slave did not acknowledge its address."""
 
     def __init__(self, addr: int):
         self.addr = addr
@@ -15,131 +48,175 @@ class AddressNack(Exception):
 
 
 class DataNack(Exception):
-    """Raised when I2C slave NACKs during data transfer."""
-    pass
+    """Slave NACKed during data transfer."""
 
-
-# --- I2C Operations ---
-
-class Read:
-    """I2C read operation."""
-
-    def __init__(self, addr: int, size: int):
+    def __init__(self, addr: int):
         self.addr = addr
-        self.size = size
-        self.data = None
+        super().__init__(f"I2C data NACK at 0x{addr:02x}")
+
+
+class WaitAckTimeout(Exception):
+    """WaitAck did not see an address ACK within the timeout."""
+
+    def __init__(self, addr: int, timeout_s: float):
+        self.addr = addr
+        self.timeout_s = timeout_s
+        super().__init__(
+            f"I2C WaitAck timeout at 0x{addr:02x} after {timeout_s}s")
+
+
+# ---- Operations ----
+
+@dataclass(frozen=True, slots=True)
+class Transfer:
+    """One atomic START..STOP bus transaction.
+
+    ``data_w`` empty → read-only.  ``size_r`` zero → write-only.
+    Both non-zero → write-then-read with one repeated start between.
+    """
+
+    addr: int
+    data_w: bytes = b""
+    size_r: int = 0
+
+    def __post_init__(self):
+        if not isinstance(self.data_w, bytes):
+            object.__setattr__(self, "data_w", bytes(self.data_w))
+        if not self.data_w and self.size_r == 0:
+            raise ValueError("Transfer must read or write at least one byte")
+        if self.size_r < 0:
+            raise ValueError("Transfer size_r must be non-negative")
 
     def __repr__(self):
-        return f"<Read 0x{self.addr:02x} {self.size}B>"
+        if self.data_w and self.size_r:
+            return (f"Transfer(0x{self.addr:02x}, "
+                    f"w={self.data_w.hex()}, r={self.size_r}B)")
+        if self.size_r:
+            return f"Transfer(0x{self.addr:02x}, r={self.size_r}B)"
+        return f"Transfer(0x{self.addr:02x}, w={self.data_w.hex()})"
 
 
-class Write:
-    """I2C write operation."""
+@dataclass(frozen=True, slots=True)
+class WaitAck:
+    """Probe a slave's address until it ACKs or the timeout elapses."""
 
-    def __init__(self, addr: int, data: bytes):
-        self.addr = addr
-        self.data = bytes(data)
+    addr: int
+    timeout_s: float
+    interval_s: float | None = None
+
+    def __post_init__(self):
+        if self.timeout_s <= 0:
+            raise ValueError("WaitAck timeout_s must be positive")
+        if self.interval_s is not None and self.interval_s <= 0:
+            raise ValueError("WaitAck interval_s must be positive when set")
 
     def __repr__(self):
-        return f"<Write 0x{self.addr:02x} {len(self.data)}B>"
+        return f"WaitAck(0x{self.addr:02x}, t<={self.timeout_s}s)"
 
 
-class WriteRead:
-    """I2C write-then-read with repeated start."""
+@dataclass(frozen=True, slots=True)
+class Transaction:
+    """Sequence of Transfer / WaitAck items.
 
-    def __init__(self, addr: int, data: bytes, size: int):
-        self.addr = addr
-        self.data = bytes(data)
-        self.size = size
-        self.result = None  # populated by adapter
+    Failure of one item aborts every later item in the Transaction;
+    the future resolves with the failing item's exception.
+    """
+
+    items: tuple
+
+    def __post_init__(self):
+        if not isinstance(self.items, tuple):
+            object.__setattr__(self, "items", tuple(self.items))
+        if not self.items:
+            raise ValueError("Transaction must have at least one item")
+        for it in self.items:
+            if not isinstance(it, (Transfer, WaitAck)):
+                raise TypeError(f"Invalid Transaction item: {it!r}")
 
     def __repr__(self):
-        return f"<WriteRead 0x{self.addr:02x} w={len(self.data)}B r={self.size}B>"
+        return f"Transaction({', '.join(repr(i) for i in self.items)})"
 
 
-# --- I2C Interface ---
+# ---- Interface ----
 
 class Interface(Batcher, Node):
-    """I2C bus. Forwards Read/Write/WriteRead to adapter."""
+    """I2C bus.
 
-    def __init__(self, adapter, name="i2c"):
+    Accepts Transfer, WaitAck, or Transaction ops.  Naked items are
+    wrapped into a 1-item Transaction before forwarding so the
+    adapter only ever sees Transactions.
+    """
+
+    def __init__(self, adapter, name: str = "i2c"):
         Batcher.__init__(self)
         Node.__init__(self, name)
         self._adapter = adapter
 
+    @staticmethod
+    def _normalize(op):
+        """Return (Transaction, single).  ``single`` means the caller
+        passed a naked item and expects an unwrapped result."""
+        if isinstance(op, Transaction):
+            return op, False
+        if isinstance(op, (Transfer, WaitAck)):
+            return Transaction((op,)), True
+        raise TypeError(f"Unsupported I2C op: {op!r}")
+
     async def flush_ops(self, batch):
-        futures = []
+        forwarded = []
         for op, future in batch:
-            futures.append((self._adapter.post(op), future))
-        if futures:
-            await asyncio.gather(*[f for f, _ in futures])
-        for af, mf in futures:
-            mf.set_result(af.result())
+            tx, single = self._normalize(op)
+            forwarded.append((self._adapter.post(tx), future, single))
+
+        for af, mf, single in forwarded:
+            try:
+                result = await af
+            except Exception as exc:
+                mf.set_exception(exc)
+                continue
+            mf.set_result(result[0] if single else result)
 
     def __repr__(self):
         return f"<i2c.Interface {self._name}>"
 
 
-# --- I2C Slave ---
+# ---- Slave ----
 
-class Slave(Batcher, Node):
-    """I2C slave device at a fixed address.
+class Slave(Node):
+    """I2C slave at a fixed address.  Thin facade over Interface."""
 
-    Translates read/write/write_read calls into I2C operations
-    posted to the interface.
-    """
-
-    def __init__(self, interface, addr: int, name: str = None):
+    def __init__(self, interface: Interface, addr: int, name: str = None):
         if name is None:
             name = f"i2c[0x{addr:02x}]"
-        Batcher.__init__(self)
         Node.__init__(self, name)
         self._interface = interface
         self.addr = addr
 
     def read(self, size: int):
-        """Post a read. Returns Future -> bytes."""
-        return self.post(Read(self.addr, size))
+        """Future → bytes."""
+        return self._interface.post(Transfer(self.addr, size_r=size))
 
-    def write(self, data: bytes):
-        """Post a write. Returns Future -> None."""
-        return self.post(Write(self.addr, data))
+    def write(self, data):
+        """Future → None."""
+        return self._interface.post(Transfer(self.addr, data_w=bytes(data)))
 
-    def write_read(self, data: bytes, size: int):
-        """Post a write-then-read (repeated start). Returns Future -> bytes."""
-        return self.post(("write_read", data, size))
+    def write_read(self, data, size: int):
+        """Future → bytes."""
+        return self._interface.post(
+            Transfer(self.addr, data_w=bytes(data), size_r=size))
 
-    async def flush_ops(self, batch):
-        iface_futures = []
-        read_info = []
+    def wait_ready(self, timeout_s: float, interval_s: float | None = None):
+        """Future → None.  Raises WaitAckTimeout on timeout."""
+        return self._interface.post(
+            WaitAck(self.addr, timeout_s, interval_s))
 
-        for idx, (op, future) in enumerate(batch):
-            if isinstance(op, tuple) and op[0] == "write_read":
-                _, data, size = op
-                wr_op = WriteRead(self.addr, data, size)
-                f = self._interface.post(wr_op)
-                iface_futures.append(f)
-                read_info.append((idx, wr_op))
-            elif isinstance(op, Read):
-                f = self._interface.post(op)
-                iface_futures.append(f)
-                read_info.append((idx, op))
-            elif isinstance(op, Write):
-                f = self._interface.post(op)
-                iface_futures.append(f)
-                read_info.append((idx, None))
+    def transaction(self, *items):
+        """Future → tuple of per-item natural results."""
+        return self._interface.post(Transaction(items))
 
-        if iface_futures:
-            await asyncio.gather(*iface_futures)
-
-        for idx, read_op in read_info:
-            op, future = batch[idx]
-            if isinstance(op, tuple):
-                future.set_result(read_op.result)
-            elif isinstance(op, Read):
-                future.set_result(op.data)
-            else:
-                future.set_result(None)
+    def post(self, op):
+        """Forward a pre-built op (Transaction, Transfer, WaitAck) directly."""
+        return self._interface.post(op)
 
     def __repr__(self):
         return f"<Slave 0x{self.addr:02x}>"
