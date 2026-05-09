@@ -3,3 +3,10 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .hypothesis/
+
+# Cython build artifacts. _bitstring_cy.pyx is the source of truth;
+# the generated .c and the compiled .so are produced by setup.py
+# build_ext / pip install -e . on demand.
+acrobe/_bitstring_cy.c
+acrobe/_bitstring_cy.*.so
+build/

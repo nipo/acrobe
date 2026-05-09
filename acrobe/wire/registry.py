@@ -93,8 +93,16 @@ class Registry:
         entry = RegistryEntry(cls, type_uuid, kind, codec, uses_tuple)
         self._by_uuid[type_uuid] = entry
         self._by_class[cls] = entry
-        cls.__wire_uuid__ = type_uuid
-        cls.__wire_kind__ = kind
+        # Annotate the class with the registry mapping when the
+        # type permits class-attribute assignment. Cython cdef
+        # classes (and other immutable types) reject this — the
+        # canonical mapping is _by_class anyway, so silently
+        # tolerate the rejection.
+        try:
+            cls.__wire_uuid__ = type_uuid
+            cls.__wire_kind__ = kind
+        except TypeError:
+            pass
         return entry
 
     def _validate_node_use(self, node_cls: type,
