@@ -12,3 +12,4 @@ from . import lattice  # noqa: F401
 from . import spi_flash  # noqa: F401
 from . import arm  # noqa: F401
 from . import renesas  # noqa: F401
+from . import ti  # noqa: F401
