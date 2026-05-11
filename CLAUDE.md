@@ -39,7 +39,7 @@ There is a python object instance tree of `acrobe.node.Node` (or
 descendants) that mimmic the DUT's hardware hierarchy.  Node defines
 rules for object life cycle, discovery, etc.
 
-== Oeration Batching
+== Operation Batching
 
 The new version heavily relies on asyncio. All operations on each
 layer are modeled as Futures. All operations are batched.
@@ -113,9 +113,6 @@ and origin, in a way user can focus on node of interest.
 = Plan files
 
 * `PLAN.md` — Layer 4 (target framework).
-* `PLAN_aji.md` — AJI integration roadmap (pyaji client/server).
-* `PLAN_wire.md` — client/server wire transport (current state +
-  every deferred item with rationale + resume condition).
 
 These are living documents — when picking up a deferred area,
 read the matching PLAN first.
