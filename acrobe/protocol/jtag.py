@@ -716,17 +716,31 @@ class Chain(Batcher, Node):
     # --- Tap registration ---
 
     def tap_add(self, idcode, irlen, ir_pre=None, dr_pre=None, base=None):
-        """Add a TAP to the chain at the current end position.
-
-        If `base` is given, instantiate that class directly. Otherwise
-        consult `Tap.db` for an idcode-matching subclass; fall back to
-        the generic Tap.
+        """Append a TAP to the chain (at the current end position by
+        default) or insert at the explicit `(ir_pre, dr_pre)`. Thin
+        wrapper around :meth:`tap_insert` kept for discovery / tests
+        that don't care about explicit positions.
         """
         if ir_pre is None:
             ir_pre = self.total_irlen
         if dr_pre is None:
             dr_pre = self.total_drlen
+        return self.tap_insert(idcode, irlen, ir_pre, dr_pre, base=base)
 
+    def tap_insert(self, idcode, irlen, ir_pre, dr_pre, base=None):
+        """Insert a TAP into the chain at the given `(ir_pre, dr_pre)`.
+
+        Geometry of any tap already at `ir_pre` (or beyond) is shifted
+        by `irlen` IR bits / 1 DR bit; taps before the insertion point
+        keep their `(ir_pre, dr_pre)` but gain `irlen` / 1 bit of
+        post-padding. Existing taps' cached `current_ir` values are
+        preserved — insertion is a software-side topology update; the
+        hardware IR registers of the already-present taps are not
+        touched, so the cache still reflects reality.
+
+        Returns the new Tap. If the chain is started, the inserted tap
+        is auto-started by `child_add`.
+        """
         if base is not None:
             tap = base(idcode=idcode, irlen=irlen)
         else:
@@ -745,7 +759,6 @@ class Chain(Batcher, Node):
                            ir_post=ir_post, dr_post=dr_post)
         self._contexts[tap] = ctx
 
-        # Update existing taps' post values.
         for child_tap, child_ctx in self._contexts.items():
             if child_tap is tap:
                 continue
@@ -758,6 +771,33 @@ class Chain(Batcher, Node):
 
         self.child_add(tap)
         return tap
+
+    async def tap_remove(self, tap):
+        """Remove a TAP from the chain.
+
+        Updates the remaining taps' geometry (those after the removed
+        position move inward; those before lose post-padding). Cached
+        `current_ir` on the remaining taps is preserved — the hardware
+        IR contents of the taps still in the chain are unchanged.
+        The removed tap's subtree is stopped and detached via
+        ``child_remove``.
+        """
+        ctx = self._contexts.pop(tap)
+        ir_pre = ctx.ir_pre
+        irlen = tap.irlen
+
+        self.total_irlen -= irlen
+        self.total_drlen -= 1
+
+        for other_ctx in self._contexts.values():
+            if other_ctx.ir_pre > ir_pre:
+                other_ctx.ir_pre -= irlen
+                other_ctx.dr_pre -= 1
+            else:
+                other_ctx.ir_post -= irlen
+                other_ctx.dr_post -= 1
+
+        await self.child_remove(tap)
 
     # --- Bit-level translation of TapOps ---
 

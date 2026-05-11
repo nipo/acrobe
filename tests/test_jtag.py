@@ -501,6 +501,71 @@ class TestChain:
         chain = Chain()
         assert "Chain" in repr(chain)
 
+    def test_tap_insert_middle(self):
+        """Inserting in the middle shifts later taps without disturbing
+        earlier ones; the new tap takes the requested geometry."""
+        chain = Chain()
+        a = chain.tap_add(0x11111111, irlen=4)
+        c = chain.tap_add(0x33333333, irlen=6)
+        # Insert b between a and c at ir_pre=4.
+        b = chain.tap_insert(0x22222222, 5, ir_pre=4, dr_pre=1)
+
+        ca, cb, cc = chain.context(a), chain.context(b), chain.context(c)
+        assert chain.total_irlen == 15
+        assert chain.total_drlen == 3
+
+        assert (ca.ir_pre, ca.ir_post) == (0, 11)
+        assert (ca.dr_pre, ca.dr_post) == (0, 2)
+        assert (cb.ir_pre, cb.ir_post) == (4, 6)
+        assert (cb.dr_pre, cb.dr_post) == (1, 1)
+        assert (cc.ir_pre, cc.ir_post) == (9, 0)
+        assert (cc.dr_pre, cc.dr_post) == (2, 0)
+
+    def test_tap_insert_preserves_ir_cache(self):
+        """tap_insert is a software topology update — existing taps'
+        hardware IR registers don't change, so cached current_ir
+        stays valid."""
+        chain = Chain()
+        a = chain.tap_add(0x11111111, irlen=4)
+        b = chain.tap_add(0x22222222, irlen=4)
+        chain.context(a).current_ir = 0xa
+        chain.context(b).current_ir = 0x5
+        chain.tap_insert(0x33333333, 6, ir_pre=4, dr_pre=1)
+        assert chain.context(a).current_ir == 0xa
+        assert chain.context(b).current_ir == 0x5
+
+    @pytest.mark.asyncio
+    async def test_tap_remove(self):
+        """Removing a middle tap pulls later taps inward and drops them
+        from the chain; geometry of remaining taps stays consistent."""
+        iface = MockInterface()
+        chain = _make_chain(iface)
+        a = chain.tap_add(0x11111111, irlen=4)
+        b = chain.tap_add(0x22222222, irlen=5)
+        c = chain.tap_add(0x33333333, irlen=6)
+        await chain.tap_remove(b)
+
+        assert chain.total_irlen == 10
+        assert chain.total_drlen == 2
+        assert b not in chain.children
+        ca, cc = chain.context(a), chain.context(c)
+        assert (ca.ir_pre, ca.ir_post) == (0, 6)
+        assert (ca.dr_pre, ca.dr_post) == (0, 1)
+        assert (cc.ir_pre, cc.ir_post) == (4, 0)
+        assert (cc.dr_pre, cc.dr_post) == (1, 0)
+
+    @pytest.mark.asyncio
+    async def test_tap_remove_preserves_ir_cache(self):
+        """Removal is a software-side update; the hardware IR of any
+        remaining tap is unchanged, so its cache stays valid."""
+        iface = MockInterface()
+        chain = _make_chain(iface)
+        a = chain.tap_add(0x11111111, irlen=4)
+        b = chain.tap_add(0x22222222, irlen=4)
+        chain.context(a).current_ir = 0xa
+        await chain.tap_remove(b)
+        assert chain.context(a).current_ir == 0xa
+
 
 class TestErrorCases:
     def test_read_no_dr_length(self):
