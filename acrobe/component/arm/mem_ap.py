@@ -697,9 +697,7 @@ class MemAp(MemApLowering, Ap, Batcher):
         """Best-effort tree start: a single child's failed start()
         is logged but doesn't drop siblings or block a power-gated
         sibling from later retry."""
-        if not self._started:
-            await self.start()
-            self._started = True
+        await self._ensure_started()
         for child in self._children:
             try:
                 await child.start_tree()

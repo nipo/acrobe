@@ -329,9 +329,7 @@ class MemoryMappedComponent(Node):
         or block their start. Matches the ARM-debug discovery
         philosophy: surface as much of the tree as possible, even
         when individual subtrees are unreachable."""
-        if not self._started:
-            await self.start()
-            self._started = True
+        await self._ensure_started()
         for child in self._children:
             try:
                 await child.start_tree()
