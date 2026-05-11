@@ -1,5 +1,6 @@
 import inspect
 import math
+import asyncio
 from dataclasses import dataclass, field
 
 from .. import wire
@@ -536,7 +537,7 @@ class Chain(Batcher, Node):
         with jtag_iface.freq_capped("enumeration", 1e6):
             await self._cold_init_and_discover(jtag_iface)
 
-    async def _cold_init_and_discover(self, jtag_iface):
+    def _cold_init_and_discover(self, jtag_iface):
         """Atomic cold-line init + blind discovery.
 
         Sequence:
@@ -561,21 +562,17 @@ class Chain(Batcher, Node):
         self._parent.post(SwdToJtag())
         self._parent.post(Reset(count=50))
         self._parent.post(Run(1))
-
-        # IEEE-1149.7 escape — flat list of DR-scan widths. For each
-        # n: CaptureDr; if n>0, Shift(n bits TDI=-1). Trailing Run(1).
-        # Encodes CCL_LOCK=(0,0,1), STC2(0,2,1)=(2,9), STMC(0,0,1)=(0,1).
-        # No `read_tdo` — by spec there's nothing observable to capture.
-        cjtag_lock_unlock = (0, 0, 1, 2, 9, 0, 1)
-        with jtag_iface.freq_capped("cjtag", 1e5):
-            for width in cjtag_lock_unlock:
-                self._parent.post(CaptureDr())
-                if width:
-                    self._parent.post(Shift(BitString(-1, width),
-                                            read_tdo=False))
-            self._parent.post(Run(1))
-
-        await self.discover()
+        self.cjtag_set([0, 0, 1])
+        self.cjtag_set([2, 9])
+        self.cjtag_set([0, 1])
+        return self.discover()
+        
+    def cjtag_set(self, lens: list[int]) -> asyncio.Future:
+        self._parent.post(Run(1))
+        for val in lens:
+            self._parent.post(CaptureDr())
+            self._parent.post(Shift(BitString(-1, val), read_tdo = False))
+        return self._parent.post(Run(1))
 
     def children_changed(self):
         try:
