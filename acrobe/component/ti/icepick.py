@@ -160,7 +160,23 @@ class IcePick(jtag.Tap):
         return self.chain.parent_of_class(jtag.JtagInterface)
 
     async def start(self):
-        """Connect to the router, read identifiers, list secondary taps."""
+        """Connect to the router, query identifiers + secondary-tap
+        state, and enable every accessible sub-TAP known to ``TAPS``.
+
+        ``tap_present`` and ``tap_accessible`` come straight out of
+        the router's secondary-tap register; we trust them as the
+        authoritative manifest of what's physically there and what
+        the host is allowed to talk to. Anything in ``TAPS`` that
+        matches both bits is enabled here; the cool-down loop
+        prunes whichever ones nobody actually uses past
+        ``COOLDOWN_S``. The next operation on a cooled-down sub-TAP
+        is auto-woken by :meth:`wake_tap`.
+
+        This replaces the previous chip-specific ``tap_enable``
+        calls that subclasses used to issue from their own
+        ``start``: subclasses now only need a correct ``TAPS``
+        dict.
+        """
         with self.iface.freq_capped("icepick", 1e5):
             self.CONNECT(int(Connect(write_en=True, key="connected")),
                          read_tdo=False, post_dr_run=self.ROUTER_RUN)
@@ -181,7 +197,22 @@ class IcePick(jtag.Tap):
             + [(Block.DebugTap, t) for t in range(self.icepick_id.emu_taps)]
         )
 
-        await self.state_dump()
+        states = await self.state_dump()
+        for key in self.tap_keys:
+            if key not in self.TAPS:
+                continue
+            decoded = states.get(key)
+            if decoded is None:
+                continue
+            if not decoded.tap_present:
+                self.logger.note("Skipping %s/%d: not present",
+                                 key[0].name, key[1])
+                continue
+            if not decoded.tap_accessible:
+                self.logger.note("Skipping %s/%d: not accessible",
+                                 key[0].name, key[1])
+                continue
+            await self.tap_enable(*key, enable=True)
 
         if self.COOLDOWN_S:
             self.cooldown_task = asyncio.create_task(
@@ -246,27 +277,29 @@ class IcePick(jtag.Tap):
             return
 
     async def state_dump(self):
-        """Log the visibility / selection state of every secondary tap."""
-        await self.block_dump(Block.TestTap, SecondaryTestTap,
-                              self.icepick_id.test_taps)
-        await self.block_dump(Block.DebugTap, SecondaryDebugTap,
-                              self.icepick_id.emu_taps)
+        """Read + log every secondary tap. Returns a
+        ``dict[(Block, int), SecondaryTap]`` of decoded states so
+        callers can decide what to enable without re-reading the
+        router."""
+        states = {}
+        states.update(await self.block_dump(
+            Block.TestTap, SecondaryTestTap, self.icepick_id.test_taps))
+        states.update(await self.block_dump(
+            Block.DebugTap, SecondaryDebugTap, self.icepick_id.emu_taps))
+        return states
 
     async def block_dump(self, block, rtype, count):
-        """Read & log every secondary tap of a given block. Returns the
-        set of indices whose ``select_tap`` bit was set."""
+        """Read + log every secondary tap of a given block. Returns
+        ``dict[(block, idx), rtype]`` of decoded states."""
+        states = {}
         if count == 0:
-            return set()
-        # Issue reads sequentially; each router_read is itself batched
-        # internally.
-        enabled = set()
+            return states
         for i in range(count):
             raw = await self.router_read(block, i)
             decoded = rtype(raw)
             self.logger.note("Secondary %s tap %d: %s", block.name, i, decoded)
-            if decoded.select_tap:
-                enabled.add(i)
-        return enabled
+            states[(block, i)] = decoded
+        return states
 
     async def router_write(self, block, register, value):
         with self.iface.freq_capped("icepick", 1e5):

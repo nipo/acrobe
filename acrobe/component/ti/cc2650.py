@@ -1,10 +1,12 @@
 """TI CC2650 ICE-Pick handler.
 
 Plugs three chip-specific secondary TAPs (DFT, Efuse, AON) and the
-ARM JTAG-DP behind a CC2650 ICE-Pick router. The default ``start``
-flow enables the DP and the AON tap to match crobe's behaviour —
-users running ``acrobe info enumerate`` get a usable debug chain
-without needing to flip taps by hand.
+ARM JTAG-DP behind a CC2650 ICE-Pick router. The base
+:class:`IcePick` enumerates every sub-TAP in ``TAPS`` whose router
+state reports ``tap_present`` and ``tap_accessible`` and enables
+them; the cool-down loop detaches the ones nothing actually uses,
+so the scan chain stays short while every sub-TAP remains one
+auto-wake away from being available again.
 """
 
 from ...part_id import PartId
@@ -78,10 +80,9 @@ class Cc2650AonTap(jtag.Tap):
 class Cc2650Icepick(IcePick):
     """ICE-Pick instance for the TI CC2650 wireless MCU.
 
-    Maps the four secondary TAPs we know how to talk to. By default
-    ``start()`` enables the DP and AON taps so a downstream debugger
-    has something useful to enumerate. Other taps (DFT, Efuse) stay
-    disabled until a caller invokes :meth:`tap_enable` explicitly.
+    ``TAPS`` is the full manifest of sub-TAPs the chip exposes. The
+    base ``IcePick.start`` cross-references it against the router's
+    accessibility bits and enables everything that's reachable.
     """
 
     TAPS = {
@@ -95,12 +96,6 @@ class Cc2650Icepick(IcePick):
         if name is None:
             name = "TI CC2650 ICE-Pick"
         super().__init__(idcode=idcode, irlen=irlen, name=name)
-
-    async def start(self):
-        await super().start()
-        self.logger.trace("Enabling DP and AON taps by default")
-        self.dp = await self.tap_enable(Block.DebugTap, 0)
-        self.aon = await self.tap_enable(Block.TestTap, 5)
 
     async def system_reset(self):
         """Pulse the IcePick's system reset line.
