@@ -72,6 +72,11 @@ class Command(enum.IntEnum):
     READ_SEU_ERROR = 0x03c
     STATUS_VR = 0x713
 
+    # Without argument, this is a cold reset
+    # With one argument of value 0x1, this is a warm reset
+    HPS_RESET = 0x47
+    HPS_RESET_RELEASE = 0x46
+    
     QSPI_OPEN = 0x032
     QSPI_CLOSE = 0x033
     QSPI_SET_CS = 0x034
@@ -89,14 +94,14 @@ class Command(enum.IntEnum):
     RSU_NOTIFY = 0x5d
 
 class ConfigStatus(Bitfield):
-    # Word 0
+    # Word 0, ?
     state = BooleanField(0)
-    # Word 1
+    # Word 1, state
     fw_version = Field(32+28, 4)
     quartus_major = Field(32+16, 8)
     quartus_minor = Field(32+8, 8)
     quartus_update = Field(32, 8)
-    # Word 2
+    # Word 2, pin status
     nSTATUS = BooleanField(64+31)
     nCONFIG = BooleanField(64+30)
     clk_src = MappingField(64+6, 2, [None, "Int", "Clk1", "SecurePll"])
@@ -104,21 +109,23 @@ class ConfigStatus(Bitfield):
     msel = MappingField(64+0, 3, {
         0: "AvSTx32",
         1: "AS-Fast",
+        2: "NANDx8",
         3: "AS-Normal",
+        4: "SD/MMC",
         5: "AvSTx16",
         6: "AvSTx8",
         7: "JTAG",
     })
-    # Word 3
+    # Word 3, soft function
     hps_warmreset = BooleanField(96+5)
     hps_coldreset = BooleanField(96+4)
     seu_error = BooleanField(96+3)
     cvp_done = BooleanField(96+2)
     init_done = BooleanField(96+1)
     conf_done = BooleanField(96+0)
-    # Word 4
+    # Word 4, error location
     error_location = Field(128, 32)
-    # Word 5
+    # Word 5, error detail
     error_details = Field(160, 32)
 
 class Error(Exception):

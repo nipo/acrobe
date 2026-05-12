@@ -38,6 +38,9 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
     USER_CODE = Dr(32)
     CHECK_STATUS_REG = Dr(492)
 
+    STATUS2_REG = Dr(128)
+    STATUS2 = Instruction(0x17, "STATUS2_REG")
+    
     # Core JTAG instructions
     CONFIG = Instruction(0x002, None)
     CONFIG_STATUS_REG = Dr(37)
