@@ -27,6 +27,7 @@ import asyncio
 from enum import IntEnum
 
 from ...bitfield import Bitfield, Field, BooleanField, MappingField, EnumField
+from ...lifecycle import on_shutdown, cancel_shutdown
 from ...protocol import jtag
 
 
@@ -217,15 +218,30 @@ class IcePick(jtag.Tap):
         if self.COOLDOWN_S:
             self.cooldown_task = asyncio.create_task(
                 self.cooldown_loop(), name=f"{self.name} cooldown")
+            # The task is an infinite ``while True: await sleep``
+            # loop. asyncio.run / anyio wait for outstanding tasks
+            # at process exit, so without this hook the CLI hangs
+            # for COOLDOWN_POLL_S after the command's main coroutine
+            # returns. cli.base.result_callback drains the lifecycle
+            # which cancels us cleanly.
+            on_shutdown(self.cooldown_stop)
+
+    async def cooldown_stop(self):
+        """Cancel the cool-down task. Idempotent — safe to call from
+        both ``stop`` (normal stop_tree cascade) and the lifecycle
+        shutdown hook (CLI exit)."""
+        if self.cooldown_task is None:
+            return
+        self.cooldown_task.cancel()
+        try:
+            await self.cooldown_task
+        except asyncio.CancelledError:
+            pass
+        self.cooldown_task = None
 
     async def stop(self):
-        if self.cooldown_task is not None:
-            self.cooldown_task.cancel()
-            try:
-                await self.cooldown_task
-            except asyncio.CancelledError:
-                pass
-            self.cooldown_task = None
+        cancel_shutdown(self.cooldown_stop)
+        await self.cooldown_stop()
 
     async def wake_tap(self, tap):
         """Auto-wake hook (called from ``Tap.flush_ops`` when an op
