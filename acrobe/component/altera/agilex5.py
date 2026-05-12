@@ -2,7 +2,7 @@ import asyncio
 import enum
 import struct
 
-from ...protocol.jtag import Tap, Dr, Instruction
+from ...protocol.jtag import Tap, Dr, Instruction, Chain
 from ...part_id import PartId
 from ..fpga import JtagSramFpga
 from ...bitstring import BitString
@@ -75,12 +75,47 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
                          self.idcode, configured)
 
     async def load(self, source):
-        """Load bitstream into Agilex 5 via SDM."""
+        """Load bitstream into Agilex 5 via SDM.
+
+        The chain geometry changes around this call:
+
+        * ``sdm.config_request()`` tears down the FPGA fabric, which
+          on a chip whose previous bitstream brought up the HPS
+          debug TAP means that TAP is about to disappear from the
+          hardware scan chain. config_request itself completes
+          through the SDM at the current geometry; the chain shrink
+          becomes observable on the wire only after config_request
+          returns (TDO floats until the next TLR). We bracket it
+          so the SDM call uses the pre-shrink geometry and the
+          following CONFIG_STATUS / stream loop uses the post-shrink
+          geometry.
+        * A successful HPS-enabled bitstream brings the HPS ARM
+          debug TAP back into the chain, but only after a JTAG
+          Test-Logic-Reset. After streaming + CONF_DONE we drive
+          a TLR via ``Chain.tlr_and_refresh`` to make the new
+          neighbour visible. ``post_tlr`` then claims it as gated.
+        """
         blob = await source.read(0, source.size)
         total_bits = len(blob) * 8
-        sdm = await self.child_summon("sdm")
+        chain = self.parent_of_class(Chain)
+        my_ctx = chain.context(self)
 
+        sdm = await self.child_summon("sdm")
         await sdm.config_request()
+
+        if my_ctx.gated:
+            # config_request just told the chip to tear down user
+            # logic, including any HPS that brought a gated TAP
+            # online. Right after the SDM returns, the chip is in a
+            # transition state where TDO is unreadable — empirically
+            # ~2 s on Agilex 5 — until the next JTAG TLR clocks the
+            # new visible chain length in. Drive that TLR via
+            # `tlr_and_refresh`: it shrinks the software chain to
+            # match (the now-absent gated taps drop out via identity
+            # matching), and the streaming-phase CONFIG_STATUS
+            # shifts that follow are framed for the new geometry.
+            self.logger.trace("Refreshing chain to drop torn-down HPS tap")
+            await chain.tlr_and_refresh()
 
         self.logger.trace("Streaming %d bits...", total_bits)
         with self.progress("config", len(blob), unit="B"):
@@ -101,7 +136,47 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
         self.logger.note("Configuration complete")
         self.BYPASS()
         await self.run(16)
-        return
+
+        # The HPS debug TAP only joins the visible chain after a
+        # JTAG Test-Logic-Reset. Drive one, re-probe, and let
+        # `post_tlr` claim any new neighbour as gated-by-us.
+        await chain.tlr_and_refresh()
+
+    async def post_tlr(self):
+        """Claim the freshly-attached neighbour TAP (if any) as
+        gated by this Agilex.
+
+        ``Chain.tlr_and_refresh`` creates a fresh TAP for each new
+        slot it discovers and leaves the controller field empty —
+        the chain layer doesn't know which controller should own
+        the new entry. We do: any TAP immediately TDI-side of us
+        with no controller and an ADIv5/ADIv6 ARM-DP IDCODE is the
+        HPS ARM debug port the bitstream just brought online.
+
+        Idempotent: if a TAP at the expected slot already has
+        ``controller=self``, we leave it alone. If something else
+        already claimed it (another driver), we also leave it
+        alone — surprise ownership grabs would break the other
+        driver's invariants.
+        """
+        chain = self.parent_of_class(Chain)
+        my_ctx = chain.context(self)
+        expected_ir_pre = my_ctx.ir_pre + self.irlen
+        for tap in chain.children:
+            if tap is self:
+                continue
+            ctx = chain.context(tap)
+            if not ctx.enabled:
+                continue
+            if ctx.ir_pre != expected_ir_pre:
+                continue
+            if ctx.controller is not None:
+                continue
+            self.logger.note(
+                "Claiming %s (idcode=0x%08x) as HPS-gated neighbour",
+                tap.name, int(tap.idcode) if tap.idcode else 0)
+            chain.tap_set_controller(tap, self)
+            return
 
     async def erase(self):
         pass
