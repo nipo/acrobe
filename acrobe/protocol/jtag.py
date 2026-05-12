@@ -631,13 +631,37 @@ class Chain(Batcher, Node):
         be batched into a single uninterrupted post sequence."""
         self._parent.post(Reset(count=50))
         self._parent.post(SwdToJtag())
-        self._parent.post(Reset(count=50))
-        self._parent.post(Run(500))
-        self.cjtag_set([0, 0, 1, 2, 9, 0, 1])
+        self._tlr_reset_and_unlock()
         await self.discover()
         for tap in list(self._children):
             await tap.post_tlr()
-        
+
+    def _tlr_reset_and_unlock(self):
+        """TAP reset + post-reset settle + IEEE-1149.7 escape.
+
+        Shared by :meth:`_cold_init_and_discover` and
+        :meth:`tlr_and_refresh`. Both need:
+
+          * a 50-TMS reset to bring every TAP to its IDCODE/BYPASS
+            reset state;
+          * 500 idle TCKs to let router-style TAPs (TI IcePick, …)
+            finish their post-reset wake-up — without this the
+            following OAC scans race the controller and TDO can stay
+            tri-stated;
+          * the CCL_LOCK + STC2 + STMC OAC sequence to switch any
+            IEEE-1149.7 TAP back from cJTAG (2-wire) to 4-wire mode,
+            which TLR otherwise reverts. The OAC scans are harmless
+            on non-cJTAG TAPs — the widths fall on each TAP's reset
+            IDCODE/BYPASS DR, which is read-only / 1-bit.
+
+        The whole sequence must be followed by a probe / discovery
+        without an intervening TAP reset — TLR re-arms the cJTAG
+        side and undoes the unlock.
+        """
+        self._parent.post(Reset(count=50))
+        self._parent.post(Run(500))
+        self.cjtag_set([0, 0, 1, 2, 9, 0, 1])
+
     def cjtag_set(self, lens: list[int]) -> asyncio.Future:
         self._parent.post(Run(1))
         for val in lens:
@@ -1015,7 +1039,12 @@ class Chain(Batcher, Node):
         1. ``pre_tlr`` on every TAP currently in the Node tree
            (whether enabled or detached) so they can save state the
            reset will clobber.
-        2. 50-TMS reset + one Run cycle to settle in Run-Test/Idle.
+        2. TAP reset + 500 idle TCKs + IEEE-1149.7 OAC unlock, via
+           :meth:`_tlr_reset_and_unlock` — same sequence cold-init
+           runs. The OAC unlock is required for cJTAG TAPs because
+           TLR reverts the cJTAG controller to 2-wire mode and TDO
+           goes tri-stated until the 4-wire switch is re-issued; on
+           non-cJTAG chains the OAC scans are harmless reads.
         3. Blind probe of the now-visible chain via
            :meth:`_probe_chain_in_reset_state`.
         4. Identity match: every existing TAP (enabled first, in
@@ -1053,9 +1082,7 @@ class Chain(Batcher, Node):
         for tap in existing:
             await tap.pre_tlr()
 
-        # TLR + settle in RTI so the post-probe state is well-defined.
-        iface.post(Reset(count=50))
-        await iface.post(Run(1))
+        self._tlr_reset_and_unlock()
 
         slots = await self._probe_chain_in_reset_state()
         self.logger.trace("Refresh probe: %s",
