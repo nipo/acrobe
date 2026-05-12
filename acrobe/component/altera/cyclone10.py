@@ -2,6 +2,7 @@ from ...protocol.jtag import Tap, Dr, Instruction
 from ...part_id import PartId
 from ..fpga import JtagSramFpga
 from ...bitstring import BitString
+from .formats import RBF_SYNC, RBF_SYNC_SWAPPED
 
 
 class Cyclone10(Tap, JtagSramFpga):
@@ -59,6 +60,21 @@ class Cyclone10(Tap, JtagSramFpga):
 
     async def load(self, source):
         blob = await source.read(0, source.size)
+
+        # Sanity-check: data must be a parsed RBF bitstream. Common
+        # mistake — pointing this at a SOF's `config_data` child,
+        # which is Quartus-internal frame data, not JTAG-ready RBF.
+        # Scan the first 4 KiB for either sync orientation; either is
+        # fine because the Rbf parser auto-swaps to canonical order.
+        head = bytes(blob[:4096])
+        if RBF_SYNC not in head and RBF_SYNC_SWAPPED not in head:
+            raise ValueError(
+                f"{source.path}: no RBF sync word found in first 4 KiB. "
+                "Cyclone 10 needs a parsed RBF bitstream — pass a .rbf "
+                "file (Rbf parser handles auto-detect + bit-swap), or "
+                "convert from SOF with `quartus_cpf -c file.sof file.rbf`. "
+                "Passing a SOF's `config_data` child won't work — that's "
+                "Quartus's frame format, not RBF.")
 
         # RBF bytes are already in JTAG bit order (LSB-first per byte).
         # No bit-swapping needed.
