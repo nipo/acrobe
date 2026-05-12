@@ -340,6 +340,37 @@ class Tap(Batcher, Node, InstructionRegistry):
         Batcher.__init__(self)
         Node.__init__(self, name)
         self._init_instructions()
+        # Last asyncio loop-time when a non-BYPASS shift was posted
+        # on this TAP. None means "never used since attach". Used by
+        # controllers that want to detach idle sub-TAPs (IcePick's
+        # cool-down loop). Set in ``post``; consumed by controllers.
+        self.last_activity = None
+
+    def activity_touched(self):
+        """Record an activity event on this TAP. Default
+        implementation stamps :attr:`last_activity` with the current
+        asyncio loop time. Called automatically by :meth:`post` on
+        every non-BYPASS shift; subclasses can call it explicitly
+        to mark synthetic activity (e.g. a high-level operation
+        whose batches happen elsewhere)."""
+        self.last_activity = asyncio.get_running_loop().time()
+
+    def post(self, op):
+        """Override Batcher.post: stamp ``last_activity`` whenever a
+        meaningful operation goes through.
+
+        "Meaningful" = a DR shift whose IR is *not* BYPASS. Pure
+        chain-padding (this TAP getting BYPASS while another TAP's
+        op shifts past) doesn't count: that traffic is involuntary
+        from this TAP's perspective and would otherwise keep the
+        idle timer from ever firing. ``_TapRun`` / ``_TapIrStatus``
+        also don't count.
+        """
+        if isinstance(op, _TapShift) and op.ir_value is not None:
+            bypass = (1 << self.irlen) - 1 if self.irlen else 0
+            if op.ir_value != bypass:
+                self.activity_touched()
+        return super().post(op)
 
     def ir(self, value, dr_length=None):
         """Create a dynamic instruction for an ad-hoc IR value."""
@@ -415,16 +446,33 @@ class Tap(Batcher, Node, InstructionRegistry):
     async def flush_ops(self, batch):
         """Forward each TAP-level op to the parent wrapped in a TapOp.
 
-        Fire-and-forget with a single batched anchor: every user future
-        is paired with its parent future, and one ``add_done_callback``
-        on the *last* parent future resolves the whole list at once.
-        The parent (Chain) resolves its futures in batch order, so by
-        the time the last fires every earlier one is already settled.
-        Avoids ``len(batch)`` add_done_callback registrations and
-        ``len(batch)`` separate event-loop schedulings on resolution.
+        Before forwarding, if this TAP has been detached by its
+        controller (typical case: IcePick's cool-down dropped it
+        after idle), ask the controller to re-attach so the ops
+        following us go through a live chain slot. Without this the
+        first op after a cool-down sleep would raise "Tap … is
+        detached from chain".
+
+        Fire-and-forget with a single batched anchor: every user
+        future is paired with its parent future, and one
+        ``add_done_callback`` on the *last* parent future resolves
+        the whole list at once. The parent (Chain) resolves its
+        futures in batch order, so by the time the last fires every
+        earlier one is already settled. Avoids ``len(batch)``
+        add_done_callback registrations and ``len(batch)`` separate
+        event-loop schedulings on resolution.
         """
         if self._parent is None:
             raise RuntimeError(f"Tap {self.name!r} has no parent to forward to")
+
+        if isinstance(self._parent, Chain):
+            ctx = self._parent._contexts.get(self)
+            if (ctx is not None and not ctx.enabled
+                    and ctx.controller is not None):
+                # Auto-wake. The controller knows how to put us back
+                # in the scan chain (router writes, geometry update,
+                # …). Once awake we proceed as usual.
+                await ctx.controller.wake_tap(self)
 
         forwarded = []
         for op, future in batch:
@@ -434,6 +482,16 @@ class Tap(Batcher, Node, InstructionRegistry):
         if forwarded:
             forwarded[-1][1].add_done_callback(
                 lambda _lf, fwd=forwarded: Tap._resolve_batch(fwd))
+
+    async def wake_tap(self, tap):
+        """Re-attach a gated TAP that was detached by this
+        controller. Default implementation refuses — only TAPs that
+        actually gate others (IcePick, Agilex5, …) implement this.
+        Called from a gated TAP's ``flush_ops`` when an operation
+        arrives while it's detached."""
+        raise RuntimeError(
+            f"{self.name!r} is registered as controller of "
+            f"{tap.name!r} but doesn't implement wake_tap")
 
     @staticmethod
     def _resolve_batch(forwarded):
