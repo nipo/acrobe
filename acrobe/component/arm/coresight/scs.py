@@ -5,10 +5,18 @@ Identified by ARM PartId — different cores have different part_no:
 0x000 (Cortex-M3), 0x008 (Cortex-M0), 0x009 (Cortex-M0+),
 0x00C (Cortex-M4), 0x00D (Cortex-M7), 0x00E (Cortex-M33),
 etc. ARMv8-M cores additionally advertise via DEVARCH
-ARCHID = 0x2A04."""
+ARCHID = 0x2A04.
+
+Beyond CPUID + feature decode, the SCS owns the Cortex-M debug
+verbs: `cpu_halt`, `cpu_step`, `cpu_resume`, `cpu_reset`,
+`cpu_regs_get/set`, plus the DEMCR vector-catch toggles. Status
+is exposed as raw DHCSR / DFSR reads — translation into the
+target tree's `CoreState` / `HaltCause` lives at the `CortexMCore`
+layer to keep this component CPU-state-vocabulary-agnostic."""
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from ..cpuid import Cpuid, FEATURE_REGISTERS
@@ -92,10 +100,50 @@ class Scs(MemoryMappedComponent):
     CTR_OFFSET     = 0xD7C
     CCSIDR_OFFSET  = 0xD80
 
+    # Debug Halting Control and Status Register.
+    DHCSR_OFFSET      = 0xDF0
+    DHCSR_KEY         = 0xA05F0000
+    DHCSR_S_RESET_ST  = 1 << 25
+    DHCSR_S_RETIRE_ST = 1 << 24
+    DHCSR_S_LOCKUP    = 1 << 19
+    DHCSR_S_SLEEP     = 1 << 18
+    DHCSR_S_HALT      = 1 << 17
+    DHCSR_S_REGRDY    = 1 << 16
+    DHCSR_C_MASKINTS  = 1 << 3
+    DHCSR_C_STEP      = 1 << 2
+    DHCSR_C_HALT      = 1 << 1
+    DHCSR_C_DEBUGEN   = 1 << 0
+
+    # Debug Core Register Selector / Data Register (CPU reg I/O).
+    DCRSR_OFFSET      = 0xDF4
+    DCRSR_WRITE       = 1 << 16
+    DCRDR_OFFSET      = 0xDF8
+
     # Debug Exception and Monitor Control Register (within SCS, at
     # offset 0xDFC from SCS_BASE = 0xE000_E000).
     DEMCR_OFFSET   = 0xDFC
     DEMCR_TRCENA   = 1 << 24
+    DEMCR_VC_HARDERR   = 1 << 10
+    DEMCR_VC_INTERR    = 1 << 9
+    DEMCR_VC_BUSERR    = 1 << 8
+    DEMCR_VC_STATERR   = 1 << 7
+    DEMCR_VC_CHKERR    = 1 << 6
+    DEMCR_VC_NOCPERR   = 1 << 5
+    DEMCR_VC_MMERR     = 1 << 4
+    DEMCR_VC_CORERESET = 1 << 0
+
+    # AIRCR — used to trigger SYSRESETREQ.
+    AIRCR_KEY         = 0x05FA0000
+    AIRCR_SYSRESETREQ = 1 << 2
+
+    # Debug Fault Status Register — bit-encoded "why did we halt".
+    DFSR_OFFSET       = 0xD30
+    DFSR_CLEAR        = 0x1F
+    DFSR_HALTED       = 1 << 0
+    DFSR_BKPT         = 1 << 1
+    DFSR_DWTTRAP      = 1 << 2
+    DFSR_VCATCH       = 1 << 3
+    DFSR_EXTERNAL     = 1 << 4
 
     # FPU feature registers (ARMv7-M / ARMv8-M only, 0xF40..0xF48).
     MVFR0_OFFSET   = 0xF40
@@ -305,3 +353,137 @@ class Scs(MemoryMappedComponent):
             self.logger.warning(
                 "DEMCR write failed: %s — trace components may "
                 "not enumerate", exc)
+
+    # -- Run-control + register access -----------------------------
+
+    async def read_dhcsr(self) -> int:
+        return await self.reg_read(self.DHCSR_OFFSET)
+
+    async def read_dfsr(self) -> int:
+        return await self.reg_read(self.DFSR_OFFSET)
+
+    async def enable_debug(self) -> None:
+        """Set DHCSR.C_DEBUGEN (debug enabled, core not halted)."""
+        await self.reg_write(self.DHCSR_OFFSET,
+                             self.DHCSR_KEY | self.DHCSR_C_DEBUGEN)
+
+    async def disable_debug(self) -> None:
+        """Clear DHCSR.C_DEBUGEN.
+
+        Per ARMv7-M ARM section C1-6, writes that clear C_DEBUGEN
+        require two transactions: one with the key + cleared HALT/
+        STEP, then one with the whole low half zeroed. Matches
+        crobe's enable(False) sequence."""
+        await self.reg_write(self.DHCSR_OFFSET, self.DHCSR_KEY)
+        await self.reg_write(self.DHCSR_OFFSET, 0)
+
+    async def dhcsr_modify(self, set_bits: int, clear_bits: int) -> None:
+        """Read-modify-write the low half of DHCSR. The upper half
+        (status bits) is RAZ on write and the key occupies it on
+        write; we apply set/clear to the bottom 16 bits only."""
+        cur = await self.reg_read(self.DHCSR_OFFSET)
+        cur &= 0xFFFF
+        cur &= ~(clear_bits & 0xFFFF)
+        cur |= (set_bits & 0xFFFF)
+        await self.reg_write(self.DHCSR_OFFSET, self.DHCSR_KEY | cur)
+
+    async def demcr_modify(self, set_bits: int, clear_bits: int) -> None:
+        cur = await self.reg_read(self.DEMCR_OFFSET)
+        cur &= ~clear_bits
+        cur |= set_bits
+        await self.reg_write(self.DEMCR_OFFSET, cur)
+
+    async def set_reset_catch(self, enabled: bool) -> None:
+        if enabled:
+            await self.demcr_modify(self.DEMCR_VC_CORERESET, 0)
+        else:
+            await self.demcr_modify(0, self.DEMCR_VC_CORERESET)
+
+    async def set_hard_error_catch(self, enabled: bool) -> None:
+        if enabled:
+            await self.demcr_modify(self.DEMCR_VC_HARDERR, 0)
+        else:
+            await self.demcr_modify(0, self.DEMCR_VC_HARDERR)
+
+    async def cpu_halt(self) -> None:
+        """Halt the core via DHCSR.C_HALT.
+
+        Issues the modify; the caller checks DHCSR.S_HALT to verify
+        the transition landed — different cores take a variable
+        number of cycles to acknowledge."""
+        await self.dhcsr_modify(
+            self.DHCSR_C_DEBUGEN | self.DHCSR_C_HALT,
+            self.DHCSR_C_STEP)
+
+    async def cpu_step(self, *, allow_interrupts: bool = False) -> None:
+        """Single-step. Caller must have halted the core first."""
+        maskints = 0 if allow_interrupts else self.DHCSR_C_MASKINTS
+        base = self.DHCSR_KEY | self.DHCSR_C_DEBUGEN | maskints
+        await asyncio.gather(
+            self.reg_write(self.DFSR_OFFSET, self.DFSR_CLEAR),
+            self.reg_write(self.DHCSR_OFFSET, base | self.DHCSR_C_HALT),
+            self.reg_write(self.DHCSR_OFFSET, base | self.DHCSR_C_STEP),
+        )
+
+    async def cpu_resume(self, *, allow_interrupts: bool = True) -> None:
+        maskints = 0 if allow_interrupts else self.DHCSR_C_MASKINTS
+        base = self.DHCSR_KEY | self.DHCSR_C_DEBUGEN | maskints
+        await asyncio.gather(
+            self.reg_write(self.DFSR_OFFSET, self.DFSR_CLEAR),
+            self.reg_write(self.DHCSR_OFFSET, base | self.DHCSR_C_HALT),
+            self.reg_write(self.DHCSR_OFFSET, base),
+        )
+
+    async def cpu_regs_get(self, register_numbers) -> list[int]:
+        """Batch-read core registers by their DCRSR number.
+
+        Each transfer is `write DCRSR(sel) → read DCRDR`. The
+        REGRDY status bit is not polled here — the DAP back-end's
+        in-order delivery is enough on every Cortex-M that lets us
+        access the SCS via Mem-AP at all."""
+        all_futures = []
+        read_futures = []
+        for n in register_numbers:
+            all_futures.append(self.reg_write(self.DCRSR_OFFSET, n))
+            fut = self.reg_read(self.DCRDR_OFFSET)
+            read_futures.append(fut)
+            all_futures.append(fut)
+        await asyncio.gather(*all_futures)
+        return [fut.result() for fut in read_futures]
+
+    async def cpu_regs_set(self, pairs) -> None:
+        """Batch-write `(register_number, value)` pairs to the core."""
+        futures = []
+        for n, value in pairs:
+            futures.append(self.reg_write(self.DCRDR_OFFSET, value))
+            futures.append(self.reg_write(
+                self.DCRSR_OFFSET, n | self.DCRSR_WRITE))
+        await asyncio.gather(*futures)
+
+    async def cpu_reset(self, *, poll_interval: float = 0.01,
+                        max_polls: int = 100) -> None:
+        """Trigger SYSRESETREQ and wait for the core to clear
+        DHCSR.S_RESET_ST.
+
+        Bus access often fails transiently while the system is
+        resetting; up to `max_polls` `DpAccessFailure`s are
+        absorbed before re-raising. Set `set_reset_catch(True)`
+        beforehand if the caller wants the core to come up
+        halted."""
+        await asyncio.gather(
+            self.reg_write(self.DFSR_OFFSET, self.DFSR_CLEAR),
+            self.reg_write(self.AIRCR_OFFSET,
+                           self.AIRCR_KEY | self.AIRCR_SYSRESETREQ),
+        )
+        errs = 0
+        while True:
+            try:
+                dhcsr = await self.read_dhcsr()
+                errs = 0
+                if not (dhcsr & self.DHCSR_S_RESET_ST):
+                    return
+            except DpAccessFailure:
+                errs += 1
+                if errs > max_polls:
+                    raise
+            await asyncio.sleep(poll_interval)

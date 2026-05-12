@@ -99,31 +99,36 @@ async def target(ctx, root_paths):
             click.echo(f"    loadable: {loadable.name}")
 
 
-@info.command(help="Walk subtree, dump CPU identification "
-                    "(CPUID + feature registers) for each Cortex-M SCS")
+@info.command(help="Walk the target tree, dump CPU identification "
+                    "for every Core in every Debuggable")
 @click.option('-r', '--root', 'root_path', required=True,
-              help="Component path (e.g. lpc-link2-A0/swd/dap)")
+              help="Component path the Target derives from")
 @click.option('--full/--summary', 'full', default=False,
-              help="--full prints every feature register field by "
-                   "field via Bitfield.dump_pretty; default is a "
-                   "one-line headline summary")
+              help="--full prints every feature register field; "
+                   "default is a one-line headline summary")
 @click.pass_context
 async def cpu(ctx, root_path, full):
-    leaf = await ctx.obj.resolve(root_path)
+    from ..target import Target
+    from ..target.debuggable import Core, Debuggable
 
-    # Lazy import — keeps the CLI import-cheap when ARM components
-    # aren't loaded as a plugin.
-    from ..component.arm.coresight.scs import Scs
+    hw_root = ctx.obj.hw_root
+    await ctx.obj.resolve(root_path)
+    await hw_root.discover_targets()
 
-    found = leaf.children_find(lambda n: isinstance(n, Scs),
-                               include_self=True) if isinstance(leaf, Node) else []
-    if not found:
-        click.echo(f"No SCS instances found under {leaf.fqdn}")
-        return
-    for scs in found:
-        click.echo(f"=== {scs.fqdn} @ 0x{scs.base:x}")
-        for line in await scs.dump_cpu(verbose=full):
-            click.echo(line)
+    any_core = False
+    for target in hw_root.children_of_class(Target):
+        for debug in target.children_of_class(Debuggable):
+            for core in debug.children_of_class(Core):
+                any_core = True
+                click.echo(f"=== {core.fqdn}")
+                if hasattr(core, "dump_cpu"):
+                    for line in await core.dump_cpu(verbose=full):
+                        click.echo(line)
+                else:
+                    click.echo(
+                        f"  (no dump available for {type(core).__name__})")
+    if not any_core:
+        click.echo(f"No Cores found under {root_path}")
 
 
 @info.command(help="List loaded plugins")
