@@ -1,6 +1,7 @@
 from . import info  # noqa: F401
 from . import chip  # noqa: F401
 from . import debug  # noqa: F401
+from . import gdb  # noqa: F401
 from . import loadable  # noqa: F401
 from . import rfc2217  # noqa: F401
 from . import altera  # noqa: F401
