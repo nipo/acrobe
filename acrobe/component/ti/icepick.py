@@ -22,6 +22,8 @@ produce a stable, deterministic chain layout independent of enable
 ordering.
 """
 
+import asyncio
+
 from enum import IntEnum
 
 from ...bitfield import Bitfield, Field, BooleanField, MappingField, EnumField
@@ -107,6 +109,18 @@ class IcePick(jtag.Tap):
     # this dwell, subsequent shifts may race the latch.
     ROUTER_RUN = 10
 
+    # Cool-down policy. A sub-TAP that hasn't seen a non-BYPASS shift
+    # for `COOLDOWN_S` seconds is detached from the chain by the
+    # background cool-down loop, which shrinks the scan chain for
+    # everyone else's shifts. The next op on the cooled-down TAP
+    # trips ``Tap.flush_ops``'s auto-wake path, which calls
+    # ``wake_tap`` on this controller; that re-issues the router
+    # write and ``chain.tap_reattach``s the sub-TAP.
+    #
+    # Set ``COOLDOWN_S = None`` (or 0) to disable the loop entirely.
+    COOLDOWN_S: float | None = 0.5
+    COOLDOWN_POLL_S: float = 0.1
+
     CONNECT_REG = jtag.Dr(8)
     DEVICE_ID = jtag.Dr(32)
     ICEPICK_ID_REG = jtag.Dr(32)
@@ -126,11 +140,16 @@ class IcePick(jtag.Tap):
         if name is None:
             name = "TI ICE-Pick"
         super().__init__(idcode=idcode, irlen=irlen, name=name)
-        # (Block, index) → currently-enabled child Tap instance.
+        # (Block, index) → child Tap instance. Entries are kept across
+        # detach so the cool-down + auto-wake cycle reuses the same
+        # Tap object (and the JtagDp / ROM-table state hanging off it).
         self.taps: dict = {}
         self.icepick_id: IcePickId | None = None
         self.user_code: UserCode | None = None
         self.tap_keys: list = []
+        # Background task that detaches idle sub-TAPs. Started in
+        # start(); cancelled in stop().
+        self.cooldown_task: asyncio.Task | None = None
 
     @property
     def chain(self) -> "jtag.Chain":
@@ -163,6 +182,68 @@ class IcePick(jtag.Tap):
         )
 
         await self.state_dump()
+
+        if self.COOLDOWN_S:
+            self.cooldown_task = asyncio.create_task(
+                self.cooldown_loop(), name=f"{self.name} cooldown")
+
+    async def stop(self):
+        if self.cooldown_task is not None:
+            self.cooldown_task.cancel()
+            try:
+                await self.cooldown_task
+            except asyncio.CancelledError:
+                pass
+            self.cooldown_task = None
+
+    async def wake_tap(self, tap):
+        """Auto-wake hook (called from ``Tap.flush_ops`` when an op
+        arrives on a sub-TAP we'd previously detached). Looks up the
+        (block, index) for the requested TAP and re-enables it via
+        :meth:`tap_enable`, which re-issues the router write and
+        reattaches the same Tap object."""
+        for key, child in self.taps.items():
+            if child is tap:
+                block, index = key
+                self.logger.note(
+                    "Auto-wake: re-enabling %s/%d on access", block.name, index)
+                await self.tap_enable(block, index, enable=True)
+                return
+        raise RuntimeError(
+            f"wake_tap({tap.name!r}): not a known sub-TAP of {self.name!r}")
+
+    async def cooldown_loop(self):
+        """Background task: every ``COOLDOWN_POLL_S`` check each
+        enabled sub-TAP. If none of its non-BYPASS shifts have hit
+        the wire for the last ``COOLDOWN_S`` seconds, detach it via
+        ``tap_enable(...,False)``. The Tap object stays in
+        ``self.taps`` so a subsequent op auto-wakes it through
+        :meth:`wake_tap`."""
+        try:
+            loop = asyncio.get_running_loop()
+            while True:
+                await asyncio.sleep(self.COOLDOWN_POLL_S)
+                now = loop.time()
+                for key, sub in list(self.taps.items()):
+                    sub_ctx = self.chain._contexts.get(sub)
+                    if sub_ctx is None or not sub_ctx.enabled:
+                        continue
+                    last = sub.last_activity
+                    if last is None:
+                        # Mark a baseline so we don't immediately
+                        # detach a sub-TAP that's only just been
+                        # attached and hasn't seen traffic yet.
+                        sub.activity_touched()
+                        continue
+                    if now - last < self.COOLDOWN_S:
+                        continue
+                    block, index = key
+                    self.logger.note(
+                        "Cool-down: detaching idle %s/%d (idle %.0fms)",
+                        block.name, index, (now - last) * 1000)
+                    await self.tap_enable(block, index, enable=False)
+        except asyncio.CancelledError:
+            return
 
     async def state_dump(self):
         """Log the visibility / selection state of every secondary tap."""
