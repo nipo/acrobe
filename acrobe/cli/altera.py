@@ -6,10 +6,13 @@ from . import base
 from ..protocol.jtag import JtagInterface
 from ..jop.listener import JopListener
 
+@base.cli.group(help="Altera-related")
+async def altera():
+    pass
 
-@base.cli.command(name="jop-server",
-                  help="Expose a JTAG interface as an Altera JoP "
-                       "(JTAG-over-Protocol) server")
+
+@altera.command(help="Expose a JTAG interface as an Altera JoP "
+                    "(JTAG-over-Protocol) server")
 @click.option("-r", "--root", "root_path", required=True,
               help="Component path to a JtagInterface "
                    "(e.g. proby-9/jtag)")

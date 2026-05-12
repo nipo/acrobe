@@ -6,9 +6,11 @@ from . import base
 from ..protocol.jtag import JtagInterface
 from ..xvc.listener import XvcListener
 
+@base.cli.group(help="Xilinx-related")
+async def xilinx():
+    pass
 
-@base.cli.command(name="xvc-server",
-                  help="Expose a JTAG interface as a Xilinx Virtual "
+@xilinx.command(help="Expose a JTAG interface as a Xilinx Virtual "
                        "Cable (XVC) server")
 @click.option("-r", "--root", "root_path", required=True,
               help="Component path to a JtagInterface "
@@ -20,7 +22,7 @@ from ..xvc.listener import XvcListener
 @click.option("-H", "--host", type=str, default="0.0.0.0",
               help="Bind address (default 0.0.0.0)")
 @click.pass_context
-async def xvc_server(ctx, root_path, tcp_port, host):
+async def vcd_server(ctx, root_path, tcp_port, host):
     leaf = await ctx.obj.resolve(root_path)
     if not isinstance(leaf, JtagInterface):
         raise click.ClickException(
