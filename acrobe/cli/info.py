@@ -3,10 +3,34 @@ import asyncclick as click
 from . import base
 from ..adapter.model import make_adapter_name
 from ..node import Node
+from ..protocol.jtag import Chain, Tap
+
+
+def _tap_annotation(tap):
+    """If `tap` lives in a Chain, return a bracketed annotation
+    describing whether it's currently in the scan chain and (if so)
+    which TAP gates it. Empty string for taps not in a Chain or for
+    bare chain-owned attached TAPs (the default, doesn't need
+    noise)."""
+    parent = tap._parent
+    if not isinstance(parent, Chain):
+        return ""
+    ctx = parent._contexts.get(tap)
+    if ctx is None:
+        return ""
+    bits = []
+    if not ctx.enabled:
+        bits.append("detached")
+    if ctx.controller is not None:
+        bits.append(f"gated by {ctx.controller.name!r}")
+    if not bits:
+        return ""
+    return f"  [{', '.join(bits)}]"
 
 
 def component_dump(comp, prefix=""):
-    click.echo(f"{prefix}{comp}")
+    annotation = _tap_annotation(comp) if isinstance(comp, Tap) else ""
+    click.echo(f"{prefix}{comp}{annotation}")
     if isinstance(comp, Node):
         for c in comp.children:
             component_dump(c, prefix + "  ")
