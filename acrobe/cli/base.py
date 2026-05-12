@@ -4,6 +4,36 @@ import asyncclick as click
 from .. import log
 
 
+class AcrobeGroup(click.Group):
+    """click.Group with two acrobe-wide defaults applied:
+
+    * ``-h`` is accepted everywhere as an alias for ``--help``.
+      Set via ``context_settings['help_option_names']``; Click
+      propagates it down to every subcommand's Context, so a
+      single declaration on the root group covers the whole tree.
+    * Invoking a group without a subcommand prints help instead of
+      exiting silently — ``no_args_is_help=True``. Click doesn't
+      inherit this for nested groups, so :meth:`group` defaults
+      ``cls=AcrobeGroup`` to keep the behaviour propagating as the
+      tree grows.
+
+    Subclasses passing their own ``context_settings`` /
+    ``no_args_is_help`` win — these are setdefaults, not
+    overrides.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("no_args_is_help", True)
+        ctx_settings = dict(kwargs.get("context_settings") or {})
+        ctx_settings.setdefault("help_option_names", ["-h", "--help"])
+        kwargs["context_settings"] = ctx_settings
+        super().__init__(*args, **kwargs)
+
+    def group(self, *args, **kwargs):
+        kwargs.setdefault("cls", AcrobeGroup)
+        return super().group(*args, **kwargs)
+
+
 class CliContext:
     """Shared per-invocation CLI state.
 
@@ -40,7 +70,7 @@ class CliContext:
         return leaf
 
 
-@click.group()
+@click.group(cls=AcrobeGroup)
 @click.option('-v', '--verbose', count=True, help="More verbosity")
 @click.option('-q', '--quiet', count=True, help="Less verbosity")
 @click.option('-t', '--timestamp', is_flag=True, help="Add timestamps to log")
