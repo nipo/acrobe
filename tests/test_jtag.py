@@ -567,6 +567,297 @@ class TestChain:
         assert chain.context(a).current_ir == 0xa
 
 
+class TestDetachReattach:
+    def test_detach_shrinks_geometry(self):
+        chain = Chain()
+        a = chain.tap_add(0x11111111, irlen=4)
+        b = chain.tap_add(0x22222222, irlen=5)
+        c = chain.tap_add(0x33333333, irlen=6)
+        chain.tap_detach(b)
+        assert chain.context(b).enabled is False
+        # Geometry of remaining contexts matches a 2-tap chain.
+        assert chain.total_irlen == 10
+        assert chain.total_drlen == 2
+        ca, cc = chain.context(a), chain.context(c)
+        assert (ca.ir_pre, ca.ir_post) == (0, 6)
+        assert (cc.ir_pre, cc.ir_post) == (4, 0)
+        # Detached tap stays in the Node tree.
+        assert b in chain.children
+
+    def test_detach_idempotent(self):
+        chain = Chain()
+        a = chain.tap_add(0x11111111, irlen=4)
+        chain.tap_detach(a)
+        chain.tap_detach(a)  # no-op, no exception
+        assert chain.total_irlen == 0
+
+    def test_reattach_round_trips(self):
+        chain = Chain()
+        a = chain.tap_add(0x11111111, irlen=4)
+        b = chain.tap_add(0x22222222, irlen=5)
+        chain.tap_detach(b)
+        chain.tap_reattach(b, ir_pre=4, dr_pre=1)
+        assert chain.context(b).enabled is True
+        assert chain.total_irlen == 9
+        cb = chain.context(b)
+        assert (cb.ir_pre, cb.ir_post) == (4, 0)
+        assert (cb.dr_pre, cb.dr_post) == (1, 0)
+
+    def test_reattach_rejects_already_attached(self):
+        chain = Chain()
+        a = chain.tap_add(0x11111111, irlen=4)
+        with pytest.raises(RuntimeError, match="already attached"):
+            chain.tap_reattach(a, ir_pre=0, dr_pre=0)
+
+    def test_reattach_rejects_unknown(self):
+        chain = Chain()
+        a = Tap(idcode=0x11111111, irlen=4)
+        with pytest.raises(RuntimeError, match="no context"):
+            chain.tap_reattach(a, ir_pre=0, dr_pre=0)
+
+    @pytest.mark.asyncio
+    async def test_disabled_tap_op_rejected(self):
+        iface = MockInterface()
+        chain = _make_chain(iface)
+        tap = chain.tap_add(0x12345678, irlen=4)
+        chain.tap_detach(tap)
+        fut = tap.run(1)
+        with pytest.raises(RuntimeError, match="detached from chain"):
+            await fut
+
+    def test_controller_link_bidirectional(self):
+        chain = Chain()
+        controller = chain.tap_add(0x11111111, irlen=6)
+        sub = chain.tap_insert(0x22222222, 4, ir_pre=0, dr_pre=0,
+                               controller=controller)
+        assert chain.context(sub).controller is controller
+        assert sub in chain.context(controller).gated
+
+    def test_controller_link_cleared_on_detach_remove(self):
+        chain = Chain()
+        controller = chain.tap_add(0x11111111, irlen=6)
+        sub = chain.tap_insert(0x22222222, 4, ir_pre=0, dr_pre=0,
+                               controller=controller)
+        chain.tap_detach(sub)
+        # Controller link survives detach (so refresh can re-pair).
+        assert chain.context(sub).controller is controller
+        assert sub in chain.context(controller).gated
+
+
+class TestTlrRefresh:
+    """Mock-driven tests for Chain.tlr_and_refresh.
+
+    Built around a MockInterface variant that records ops and lets
+    the test feed scripted TDO bytes so the chain's probe step
+    decodes a chosen synthetic chain layout.
+    """
+
+    @staticmethod
+    def _scripted_iface(scripts):
+        """Build an iface that returns scripted Shift TDO values.
+        `scripts` is a queue of BitStrings; each Shift read_tdo=True
+        gets the next one."""
+        class ScriptedIface(JtagInterface):
+            def __init__(self):
+                super().__init__(name="scripted")
+                self.scripts = list(scripts)
+                self.shift_log = []
+
+            async def flush_ops(self, batch):
+                for op, future in batch:
+                    if isinstance(op, Shift):
+                        self.shift_log.append(op)
+                        if op.read_tdo:
+                            tdo = (self.scripts.pop(0)
+                                   if self.scripts
+                                   else BitString(0, len(op.tdi)))
+                            future.set_result(tdo)
+                        else:
+                            future.set_result(None)
+                    else:
+                        future.set_result(None)
+        return ScriptedIface()
+
+    @staticmethod
+    def _build_reset_dr(idcodes_with_irlens):
+        """Build the BitString returned by capture-DR after TLR.
+        Each TAP contributes 32 bits (its IDCODE) if idcode is not
+        None, else 1 bit (BYPASS = 0). Concatenation order matches
+        chain TDO-end-first."""
+        out = BitString(0, 0)
+        for idcode, _ in idcodes_with_irlens:
+            if idcode is None:
+                out = out + BitString(0, 1)
+            else:
+                out = out + BitString(idcode, 32)
+        return out
+
+    @staticmethod
+    def _build_capture_ir(irlens):
+        """Build the BitString returned by capture-IR after TLR.
+        Each TAP contributes its irlen bits; JTAG spec mandates bits
+        [1:0] = 01."""
+        out = BitString(0, 0)
+        for irlen in irlens:
+            seg = BitString(0b01, irlen) if irlen >= 2 else BitString(0, irlen)
+            out = out + seg
+        return out
+
+    @classmethod
+    def _shift_discover_payload(cls, register: BitString):
+        """Build the TDO that ``Chain._shift_discover`` expects to
+        see when probing a register of bit-width ``len(register)``.
+
+        The probe sends ``marker(32) + zeros(max_length+4)`` (548
+        bits for ``max_length=512``). The chain returns the register
+        contents preceded by max_length+4 garbage bits, then the
+        marker at the top. We synthesise the TDO so the integer
+        value has the marker at position ``32+len(register)``."""
+        max_length = 512
+        marker = 0xc05a5a03
+        # The TDO returned is the chain's bit-string. ``int(tdo)``
+        # is interpreted little-endian (LSB first). The probe finds
+        # length via log2 — so the marker must sit just past the
+        # register's high end.
+        total = 32 + max_length + 4
+        v = int(register)
+        v |= marker << len(register)
+        tdo = BitString(v, total)
+        return tdo[:max_length + 32]
+
+    @pytest.mark.asyncio
+    async def test_refresh_idempotent_when_chain_unchanged(self):
+        """Refresh on a stable chain: probe sees the same TAPs at
+        the same slots, nothing detaches, nothing re-creates."""
+        chain_layout = [(0x11111111, 4), (0x22222223, 5)]
+        # Scripts: 4 shifts per refresh (capture-DR, capture-IR,
+        # capture-DR for bypass). We script the three reads.
+        reset_dr = self._build_reset_dr(chain_layout)
+        captured_ir = self._build_capture_ir([il for _, il in chain_layout])
+        bypass_dr = BitString(0, len(chain_layout))
+        scripts = [
+            self._shift_discover_payload(reset_dr),
+            self._shift_discover_payload(captured_ir),
+            self._shift_discover_payload(bypass_dr),
+        ]
+        iface = self._scripted_iface(scripts)
+        chain = _make_chain(iface)
+        a = chain.tap_add(0x11111111, irlen=4)
+        b = chain.tap_add(0x22222223, irlen=5)
+        await chain.tlr_and_refresh()
+        # Same objects, same geometry.
+        assert chain.children[:2] == [a, b]
+        assert chain.context(a).enabled and chain.context(b).enabled
+        assert chain.total_irlen == 9
+
+    @pytest.mark.asyncio
+    async def test_refresh_shrink_detaches_missing(self):
+        """Chain physically lost a TAP — the missing one detaches,
+        keeping identity for a possible future re-grow."""
+        # After refresh, only the first TAP is visible.
+        post_layout = [(0x11111111, 4)]
+        reset_dr = self._build_reset_dr(post_layout)
+        captured_ir = self._build_capture_ir([il for _, il in post_layout])
+        bypass_dr = BitString(0, len(post_layout))
+        scripts = [
+            self._shift_discover_payload(reset_dr),
+            self._shift_discover_payload(captured_ir),
+            self._shift_discover_payload(bypass_dr),
+        ]
+        iface = self._scripted_iface(scripts)
+        chain = _make_chain(iface)
+        a = chain.tap_add(0x11111111, irlen=4)
+        b = chain.tap_add(0x22222223, irlen=5)
+        await chain.tlr_and_refresh()
+        assert chain.context(a).enabled
+        assert chain.context(b).enabled is False
+        # b is still in the Node tree.
+        assert b in chain.children
+
+    @pytest.mark.asyncio
+    async def test_refresh_grow_reattaches_detached(self):
+        """A previously-detached TAP comes back; reattach the same
+        object (preserves identity / subtree)."""
+        post_layout = [(0x11111111, 4), (0x22222223, 5)]
+        reset_dr = self._build_reset_dr(post_layout)
+        captured_ir = self._build_capture_ir([il for _, il in post_layout])
+        bypass_dr = BitString(0, len(post_layout))
+        scripts = [
+            self._shift_discover_payload(reset_dr),
+            self._shift_discover_payload(captured_ir),
+            self._shift_discover_payload(bypass_dr),
+        ]
+        iface = self._scripted_iface(scripts)
+        chain = _make_chain(iface)
+        a = chain.tap_add(0x11111111, irlen=4)
+        b = chain.tap_add(0x22222223, irlen=5)
+        chain.tap_detach(b)
+        assert chain.context(b).enabled is False
+        await chain.tlr_and_refresh()
+        # b is the *same object*, now re-enabled at slot 1.
+        assert chain.context(b).enabled is True
+        assert chain.context(b).ir_pre == 4
+
+    @pytest.mark.asyncio
+    async def test_refresh_ambiguity_raises(self):
+        """One TAP with two equally-plausible new slots: fail hard
+        rather than silently pick the first."""
+        # Two slots with same idcode/irlen — and our existing TAP
+        # also has that idcode. The matcher can't tell which slot
+        # is "ours" and must refuse.
+        post_layout = [(0x11111111, 4), (0x11111111, 4)]
+        reset_dr = self._build_reset_dr(post_layout)
+        captured_ir = self._build_capture_ir([il for _, il in post_layout])
+        bypass_dr = BitString(0, len(post_layout))
+        scripts = [
+            self._shift_discover_payload(reset_dr),
+            self._shift_discover_payload(captured_ir),
+            self._shift_discover_payload(bypass_dr),
+        ]
+        iface = self._scripted_iface(scripts)
+        chain = _make_chain(iface)
+        chain.tap_add(0x11111111, irlen=4)
+        from acrobe.protocol.jtag import RefreshAmbiguity
+        with pytest.raises(RefreshAmbiguity):
+            await chain.tlr_and_refresh()
+
+    @pytest.mark.asyncio
+    async def test_pre_post_tlr_called_in_order(self):
+        """pre_tlr fires on all taps before TLR; post_tlr fires on
+        enabled taps after refresh applies."""
+        order = []
+
+        class RecordingTap(Tap):
+            irlen = 4
+
+            async def pre_tlr(self):
+                order.append(("pre", int(self.idcode)))
+
+            async def post_tlr(self):
+                order.append(("post", int(self.idcode)))
+
+        chain_layout = [(0x11111111, 4), (0x22222223, 4)]
+        reset_dr = self._build_reset_dr(chain_layout)
+        captured_ir = self._build_capture_ir([il for _, il in chain_layout])
+        bypass_dr = BitString(0, len(chain_layout))
+        scripts = [
+            self._shift_discover_payload(reset_dr),
+            self._shift_discover_payload(captured_ir),
+            self._shift_discover_payload(bypass_dr),
+        ]
+        iface = self._scripted_iface(scripts)
+        chain = _make_chain(iface)
+        chain.tap_add(0x11111111, irlen=4, base=RecordingTap)
+        chain.tap_add(0x22222223, irlen=4, base=RecordingTap)
+        await chain.tlr_and_refresh()
+        # Pre for both, then post for both. Within each phase the
+        # order is TDO-end-first.
+        assert order == [
+            ("pre", 0x11111111), ("pre", 0x22222223),
+            ("post", 0x11111111), ("post", 0x22222223),
+        ]
+
+
 class TestErrorCases:
     def test_read_no_dr_length(self):
         class MyTap(Tap):

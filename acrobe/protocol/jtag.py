@@ -345,6 +345,32 @@ class Tap(Batcher, Node, InstructionRegistry):
         """Create a dynamic instruction for an ad-hoc IR value."""
         return _DynamicInstruction(self, value, dr_length)
 
+    # --- TLR lifecycle hooks ---------------------------------------
+
+    async def pre_tlr(self):
+        """Called by ``Chain.tlr_and_refresh`` before driving TLR.
+
+        Default is no-op. Override on a TAP that needs to save state
+        the TLR will clear — typically routers (IcePick saves its
+        enabled-sub-TAP set) or TAPs that keep host-side caches
+        (caches that mirror IR state become invalid post-TLR; clear
+        them here).
+        """
+        pass
+
+    async def post_tlr(self):
+        """Called by ``Chain.tlr_and_refresh`` after a TLR and
+        identity-match pass, before normal chain operation resumes.
+
+        Default is no-op. Override on a TAP that needs to
+        re-establish hardware state cleared by the reset — typically
+        routers re-issuing CONNECT and re-enabling their sub-TAPs
+        (which involves chain.tap_reattach calls for each sub-TAP
+        that comes back online). Other TAPs may use this to recover
+        host-side caches (DAP's SELECT cache, etc.).
+        """
+        pass
+
     def run(self, cycles=1):
         """Post a run operation. Returns Future."""
         return self.post(_TapRun(cycles))
@@ -470,22 +496,52 @@ class ChainContext:
     Stores the geometry of a TAP within the chain (IR/DR padding) and
     a cached `current_ir` so redundant IR shifts can be elided across
     flushes.
+
+    `enabled` distinguishes a TAP that is currently part of the JTAG
+    scan chain from one that has been detached. A detached TAP stays
+    in the Node tree (so callers keep their object references, child
+    JtagDp / DAP state etc. survive) but its geometry fields are
+    meaningless and operations on it are rejected. Re-attaching via
+    `Chain.tap_reattach` restores the geometry.
+
+    `controller` and `gated` form a bidirectional link between a TAP
+    that gates another's presence in the chain and the gated TAPs.
+    Example: an IcePick router has each of its enabled sub-TAPs
+    listed in `gated`; each sub-TAP carries the IcePick as
+    `controller`. On TLR refresh this lets us track which TAPs are
+    still expected to come back (their controller is alive) vs. ones
+    that should be dropped (their controller is gone).
     """
 
-    __slots__ = ("tap", "ir_pre", "ir_post", "dr_pre", "dr_post", "current_ir")
+    __slots__ = ("tap", "ir_pre", "ir_post", "dr_pre", "dr_post",
+                 "current_ir", "enabled", "controller", "gated")
 
-    def __init__(self, tap, ir_pre=0, dr_pre=0, ir_post=0, dr_post=0):
+    def __init__(self, tap, ir_pre=0, dr_pre=0, ir_post=0, dr_post=0,
+                 enabled=True, controller=None):
         self.tap = tap
         self.ir_pre = ir_pre
         self.ir_post = ir_post
         self.dr_pre = dr_pre
         self.dr_post = dr_post
         self.current_ir = None
+        self.enabled = enabled
+        self.controller = controller
+        self.gated = []
 
     def __repr__(self):
+        state = "" if self.enabled else " DETACHED"
         return (f"ChainContext({self.tap.name!r}, "
                 f"ir_pre={self.ir_pre}, ir_post={self.ir_post}, "
-                f"dr_pre={self.dr_pre}, dr_post={self.dr_post})")
+                f"dr_pre={self.dr_pre}, dr_post={self.dr_post}{state})")
+
+
+class RefreshAmbiguity(Exception):
+    """Raised by Chain.tlr_and_refresh when identity matching can't
+    decide which existing Tap belongs in a given new slot — for
+    instance, two unclaimed TAPs with the same IDCODE and irlen both
+    match the same unclaimed slot. Bail rather than silently mis-pair;
+    the caller can refine the matching algorithm (e.g. by anchoring
+    against a controller relationship) and retry."""
 
 
 class Chain(Batcher, Node):
@@ -629,7 +685,26 @@ class Chain(Batcher, Node):
         cJTAG escape sequence in :meth:`_cold_init_and_discover`,
         so the reset is the caller's responsibility.
         """
-        self.logger.trace("Discovering chain...")
+        slots = await self._probe_chain_in_reset_state()
+        for idcode, irlen in slots:
+            tap = self.tap_add(idcode, irlen)
+            self.logger.note("TAP: %s (irlen=%d)", tap._name, irlen)
+        await self._parent.post(Run(1))
+
+    async def _probe_chain_in_reset_state(self):
+        """Blind chain probe: identify (idcode, irlen) for each TAP
+        in chain order (TDO end first).
+
+        Assumes the chain has just gone through Test-Logic-Reset so
+        each TAP has loaded its reset IR (IDCODE or BYPASS). Returns
+        a list of (idcode_or_None, irlen) tuples — `idcode` is None
+        for TAPs whose reset IR maps to BYPASS rather than IDCODE.
+
+        Sequence is identical to the front half of :meth:`discover`
+        but it doesn't mutate the chain; useful as the probe step in
+        :meth:`tlr_and_refresh`.
+        """
+        self.logger.trace("Probing chain in reset state...")
         self._parent.post(CaptureDr())
         reset_dr = await self._shift_discover()
         self.logger.trace("DR after reset: %d bits", len(reset_dr))
@@ -640,7 +715,8 @@ class Chain(Batcher, Node):
         self.logger.trace("IR captured: %d bits", captured_ir_length)
 
         self._parent.post(CaptureDr())
-        bypass_dr = await self._shift_discover(max_length=captured_ir_length // 2)
+        bypass_dr = await self._shift_discover(
+            max_length=captured_ir_length // 2)
         device_count = len(bypass_dr)
         self.logger.trace("BYPASS DR: %d devices", device_count)
 
@@ -690,14 +766,7 @@ class Chain(Batcher, Node):
                 f" {possibilities!r}, known:"
                 f" {known_irlens!r}")
 
-        ir_lengths = possibilities[0]
-        self.logger.trace("IR lengths: %s", ir_lengths)
-
-        for idcode, irlen in zip(idcodes, ir_lengths):
-            tap = self.tap_add(idcode, irlen)
-            self.logger.note("TAP: %s (irlen=%d)", tap._name, irlen)
-
-        await self._parent.post(Run(1))
+        return list(zip(idcodes, possibilities[0]))
 
     @staticmethod
     def _irlen_for(idcode):
@@ -727,8 +796,10 @@ class Chain(Batcher, Node):
             dr_pre = self.total_drlen
         return self.tap_insert(idcode, irlen, ir_pre, dr_pre, base=base)
 
-    def tap_insert(self, idcode, irlen, ir_pre, dr_pre, base=None):
-        """Insert a TAP into the chain at the given `(ir_pre, dr_pre)`.
+    def tap_insert(self, idcode, irlen, ir_pre, dr_pre, base=None,
+                   controller=None):
+        """Insert a NEW TAP into the chain at the given
+        `(ir_pre, dr_pre)`.
 
         Geometry of any tap already at `ir_pre` (or beyond) is shifted
         by `irlen` IR bits / 1 DR bit; taps before the insertion point
@@ -737,6 +808,10 @@ class Chain(Batcher, Node):
         preserved — insertion is a software-side topology update; the
         hardware IR registers of the already-present taps are not
         touched, so the cache still reflects reality.
+
+        If `controller` is given, the new TAP is recorded as gated by
+        it (used by TLR refresh to know which Taps to expect back when
+        the controller re-establishes state).
 
         Returns the new Tap. If the chain is started, the inserted tap
         is auto-started by `child_add`.
@@ -750,46 +825,120 @@ class Chain(Batcher, Node):
             except NoMatch:
                 tap = Tap(idcode=idcode, irlen=irlen)
 
-        self.total_irlen += irlen
-        self.total_drlen += 1
-
-        ir_post = self.total_irlen - ir_pre - irlen
-        dr_post = self.total_drlen - dr_pre - 1
         ctx = ChainContext(tap, ir_pre=ir_pre, dr_pre=dr_pre,
-                           ir_post=ir_post, dr_post=dr_post)
+                           ir_post=0, dr_post=0, enabled=True,
+                           controller=controller)
         self._contexts[tap] = ctx
-
-        for child_tap, child_ctx in self._contexts.items():
-            if child_tap is tap:
-                continue
-            if child_ctx.ir_pre < ir_pre:
-                child_ctx.ir_post += irlen
-                child_ctx.dr_post += 1
-            else:
-                child_ctx.ir_pre += irlen
-                child_ctx.dr_pre += 1
-
+        self._apply_insertion_geometry(ctx, irlen)
+        self._set_controller(ctx, controller)
         self.child_add(tap)
         return tap
 
-    async def tap_remove(self, tap):
-        """Remove a TAP from the chain.
+    def tap_reattach(self, tap, ir_pre, dr_pre, controller=None):
+        """Bring a previously-detached TAP back into the chain at
+        `(ir_pre, dr_pre)`. The Tap and its subtree are preserved
+        across the round-trip — only its chain geometry was nulled
+        out by ``tap_detach``.
 
-        Updates the remaining taps' geometry (those after the removed
-        position move inward; those before lose post-padding). Cached
-        `current_ir` on the remaining taps is preserved — the hardware
-        IR contents of the taps still in the chain are unchanged.
-        The removed tap's subtree is stopped and detached via
-        ``child_remove``.
+        Use this when a router-controlled TAP needs to be put back
+        into the JTAG scan chain after a TLR (the router has just
+        re-issued whatever hardware command exposes it), or when a
+        deferred sub-TAP is being unparked from a cool-down.
+        """
+        ctx = self._contexts.get(tap)
+        if ctx is None:
+            raise RuntimeError(
+                f"Tap {tap.name!r} has no context — was never inserted")
+        if ctx.enabled:
+            raise RuntimeError(
+                f"Tap {tap.name!r} is already attached at "
+                f"ir_pre={ctx.ir_pre}")
+
+        ctx.ir_pre = ir_pre
+        ctx.dr_pre = dr_pre
+        ctx.ir_post = 0
+        ctx.dr_post = 0
+        ctx.enabled = True
+        self._apply_insertion_geometry(ctx, tap.irlen)
+        self._set_controller(ctx, controller)
+        return tap
+
+    def tap_detach(self, tap):
+        """Drop `tap` from the chain geometry but leave the Tap (and
+        its subtree) in the Node tree. Operations posted via the
+        detached Tap will be rejected with a clear error until it is
+        reattached.
+
+        Other contexts shrink as if the TAP had been removed; the
+        controller / gated links are preserved so a later TLR refresh
+        can pair the detached Tap with a returning slot.
+        """
+        ctx = self._contexts.get(tap)
+        if ctx is None:
+            raise RuntimeError(
+                f"Tap {tap.name!r} is not in chain {self.name!r}")
+        if not ctx.enabled:
+            return  # idempotent
+        self._apply_removal_geometry(ctx, tap.irlen)
+        ctx.enabled = False
+        ctx.current_ir = None
+
+    async def tap_remove(self, tap):
+        """Permanently remove a TAP from the chain.
+
+        Geometry of the remaining taps is updated and the removed
+        Tap's subtree is stopped and detached via ``child_remove``.
+        Controller / gated links are cleared.
+
+        Cached `current_ir` on the remaining taps is preserved — the
+        hardware IR contents of the taps still in the chain are
+        unchanged.
         """
         ctx = self._contexts.pop(tap)
-        ir_pre = ctx.ir_pre
-        irlen = tap.irlen
+        if ctx.enabled:
+            self._apply_removal_geometry(ctx, tap.irlen)
+        self._clear_controller(ctx)
+        # Drop gated children too: the controller is going away, so
+        # they have no path back into the chain.
+        for gated in list(ctx.gated):
+            gated_ctx = self._contexts.get(gated)
+            if gated_ctx is not None:
+                gated_ctx.controller = None
+        ctx.gated.clear()
+        await self.child_remove(tap)
 
+    # --- Geometry / controller helpers -----------------------------
+
+    def _apply_insertion_geometry(self, ctx, irlen):
+        """Slot `ctx` (already populated with the desired
+        `ir_pre`/`dr_pre`) into the chain. Updates total lengths and
+        every other context's geometry. Computes `ir_post` and
+        `dr_post` from the new totals."""
+        ir_pre = ctx.ir_pre
+        self.total_irlen += irlen
+        self.total_drlen += 1
+        ctx.ir_post = self.total_irlen - ir_pre - irlen
+        ctx.dr_post = self.total_drlen - ctx.dr_pre - 1
+        for other_tap, other_ctx in self._contexts.items():
+            if other_tap is ctx.tap or not other_ctx.enabled:
+                continue
+            if other_ctx.ir_pre < ir_pre:
+                other_ctx.ir_post += irlen
+                other_ctx.dr_post += 1
+            else:
+                other_ctx.ir_pre += irlen
+                other_ctx.dr_pre += 1
+
+    def _apply_removal_geometry(self, ctx, irlen):
+        """Inverse of `_apply_insertion_geometry`: caller has decided
+        `ctx` is leaving the chain; update total lengths and every
+        other (still-enabled) context."""
+        ir_pre = ctx.ir_pre
         self.total_irlen -= irlen
         self.total_drlen -= 1
-
-        for other_ctx in self._contexts.values():
+        for other_tap, other_ctx in self._contexts.items():
+            if other_tap is ctx.tap or not other_ctx.enabled:
+                continue
             if other_ctx.ir_pre > ir_pre:
                 other_ctx.ir_pre -= irlen
                 other_ctx.dr_pre -= 1
@@ -797,7 +946,195 @@ class Chain(Batcher, Node):
                 other_ctx.ir_post -= irlen
                 other_ctx.dr_post -= 1
 
-        await self.child_remove(tap)
+    def _set_controller(self, ctx, controller):
+        """Set `ctx.controller = controller` and add `ctx.tap` to the
+        controller's `gated` list. Removes the old controller link
+        first if any."""
+        self._clear_controller(ctx)
+        if controller is None:
+            return
+        ctx.controller = controller
+        ctrl_ctx = self._contexts.get(controller)
+        if ctrl_ctx is None:
+            raise RuntimeError(
+                f"Controller {controller.name!r} has no context in "
+                f"chain {self.name!r}")
+        if ctx.tap not in ctrl_ctx.gated:
+            ctrl_ctx.gated.append(ctx.tap)
+
+    def _clear_controller(self, ctx):
+        if ctx.controller is None:
+            return
+        ctrl_ctx = self._contexts.get(ctx.controller)
+        if ctrl_ctx is not None and ctx.tap in ctrl_ctx.gated:
+            ctrl_ctx.gated.remove(ctx.tap)
+        ctx.controller = None
+
+    # --- TLR-driven refresh ----------------------------------------
+
+    async def tlr_and_refresh(self):
+        """Drive the chain through Test-Logic-Reset, re-probe the
+        visible TAPs, and reconcile the software model against
+        hardware. Idempotent: a refresh that finds the chain
+        unchanged is a no-op (other than the TLR itself).
+
+        Sequence:
+
+        1. ``pre_tlr`` on every TAP currently in the Node tree
+           (whether enabled or detached) so they can save state the
+           reset will clobber.
+        2. 50-TMS reset + one Run cycle to settle in Run-Test/Idle.
+        3. Blind probe of the now-visible chain via
+           :meth:`_probe_chain_in_reset_state`.
+        4. Identity match: every existing TAP (enabled first, in
+           old chain order; detached after) is paired with the first
+           unclaimed new slot whose IDCODE and irlen match. Multiple
+           matching unclaimed slots for the same TAP raise
+           :class:`RefreshAmbiguity` — fail hard rather than guess.
+        5. Apply mutations:
+              * Enabled TAPs that didn't claim a slot are detached.
+              * Detached TAPs that claimed a slot are reattached at
+                their new geometry (controller link preserved).
+              * Currently-enabled TAPs that moved to a new geometry
+                have their context updated in-place.
+              * New slots that no existing TAP could claim become
+                fresh TAPs via the usual ``Tap.db`` lookup.
+        6. ``post_tlr`` on every still-enabled TAP, in chain order,
+           so controllers can re-issue whatever hardware command
+           re-exposes their sub-TAPs.
+
+        The post-hook ordering means controllers must reattach their
+        sub-TAPs themselves — `tlr_and_refresh` won't see those
+        sub-TAPs appear in step 3 because they were torn down by the
+        TLR. This is correct: the chain is re-built incrementally
+        as `post_tlr` hooks run.
+        """
+        iface = self.parent_of_class(JtagInterface)
+        # Snapshot taps so we can iterate while the chain mutates.
+        existing = list(self._children)
+
+        self.logger.trace("Refresh: %d existing TAPs (%d enabled)",
+                          len(existing),
+                          sum(1 for t in existing
+                              if self._contexts[t].enabled))
+
+        for tap in existing:
+            await tap.pre_tlr()
+
+        # TLR + settle in RTI so the post-probe state is well-defined.
+        iface.post(Reset(count=50))
+        await iface.post(Run(1))
+
+        slots = await self._probe_chain_in_reset_state()
+        self.logger.trace("Refresh probe: %s",
+                          [(f"0x{i:08x}" if i else "none", l)
+                           for i, l in slots])
+
+        claimed = self._match_identities(existing, slots)
+        await self._apply_refresh(existing, slots, claimed)
+
+        # post_tlr in chain order. New taps created by _apply_refresh
+        # don't get post_tlr in this pass — they're freshly born, no
+        # state to recover. Controllers that grow the chain inside
+        # post_tlr (e.g. IcePick reattaching sub-TAPs) extend the
+        # children list as we iterate; we honour those by snapshotting
+        # *after* mutations apply.
+        for tap in list(self._children):
+            ctx = self._contexts.get(tap)
+            if ctx is not None and ctx.enabled:
+                await tap.post_tlr()
+
+    def _match_identities(self, existing, slots):
+        """Greedy IDCODE+irlen match. Returns dict {slot_idx: tap}.
+
+        Walks enabled TAPs first in chain order (TDO end first), then
+        detached TAPs (any order — they don't have a meaningful
+        current position). For each TAP, finds unclaimed slots that
+        match by (idcode, irlen). If exactly one matches, claim it.
+        If multiple match, raise :class:`RefreshAmbiguity`. If none
+        match, the TAP is unclaimed (caller decides: detach or drop).
+        """
+        # Order: enabled by ir_pre ascending (TDO end first), then
+        # detached. Detached order doesn't matter for correctness
+        # but use a stable order for reproducible logs.
+        enabled_first = sorted(
+            (t for t in existing if self._contexts[t].enabled),
+            key=lambda t: self._contexts[t].ir_pre)
+        detached_last = [
+            t for t in existing if not self._contexts[t].enabled]
+
+        claimed = {}
+        available = set(range(len(slots)))
+
+        for tap in enabled_first + detached_last:
+            tap_idcode = (int(tap.idcode)
+                          if tap.idcode is not None else None)
+            matches = [
+                i for i in available
+                if slots[i][0] == tap_idcode and slots[i][1] == tap.irlen
+            ]
+            if len(matches) > 1:
+                raise RefreshAmbiguity(
+                    f"Tap {tap.name!r} (idcode={tap_idcode!r}, "
+                    f"irlen={tap.irlen}) matches multiple unclaimed "
+                    f"slots {matches} in refreshed chain — refusing "
+                    f"to guess. Refine the matcher (e.g. anchor via "
+                    f"controller relationship) before retrying.")
+            if matches:
+                claimed[matches[0]] = tap
+                available.remove(matches[0])
+
+        return claimed
+
+    async def _apply_refresh(self, existing, slots, claimed):
+        """Mutate chain state to match `slots` given the matching
+        decisions in `claimed`. Existing TAPs that claimed a slot
+        are reattached / kept at the new position; existing TAPs
+        that didn't claim a slot are detached; unclaimed slots get
+        fresh TAPs via Tap.db."""
+        # Build TAP -> new slot index (or None if unclaimed).
+        new_slot = {tap: None for tap in existing}
+        for slot_idx, tap in claimed.items():
+            new_slot[tap] = slot_idx
+
+        # Compute new (ir_pre, dr_pre) for each slot in chain order.
+        # Slot 0 is closest to TDO (ir_pre=0, dr_pre=0); subsequent
+        # slots accumulate.
+        slot_geo = []
+        cum_ir = 0
+        cum_dr = 0
+        for idcode, irlen in slots:
+            slot_geo.append((cum_ir, cum_dr))
+            cum_ir += irlen
+            cum_dr += 1
+
+        # Wipe geometry: detach every currently-enabled TAP, then
+        # rebuild from `claimed`. This way ordering / shift races in
+        # the geometry update can't bite — we always rebuild from a
+        # clean slate.
+        for tap in [t for t in existing
+                    if self._contexts[t].enabled]:
+            self.tap_detach(tap)
+
+        # Reattach claimed TAPs (preserves identity) at new slot
+        # geometry. Process in chain order so geometry updates apply
+        # cleanly.
+        for slot_idx in sorted(claimed):
+            tap = claimed[slot_idx]
+            ir_pre, dr_pre = slot_geo[slot_idx]
+            ctx_controller = self._contexts[tap].controller
+            self.tap_reattach(tap, ir_pre, dr_pre,
+                              controller=ctx_controller)
+
+        # Create fresh TAPs for unclaimed slots.
+        for slot_idx, (idcode, irlen) in enumerate(slots):
+            if slot_idx in claimed:
+                continue
+            ir_pre, dr_pre = slot_geo[slot_idx]
+            tap = self.tap_insert(idcode, irlen, ir_pre, dr_pre)
+            self.logger.note(
+                "Refresh: new TAP %s at slot %d (irlen=%d)",
+                tap.name, slot_idx, irlen)
 
     # --- Bit-level translation of TapOps ---
 
@@ -841,6 +1178,12 @@ class Chain(Batcher, Node):
                 if not top_future.done():
                     top_future.set_exception(ValueError(
                         f"Tap {tap.name!r} not registered in chain {self.name!r}"))
+                continue
+            if not ctx.enabled:
+                if not top_future.done():
+                    top_future.set_exception(RuntimeError(
+                        f"Tap {tap.name!r} is detached from chain "
+                        f"{self.name!r}; reattach before posting ops"))
                 continue
 
             bypass_val = (1 << tap.irlen) - 1
