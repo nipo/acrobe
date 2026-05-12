@@ -76,6 +76,29 @@ async def enumerate(ctx, root_path):
     component_dump(leaf, "  ")
 
 
+@info.command(help="Run target discovery and list spawned Targets")
+@click.option('-r', '--root', 'root_paths', required=True, multiple=True,
+              help="Component path to resolve before discovery")
+@click.pass_context
+async def target(ctx, root_paths):
+    from ..target import Loadable, Target
+
+    hw_root = ctx.obj.hw_root
+    for path in root_paths:
+        await ctx.obj.resolve(path)
+
+    await hw_root.discover_targets()
+
+    targets = hw_root.children_of_class(Target)
+    if not targets:
+        click.echo("No targets found.")
+        return
+    for t in targets:
+        click.echo(f"  {t.name}")
+        for loadable in t.children_of_class(Loadable):
+            click.echo(f"    loadable: {loadable.name}")
+
+
 @info.command(help="Walk subtree, dump CPU identification "
                     "(CPUID + feature registers) for each Cortex-M SCS")
 @click.option('-r', '--root', 'root_path', required=True,

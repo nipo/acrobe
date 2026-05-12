@@ -26,7 +26,7 @@ from acrobe.protocol.jtag import (
     Run,
     Shift,
 )
-from acrobe.target import Field, Target
+from acrobe.target import Target, TargetDiscovery
 from acrobe.wire import WireEnumerator
 from acrobe.wire.server import make_app
 
@@ -166,16 +166,13 @@ async def test_chip_flow_discovers_target(tmp_path):
                 "wire", "srv", "fakeadapter", "jtag", "chain", "0")
             await leaf.start_tree()
 
-            field = Field()
-            await field.discover(leaf)
+            await local.discover_targets()
 
-            targets = field.children_of_class(Target)
-            print(f"explorers: {[(e.func.__name__, [t.__name__ for t in e.component_types]) for e in Target._explorers]}")
+            targets = local.children_of_class(Target)
+            print(f"explorers: {[(e.func.__name__, [t.__name__ for t in e.component_types]) for e in Target.explorers]}")
             print(f"targets found: {[(t.name, type(t).__name__) for t in targets]}")
-            print(f"unhandled: {[(c.name, type(c).__name__) for c in field.unhandled]}")
 
             assert targets, (
-                f"No targets found. Leaf: {type(leaf).__name__}, "
-                f"unhandled: {[type(c).__name__ for c in field.unhandled]}")
+                f"No targets found. Leaf: {type(leaf).__name__}")
         finally:
             await local.stop_tree()

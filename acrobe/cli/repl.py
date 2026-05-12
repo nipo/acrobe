@@ -23,8 +23,8 @@ async def repl():
     from ..root import root, roots
     from ..node import Node, Readable, Writable, Addressable
     from ..adapter.model import HwRoot, UsbEnumerator, Adapter
-    from ..target import Target, Field
-    from ..target.memory import Region, Flash, Ram
+    from ..target import Target, Loadable, TargetDiscovery
+    from ..target.region import Region, Flash, Ram
     from ..protocol import jtag, swd, spi, i2c
     from ..memory_map import MemoryMap
     from ..vfs import FsRoot
@@ -46,7 +46,8 @@ async def repl():
             "UsbEnumerator": UsbEnumerator,
             "Adapter": Adapter,
             "Target": Target,
-            "Field": Field,
+            "Loadable": Loadable,
+            "TargetDiscovery": TargetDiscovery,
             "Region": Region,
             "Flash": Flash,
             "Ram": Ram,

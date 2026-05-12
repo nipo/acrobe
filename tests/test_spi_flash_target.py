@@ -1,12 +1,12 @@
-"""Tests for SPI flash target and Field discovery."""
+"""Tests for SPI flash target and discovery."""
 
 import pytest
-from acrobe.node import Node
 from acrobe.component.spi_flash import SpiFlash
-from acrobe.target import Target, Field
-from acrobe.target.memory import Flash
-from acrobe.target.spi_flash import SpiFlashBank, SpiFlashTarget
 from acrobe.memory_map import MemoryMap
+from acrobe.node import Node
+from acrobe.target import Loadable, Target, TargetDiscovery
+from acrobe.target.region import Flash
+from acrobe.target.spi_flash import SpiFlashBank, SpiFlashTarget
 
 
 def _mm(*chunks):
@@ -38,36 +38,36 @@ class FakeSpiFlash(SpiFlash):
         self.total_size = size
         self.page_size = page_size
         self.sector_info = sector_info or [(4096, b"\x20")]
-        self._data = bytearray(b"\xff" * size)
+        self.storage = bytearray(b"\xff" * size)
         self.erase_log = []
         self.program_log = []
         self.chip_erased = False
 
     async def read(self, addr, size):
-        return bytes(self._data[addr:addr + size])
+        return bytes(self.storage[addr:addr + size])
 
     async def program(self, addr, data):
         self.program_log.append((addr, bytes(data)))
-        self._data[addr:addr + len(data)] = data
+        self.storage[addr:addr + len(data)] = data
 
     async def erase(self, addr, size):
         self.erase_log.append((addr, size))
-        self._data[addr:addr + size] = b"\xff" * size
+        self.storage[addr:addr + size] = b"\xff" * size
 
     async def erase_chip(self):
         self.chip_erased = True
-        self._data[:] = b"\xff" * len(self._data)
+        self.storage[:] = b"\xff" * len(self.storage)
 
 
 class TestSpiFlashBank:
-    def _make_bank(self, **kw):
+    def make_bank(self, **kw):
         flash = FakeSpiFlash(**kw)
-        bank = SpiFlashBank(flash)
-        return bank, flash
+        return SpiFlashBank(flash), flash
 
     def test_geometry(self):
-        bank, flash = self._make_bank(size=0x100000, page_size=256,
-                                       sector_info=[(4096, b"\x20"), (65536, b"\xd8")])
+        bank, _ = self.make_bank(size=0x100000, page_size=256,
+                                 sector_info=[(4096, b"\x20"),
+                                              (65536, b"\xd8")])
         assert bank.address == 0
         assert bank.size == 0x100000
         assert bank.write_page_size == 256
@@ -75,99 +75,94 @@ class TestSpiFlashBank:
 
     @pytest.mark.asyncio
     async def test_read(self):
-        bank, flash = self._make_bank()
-        flash._data[0:4] = b"\xde\xad\xbe\xef"
-        data = await bank.read(0, 4)
-        assert data == b"\xde\xad\xbe\xef"
+        bank, flash = self.make_bank()
+        flash.storage[0:4] = b"\xde\xad\xbe\xef"
+        assert await bank.read(0, 4) == b"\xde\xad\xbe\xef"
 
     @pytest.mark.asyncio
     async def test_write_delegates_to_program(self):
-        bank, flash = self._make_bank()
+        bank, flash = self.make_bank()
         await bank.write(0x100, b"\xaa\xbb")
         assert flash.program_log == [(0x100, b"\xaa\xbb")]
 
     @pytest.mark.asyncio
     async def test_erase_partial(self):
-        bank, flash = self._make_bank()
+        bank, flash = self.make_bank()
         await bank.erase(0x1000, 0x1000)
         assert flash.erase_log == [(0x1000, 0x1000)]
         assert not flash.chip_erased
 
     @pytest.mark.asyncio
     async def test_erase_full_chip(self):
-        bank, flash = self._make_bank(size=0x10000)
+        bank, flash = self.make_bank(size=0x10000)
         await bank.erase(0, 0x10000)
         assert flash.chip_erased
         assert bank.is_blank
 
 
 class TestSpiFlashTarget:
-    def _make_target(self, **kw):
+    @staticmethod
+    def loadable_of(target):
+        return target.children_of_class(Loadable)[0]
+
+    def make_target(self, **kw):
         flash = FakeSpiFlash(**kw)
-        target = SpiFlashTarget(flash)
-        return target, flash
+        return SpiFlashTarget(flash), flash
 
     def test_name(self):
-        target, _ = self._make_target()
+        target, _ = self.make_target()
         assert "SPI flash" in target.name
 
-    def test_has_bank_child(self):
-        target, _ = self._make_target()
-        banks = target.children_of_class(Flash)
+    def test_has_loadable_with_bank(self):
+        target, _ = self.make_target()
+        loadables = target.children_of_class(Loadable)
+        assert len(loadables) == 1
+        banks = loadables[0].children_of_class(Flash)
         assert len(banks) == 1
         assert isinstance(banks[0], SpiFlashBank)
 
     @pytest.mark.asyncio
     async def test_write_programs_flash(self):
-        target, flash = self._make_target(size=0x10000, page_size=256)
-        m = _mm((0, b"\xaa" * 256))
-        await target.write(m)
-        data = await flash.read(0, 256)
-        assert data == b"\xaa" * 256
+        target, flash = self.make_target(size=0x10000, page_size=256)
+        await self.loadable_of(target).write(_mm((0, b"\xaa" * 256)))
+        assert (await flash.read(0, 256)) == b"\xaa" * 256
 
     @pytest.mark.asyncio
     async def test_erase_all_uses_chip_erase(self):
-        target, flash = self._make_target()
-        await target.erase_all()
+        target, flash = self.make_target()
+        await self.loadable_of(target).erase_all()
         assert flash.chip_erased
 
     @pytest.mark.asyncio
     async def test_verify_success(self):
-        target, flash = self._make_target()
-        flash._data[0:4] = b"\x11\x22\x33\x44"
-        m = _mm((0, b"\x11\x22\x33\x44"))
-        assert await target.verify(m) is True
+        target, flash = self.make_target()
+        flash.storage[0:4] = b"\x11\x22\x33\x44"
+        assert await self.loadable_of(target).verify(
+            _mm((0, b"\x11\x22\x33\x44"))) is True
 
     @pytest.mark.asyncio
     async def test_verify_failure(self):
-        target, flash = self._make_target()
-        m = _mm((0, b"\x11\x22\x33\x44"))
-        assert await target.verify(m) is False
+        target, _ = self.make_target()
+        assert await self.loadable_of(target).verify(
+            _mm((0, b"\x11\x22\x33\x44"))) is False
 
     @pytest.mark.asyncio
     async def test_read(self):
-        target, flash = self._make_target(size=0x1000)
-        flash._data[0:4] = b"\xab\xcd\xef\x01"
-        m = await target.read(begin=0, end=0x100)
+        target, flash = self.make_target(size=0x1000)
+        flash.storage[0:4] = b"\xab\xcd\xef\x01"
+        m = await self.loadable_of(target).read(begin=0, end=0x100)
         assert len(m) == 1
         assert m[0][1][:4] == b"\xab\xcd\xef\x01"
 
 
 class TestSpiFlashRegistration:
     def test_registered_for_spi_flash(self):
-        """SpiFlashTarget is registered as explorer for SpiFlash component."""
-        from acrobe.component.spi_flash import SpiFlash
-        found = False
-        for e in Target._explorers:
-            if SpiFlash in e.component_types:
-                found = True
-                break
+        found = any(SpiFlash in e.component_types for e in Target.explorers)
         assert found
 
 
-class TestField:
-    def _make_tree(self):
-        """Build a component tree with a FakeSpiFlash child."""
+class TestDiscovery:
+    def make_tree(self):
         root = Node("root")
         flash = FakeSpiFlash(size=0x10000)
         flash._name = "test-flash"
@@ -176,46 +171,38 @@ class TestField:
 
     @pytest.mark.asyncio
     async def test_discover_finds_spi_flash(self):
-        root, flash = self._make_tree()
-        field = Field()
-        await field.discover(root)
-        targets = field.children_of_class(Target)
-        assert len(targets) == 1
-        assert isinstance(targets[0], SpiFlashTarget)
+        root, _ = self.make_tree()
+        disc = TargetDiscovery()
+        spawned = await disc.run(root)
+        assert len(spawned) == 1
+        assert isinstance(spawned[0], SpiFlashTarget)
+        assert spawned[0]._parent is root
 
     @pytest.mark.asyncio
-    async def test_discover_no_duplicates(self):
-        """Same component is not claimed by multiple explorers."""
-        root, flash = self._make_tree()
-        field = Field()
-        await field.discover(root)
-        targets = field.children_of_class(Target)
-        assert len(targets) == 1
+    async def test_discover_no_duplicate_on_rerun(self):
+        root, _ = self.make_tree()
+        disc = TargetDiscovery()
+        await disc.run(root)
+        again = await disc.run(root)
+        assert again == []
+        assert len(root.children_of_class(Target)) == 1
 
     @pytest.mark.asyncio
     async def test_discover_empty_tree(self):
         root = Node("empty")
-        field = Field()
-        await field.discover(root)
-        assert len(field.children_of_class(Target)) == 0
+        disc = TargetDiscovery()
+        spawned = await disc.run(root)
+        assert spawned == []
 
     @pytest.mark.asyncio
-    async def test_discover_multiple_roots(self):
-        root1, _ = self._make_tree()
-        root2, _ = self._make_tree()
-        field = Field()
-        await field.discover(root1, root2)
-        targets = field.children_of_class(Target)
-        assert len(targets) == 2
-
-    @pytest.mark.asyncio
-    async def test_unhandled_components(self):
-        """Nodes not matching any explorer end up in unhandled."""
+    async def test_discover_two_trees(self):
+        """Two component subtrees under one root both yield a Target."""
         root = Node("root")
-        child = Node("orphan")
-        root._child_attach(child)
-        field = Field()
-        await field.discover(root)
-        # Node base class is not registered for any explorer,
-        # so nothing should be in unhandled (only interest types are tracked)
-        assert isinstance(field.unhandled, set)
+        for i in range(2):
+            f = FakeSpiFlash(size=0x10000)
+            f._name = f"flash-{i}"
+            root._child_attach(f)
+
+        disc = TargetDiscovery()
+        spawned = await disc.run(root)
+        assert len(spawned) == 2

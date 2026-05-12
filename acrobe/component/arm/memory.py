@@ -3,7 +3,7 @@
 Concrete Region implementations that delegate to MemAp.mem_read/mem_write.
 """
 
-from ...target.memory import Ram, Flash
+from ...target.region import Ram, Flash
 
 
 class BusRam(Ram):

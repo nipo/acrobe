@@ -4,7 +4,7 @@ import pytest
 
 from acrobe.component.fpga import SramFpga, JtagSramFpga
 from acrobe.target.fpga import FpgaTarget
-from acrobe.target import Target
+from acrobe.target import Loadable, Target
 from acrobe.component.xilinx.config_access_port import ConfigAccessPort
 from acrobe.component.xilinx.series6 import Series6
 from acrobe.component.xilinx.series7 import Series7
@@ -113,9 +113,12 @@ class TestJtagSramFpga:
 # -- FpgaTarget --
 
 class TestFpgaTarget:
+    @staticmethod
+    def loadable_of(target):
+        return target.children_of_class(Loadable)[0]
+
     def test_registered(self):
-        """FpgaTarget is registered for SramFpga in Target explorers."""
-        types = [e.component_types for e in Target._explorers]
+        types = [e.component_types for e in Target.explorers]
         assert any(SramFpga in ct for ct in types)
 
     @pytest.mark.asyncio
@@ -134,7 +137,7 @@ class TestFpgaTarget:
 
         fpga = MockFpga("mock")
         target = FpgaTarget(fpga)
-        await target.write(make_bitstream(b'\x00' * 100))
+        await self.loadable_of(target).write(make_bitstream(b'\x00' * 100))
         assert len(loaded) == 1
 
     @pytest.mark.asyncio
@@ -153,7 +156,8 @@ class TestFpgaTarget:
 
         fpga = MockFpga("mock")
         target = FpgaTarget(fpga)
-        await target.write(make_bitstream(b'\x00'), do_erase=True)
+        await self.loadable_of(target).write(
+            make_bitstream(b'\x00'), do_erase=True)
         assert len(erased) == 1
 
     @pytest.mark.asyncio
@@ -172,7 +176,7 @@ class TestFpgaTarget:
 
         fpga = MockFpga("mock")
         target = FpgaTarget(fpga)
-        await target.erase_all()
+        await self.loadable_of(target).erase_all()
         assert len(erased) == 1
 
     @pytest.mark.asyncio
@@ -189,7 +193,8 @@ class TestFpgaTarget:
 
         fpga = MockFpga("mock")
         target = FpgaTarget(fpga)
-        assert await target.verify(make_bitstream(b"")) is True
+        assert await self.loadable_of(target).verify(
+            make_bitstream(b"")) is True
 
 
 # -- ConfigAccessPort mixin --

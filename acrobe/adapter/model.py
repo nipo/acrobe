@@ -1,3 +1,5 @@
+import asyncio
+
 from ..db import Db, NoMatch
 from ..node import Node
 
@@ -166,15 +168,24 @@ class UsbEnumerator:
 
 
 class HwRoot(Node):
-    """Root of the hardware component tree.
+    """Root of the unified tree.
 
-    Delegates child_spawn to registered enumerators (strategies).
-    Adapters appear as direct children: proby-9/jtag, not USB/proby-9/jtag.
+    Adapters appear as direct children (proby-9/jtag, not
+    USB/proby-9/jtag). Targets also live flat under the root, as
+    siblings of adapters, deposited there by `TargetDiscovery`.
+
+    `child_spawn` is delegated to registered enumerators
+    (strategies). `request_discovery()` schedules a target-discovery
+    sweep with coalescing — multiple calls before the next event
+    loop turn run at most one sweep.
     """
 
     def __init__(self):
         super().__init__("HwRoot")
         self._enumerators = []
+        self._discovery = None
+        self._discovery_task = None
+        self._discovery_needs_run = False
 
     def add_enumerator(self, enumerator):
         self._enumerators.append(enumerator)
@@ -187,6 +198,35 @@ class HwRoot(Node):
             except NoMatch as e:
                 errors.append(e)
         raise NoMatch("adapter", name)
+
+    def request_discovery(self):
+        """Schedule a `TargetDiscovery` sweep over this tree.
+
+        Coalescing: if a sweep is already pending or running, the
+        request raises a re-run flag rather than starting a second
+        task. Callers may await the returned Task to wait for the
+        active sweep (including any re-run triggered during it).
+        """
+        self._discovery_needs_run = True
+        if self._discovery_task is None or self._discovery_task.done():
+            self._discovery_task = asyncio.ensure_future(self.__run_discovery())
+        return self._discovery_task
+
+    async def discover_targets(self):
+        """Run discovery to fixed point and await completion."""
+        await self.request_discovery()
+
+    def __ensure_discovery(self):
+        if self._discovery is None:
+            from ..target.discovery import TargetDiscovery
+            self._discovery = TargetDiscovery()
+        return self._discovery
+
+    async def __run_discovery(self):
+        await asyncio.sleep(0)
+        while self._discovery_needs_run:
+            self._discovery_needs_run = False
+            await self.__ensure_discovery().run(self)
 
 
 def make_hw_root():

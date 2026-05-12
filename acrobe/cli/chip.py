@@ -1,14 +1,15 @@
 """Chip programming CLI commands.
 
 Usage:
-  acrobe chip -r <root_path> [-r ...] [-t <target>] program|check|readback|reset
+  acrobe chip -r <root_path> [-r ...] [-t <target>] [--loadable <name>]
+              program|check|readback|reset
 """
 
 import sys
 import asyncclick as click
 
 from . import base
-from ..target import Target, Field
+from ..target import Loadable, Target
 
 
 @base.cli.group(help="Chip programming")
@@ -16,22 +17,24 @@ from ..target import Target, Field
               help="Component path (e.g. proby-9/jtag-pt)")
 @click.option('-t', '--target', 'target_sel', default="0",
               help="Target index or name (default: 0)")
+@click.option('--loadable', 'loadable_sel', default=None,
+              help="Loadable child name when the Target has several")
 @click.pass_context
-async def chip(ctx, root_paths, target_sel):
-    roots = [await ctx.obj.resolve(path) for path in root_paths]
+async def chip(ctx, root_paths, target_sel, loadable_sel):
+    hw_root = ctx.obj.hw_root
+    for path in root_paths:
+        await ctx.obj.resolve(path)
 
-    field = Field()
-    await field.discover(*roots)
+    await hw_root.discover_targets()
 
-    targets = field.children_of_class(Target)
+    targets = hw_root.children_of_class(Target)
     if not targets:
         click.echo("No targets found.", err=True)
         sys.exit(1)
 
     target = None
     try:
-        idx = int(target_sel)
-        target = targets[idx]
+        target = targets[int(target_sel)]
     except (ValueError, IndexError):
         for t in targets:
             if target_sel.lower() in t.name.lower():
@@ -44,8 +47,35 @@ async def chip(ctx, root_paths, target_sel):
             click.echo(f"  {i}: {t.name}", err=True)
         sys.exit(1)
 
-    click.echo(f"Target: {target.name}")
+    loadables = target.children_of_class(Loadable)
+    if not loadables:
+        click.echo(f"Target {target.name!r} has no Loadable child.", err=True)
+        sys.exit(1)
+
+    loadable = None
+    if loadable_sel is None:
+        if len(loadables) > 1:
+            names = ", ".join(l.name for l in loadables)
+            click.echo(
+                f"Target {target.name!r} has multiple Loadables ({names}); "
+                f"select one with --loadable.", err=True)
+            sys.exit(1)
+        loadable = loadables[0]
+    else:
+        for l in loadables:
+            if l.name == loadable_sel:
+                loadable = l
+                break
+        if loadable is None:
+            names = ", ".join(l.name for l in loadables)
+            click.echo(
+                f"Loadable {loadable_sel!r} not found in {target.name!r}. "
+                f"Available: {names}", err=True)
+            sys.exit(1)
+
+    click.echo(f"Target: {target.name}  Loadable: {loadable.name}")
     ctx.obj.target = target
+    ctx.obj.loadable = loadable
 
 
 @chip.command(help="Program target with a single resource")
@@ -56,10 +86,10 @@ async def chip(ctx, root_paths, target_sel):
 @click.option('-C', '--assume-clean', is_flag=True, help="Assume flash is blank")
 @click.pass_context
 async def program(ctx, resource, erase, verify, run, assume_clean):
-    target = ctx.obj.target
+    loadable = ctx.obj.loadable
     node = await resource.resolve()
-    await target.write(node, do_erase=erase, do_verify=verify,
-                       do_start=run, assume_clean=assume_clean)
+    await loadable.write(node, do_erase=erase, do_verify=verify,
+                         do_start=run, assume_clean=assume_clean)
     click.echo("Done.")
 
 
@@ -67,9 +97,9 @@ async def program(ctx, resource, erase, verify, run, assume_clean):
 @click.argument('resource', required=True, type=base.RESOURCE)
 @click.pass_context
 async def check(ctx, resource):
-    target = ctx.obj.target
+    loadable = ctx.obj.loadable
     node = await resource.resolve()
-    ok = await target.verify(node)
+    ok = await loadable.verify(node)
     if ok:
         click.echo("Verify OK.")
     else:
@@ -84,8 +114,8 @@ async def check(ctx, resource):
 @click.pass_context
 async def readback(ctx, filename, begin, end):
     from ..memory_map import save
-    target = ctx.obj.target
-    m = await target.read(begin=begin, end=end)
+    loadable = ctx.obj.loadable
+    m = await loadable.read(begin=begin, end=end)
     save(m, filename)
     click.echo(f"Read back to {filename}.")
 
@@ -93,6 +123,6 @@ async def readback(ctx, filename, begin, end):
 @chip.command(help="Reset target")
 @click.pass_context
 async def reset(ctx):
-    target = ctx.obj.target
-    await target.reset()
+    loadable = ctx.obj.loadable
+    await loadable.reset()
     click.echo("Reset.")

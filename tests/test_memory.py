@@ -1,5 +1,5 @@
 import pytest
-from acrobe.target.memory import Region, Ram, Flash, Eeprom
+from acrobe.target.region import Region, Ram, Flash, Eeprom
 
 
 class TestRegion:

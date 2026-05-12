@@ -2,7 +2,7 @@
 
 import pytest
 from acrobe.component.arm.memory import BusRam, BusFlash
-from acrobe.target.memory import Ram, Flash
+from acrobe.target.region import Ram, Flash
 
 
 class MockMemAp:
