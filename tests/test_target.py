@@ -77,7 +77,9 @@ class TestRegionUpdate:
         f.is_blank = False
         m = _mm((0x100, b"\x55" * 32))
         chunks = [(off, data) async for off, data in f.plan_update(m)]
-        assert f.erase_log == [(0, 32)]
+        # Flash.plan_update aligns erases to erase_page_sizes[0] and
+        # issues one erase per touched page.
+        assert f.erase_log == [(0, 16), (16, 16)]
         assert chunks == [(0, b"\x55" * 16), (16, b"\x55" * 16)]
 
     @pytest.mark.asyncio

@@ -23,6 +23,7 @@ from .debug_auth import DebugAuth
 from . import fpga  # noqa: F401,E402  — triggers @Target.register
 from . import spi_flash  # noqa: F401,E402
 from .arm import cortex_m as _cortex_m  # noqa: F401,E402
+from .arm import nrf52 as _nrf52  # noqa: F401,E402
 
 __all__ = [
     "Target", "Explorer", "TargetDiscovery",
