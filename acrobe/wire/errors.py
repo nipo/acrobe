@@ -12,9 +12,7 @@ from dataclasses import dataclass
 from . import registry as _registry
 from .session import Session
 
-
-INTERNAL_ERROR_UUID = "00000000-0000-4000-8000-000000000001"
-
+INTERNAL_ERROR_UUID = "cb66c7db-8ef1-4322-b65b-7867229c0087"
 
 @_registry.error(INTERNAL_ERROR_UUID)
 @dataclass

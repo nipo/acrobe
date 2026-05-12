@@ -7,8 +7,4 @@ default registry on first wire import.
 from ..bitstring import BitString
 from . import registry as _registry
 
-
-BITSTRING_UUID = "00000000-0000-4000-8000-000000000010"
-
-
-_registry.value(BITSTRING_UUID)(BitString)
+_registry.value("a322dc61-7a54-4555-bcf6-81124e665d98")(BitString)
