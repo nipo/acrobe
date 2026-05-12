@@ -218,53 +218,146 @@ class IcePick(jtag.Tap):
 
         Convention (matches crobe): lower keys land closer to TDI
         (higher ``ir_pre``); higher keys land closer to TDO. Concretely,
-        the new tap goes just after every already-enabled tap whose
-        key is lower than ours, counted from the ICE-Pick's current
-        ``ir_pre``.
+        the new tap goes just after every currently-enabled sub-TAP
+        whose key is lower than ours, counted from the IcePick's
+        current ``ir_pre``.
+
+        Detached entries in ``self.taps`` are skipped — they no
+        longer contribute to the hardware scan chain.
         """
         ctx = self.chain.context(self)
         ir_delta = 0
         dr_delta = 0
         for k, tap in self.taps.items():
-            if k < key:
-                ir_delta += tap.irlen
-                dr_delta += 1
+            if k >= key:
+                continue
+            sub_ctx = self.chain._contexts.get(tap)
+            if sub_ctx is None or not sub_ctx.enabled:
+                continue
+            ir_delta += tap.irlen
+            dr_delta += 1
         return ctx.ir_pre - ir_delta, ctx.dr_pre - dr_delta
 
-    async def tap_enable(self, block, index, enable=True):
-        """Enable / disable a secondary TAP, mutating the parent chain.
+    def _enabled_tap(self, key):
+        """Return the sub-TAP at ``key`` if it's currently in the
+        scan chain (enabled), else ``None``. A key whose value lives
+        in ``self.taps`` as a detached Tap counts as not-currently-
+        enabled."""
+        tap = self.taps.get(key)
+        if tap is None:
+            return None
+        ctx = self.chain._contexts.get(tap)
+        if ctx is None or not ctx.enabled:
+            return None
+        return tap
 
-        Returns the inserted (or removed) Tap. Calling with the
-        current state is a no-op and returns the cached tap (or None
-        if it wasn't enabled).
+    async def tap_enable(self, block, index, enable=True):
+        """Enable / disable a secondary TAP, mutating the parent
+        chain.
+
+        Returns the sub-TAP. Calling with the current state is a
+        no-op and returns the cached tap (or ``None`` if it never
+        existed).
+
+        Disable is non-destructive: the sub-TAP stays in
+        ``self.taps`` and in the Node tree but is detached from the
+        chain via ``Chain.tap_detach``. A subsequent
+        ``tap_enable(...,True)`` reattaches the same object,
+        preserving any host-side state (DAP SELECT cache, ROM-table
+        children, etc.). This is the basis for IcePick's
+        cool-down-and-reuse pattern and for surviving a JTAG TLR
+        intact — see :meth:`pre_tlr` / :meth:`post_tlr`.
         """
         key = (block, index)
-        if bool(key in self.taps) == bool(enable):
-            return self.taps.get(key)
-
         if key not in self.TAPS:
-            raise KeyError(f"{key} is not registered in {type(self).__name__}.TAPS")
+            raise KeyError(
+                f"{key} is not registered in {type(self).__name__}.TAPS")
 
-        # Read current router state, flip select_tap, write it back.
+        existing = self.taps.get(key)
+        currently_enabled = (existing is not None
+                             and self.chain.context(existing).enabled)
+        if currently_enabled == bool(enable):
+            return existing
+
         cur_raw = await self.router_read(block, index)
-        rtype = SecondaryDebugTap if block == Block.DebugTap else SecondaryTestTap
+        rtype = (SecondaryDebugTap if block == Block.DebugTap
+                 else SecondaryTestTap)
         cur = rtype(cur_raw)
         cur.select_tap = enable
         await self.router_write(block, index, int(cur))
 
         if enable:
-            idcode, cls = self.TAPS[key]
             ir_pre, dr_pre = self._insertion_position(key)
+            if existing is not None:
+                self.logger.trace(
+                    "Re-enable TAP %s/%d (%s) at ir_pre=%d dr_pre=%d",
+                    block.name, index, existing.name, ir_pre, dr_pre)
+                self.chain.tap_reattach(
+                    existing, ir_pre, dr_pre, controller=self)
+                return existing
+            idcode, cls = self.TAPS[key]
             self.logger.trace(
                 "Enable TAP %s/%d (%s, irlen=%d) at ir_pre=%d dr_pre=%d",
                 block.name, index, cls.__name__, cls.irlen, ir_pre, dr_pre)
             new_tap = self.chain.tap_insert(
-                idcode, cls.irlen, ir_pre, dr_pre, base=cls)
+                idcode, cls.irlen, ir_pre, dr_pre, base=cls,
+                controller=self)
             self.taps[key] = new_tap
             return new_tap
-        else:
-            tap = self.taps.pop(key)
-            self.logger.trace(
-                "Disable TAP %s/%d (%s)", block.name, index, type(tap).__name__)
-            await self.chain.tap_remove(tap)
-            return tap
+
+        self.logger.trace(
+            "Disable TAP %s/%d (%s)", block.name, index, type(existing).__name__)
+        self.chain.tap_detach(existing)
+        return existing
+
+    # --- TLR lifecycle -----------------------------------------------
+
+    async def pre_tlr(self):
+        """Snapshot the keys of currently-enabled sub-TAPs so
+        :meth:`post_tlr` can restore them after the TLR clears the
+        router's CONNECT state and detaches every gated sub-TAP."""
+        chain = self.chain
+        self.tlr_active = [
+            key for key, tap in self.taps.items()
+            if chain.context(tap).enabled
+        ]
+        self.logger.trace(
+            "pre_tlr: %d sub-TAP(s) to restore", len(self.tlr_active))
+
+    async def post_tlr(self):
+        """Re-CONNECT the router and re-enable every sub-TAP that
+        was active before the TLR.
+
+        Restoration happens in sorted-key order so that
+        :meth:`_insertion_position` reconstructs the same chain
+        geometry the user had before the TLR. Each sub-TAP is
+        reattached via ``Chain.tap_reattach`` — same object, same
+        children, only the JTAG geometry was lost across the
+        reset."""
+        active = getattr(self, "tlr_active", None)
+        if not active:
+            return
+        self.tlr_active = []
+
+        await self.CONNECT(
+            int(Connect(write_en=True, key="connected")),
+            read_tdo=False, post_dr_run=self.ROUTER_RUN)
+
+        for key in sorted(active):
+            sub_tap = self.taps.get(key)
+            if sub_tap is None:
+                continue
+            block, index = key
+            cur_raw = await self.router_read(block, index)
+            rtype = (SecondaryDebugTap if block == Block.DebugTap
+                     else SecondaryTestTap)
+            cur = rtype(cur_raw)
+            cur.select_tap = True
+            await self.router_write(block, index, int(cur))
+
+            ir_pre, dr_pre = self._insertion_position(key)
+            self.chain.tap_reattach(
+                sub_tap, ir_pre, dr_pre, controller=self)
+            self.logger.note(
+                "Restored gated TAP %s/%d at ir_pre=%d after TLR",
+                block.name, index, ir_pre)
