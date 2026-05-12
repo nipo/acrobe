@@ -593,7 +593,7 @@ class Chain(Batcher, Node):
         with jtag_iface.freq_capped("enumeration", 1e6):
             await self._cold_init_and_discover(jtag_iface)
 
-    def _cold_init_and_discover(self, jtag_iface):
+    async def _cold_init_and_discover(self, jtag_iface):
         """Atomic cold-line init + blind discovery.
 
         Sequence:
@@ -603,13 +603,28 @@ class Chain(Batcher, Node):
         2. SWD-to-JTAG switch — flips an SWJ-DP from SWD back to
            JTAG. Harmless on chips without an SWJ-DP.
         3. TAP reset — settles the chain after the switch.
-        4. IEEE-1149.7 unlock + 4-wire-mode switch (CCL_LOCK +
-           STC2(0,2,1) + STMC(0,0,1)). Capped to 100 kHz; ignored
-           by non-cJTAG TAPs because the shift values land in the
-           captured IDCODE/BYPASS DR (read-only / 1-bit).
-        5. Blind discovery (CaptureDr/IR + length probing).
+        4. 500 idle TCKs in Run-Test/Idle — gives router-style TAPs
+           (IcePick on TI CC26xx, …) time to wake up after TLR
+           before the cJTAG OAC sequence starts probing. Empirically
+           required on cold power-up: with too few idle cycles the
+           OAC scans reach the cJTAG controller before it has
+           finished its post-reset wake-up, the chip stays in 2-wire
+           mode, and TDO is tri-stated for the first enumeration.
+           500 is the smallest count observed to be 100% reliable on
+           CC26xx — fewer cycles work intermittently.
+        5. IEEE-1149.7 unlock + 4-wire-mode switch (CCL_LOCK +
+           STC2(0,2,1) + STMC(0,0,1)). Ignored by non-cJTAG TAPs
+           because the shift values land in the captured
+           IDCODE/BYPASS DR (read-only / 1-bit).
+        6. Blind discovery (CaptureDr/IR + length probing).
+        7. `post_tlr` on every discovered TAP. Semantically the
+           chain just went through a Test-Logic-Reset, so the same
+           hook that ``tlr_and_refresh`` calls applies here too —
+           it's what lets a controller TAP (Agilex5, IcePick, …)
+           claim ownership of the neighbour TAPs that were created
+           by blind discovery.
 
-        Steps 4 and 5 must follow each other without an intervening
+        Steps 5 and 6 must follow each other without an intervening
         TAP reset — TLR reverts the cJTAG controller to 2-wire mode.
         Discovery in turn requires every TAP to be in IDCODE/BYPASS
         (i.e. *just* after a TAP reset), so the whole chain has to
@@ -617,11 +632,11 @@ class Chain(Batcher, Node):
         self._parent.post(Reset(count=50))
         self._parent.post(SwdToJtag())
         self._parent.post(Reset(count=50))
-        self._parent.post(Run(1))
-        self.cjtag_set([0, 0, 1])
-        self.cjtag_set([2, 9])
-        self.cjtag_set([0, 1])
-        return self.discover()
+        self._parent.post(Run(500))
+        self.cjtag_set([0, 0, 1, 2, 9, 0, 1])
+        await self.discover()
+        for tap in list(self._children):
+            await tap.post_tlr()
         
     def cjtag_set(self, lens: list[int]) -> asyncio.Future:
         self._parent.post(Run(1))
@@ -906,6 +921,23 @@ class Chain(Batcher, Node):
                 gated_ctx.controller = None
         ctx.gated.clear()
         await self.child_remove(tap)
+
+    def tap_set_controller(self, tap, controller):
+        """Set or clear the controller for an attached `tap`.
+
+        Used when a driver wants to claim ownership of a TAP that
+        was created by chain discovery / refresh — for example, the
+        Agilex5 driver claiming the freshly-revealed HPS ARM DP
+        after a successful HPS-enabled bitstream load.
+
+        Pass ``controller=None`` to release ownership without
+        detaching the tap.
+        """
+        ctx = self._contexts.get(tap)
+        if ctx is None:
+            raise RuntimeError(
+                f"Tap {tap.name!r} is not in chain {self.name!r}")
+        self._set_controller(ctx, controller)
 
     # --- Geometry / controller helpers -----------------------------
 
