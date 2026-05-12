@@ -22,7 +22,9 @@ from ...component.arm.coresight.rom_table import RomTable
 from ...component.arm.coresight.scs import Scs
 from ...component.arm.dp import Dp, DpAccessFailure
 from ...component.arm.mem_ap import MemAp
+from ...component.nordic.ctrl_ap import CtrlAp
 from ...db import NoMatch
+from ..debuggable import Debuggable
 from ..loadable import Loadable
 from ..region import Flash
 from ..target import Target
@@ -96,34 +98,40 @@ class NvmcFlash(Flash):
             raise ValueError(
                 f"NvmcFlash erase must be page-aligned "
                 f"(page={self.write_page_size:#x})")
-        await self.__set_config(NVMC_CONFIG_EEN)
+        await self.set_config(NVMC_CONFIG_EEN)
         try:
             addr = self.address + offset
             end = addr + size
             while addr < end:
                 await self.mem_ap.write32(NVMC_ERASEPAGE, addr)
-                await self.__wait_ready()
+                await self.wait_ready()
                 addr += self.write_page_size
         finally:
-            await self.__set_config(NVMC_CONFIG_REN)
+            await self.set_config(NVMC_CONFIG_REN)
         if offset == 0 and size == self.size:
             self.is_blank = True
 
     async def write(self, offset, data):
         if offset % 4 or len(data) % 4:
             raise ValueError("NvmcFlash write must be word-aligned")
-        await self.__set_config(NVMC_CONFIG_WEN)
+        await self.set_config(NVMC_CONFIG_WEN)
         try:
             await self.mem_ap.mem_write(self.address + offset, data)
-            await self.__wait_ready()
+            await self.wait_ready()
         finally:
-            await self.__set_config(NVMC_CONFIG_REN)
+            await self.set_config(NVMC_CONFIG_REN)
 
-    async def __set_config(self, value: int):
+    async def set_config(self, value: int):
+        """Write NVMC.CONFIG and wait for the controller to settle.
+
+        Public so subclasses (`UicrFlash`) and Loadables that batch
+        operations can manage CONFIG state at a higher level than
+        a single erase/write call."""
         await self.mem_ap.write32(NVMC_CONFIG, value)
-        await self.__wait_ready()
+        await self.wait_ready()
 
-    async def __wait_ready(self, timeout: float = 5.0):
+    async def wait_ready(self, timeout: float = 5.0):
+        """Poll NVMC.READY until set or `timeout` seconds elapse."""
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         while True:
@@ -134,6 +142,82 @@ class NvmcFlash(Flash):
                 raise TimeoutError(
                     f"NVMC not ready after {timeout}s")
             await asyncio.sleep(self.POLL_PERIOD)
+
+
+class UicrFlash(NvmcFlash):
+    """UICR (User Information Configuration Registers) region.
+
+    Same NVMC for writes; erase is all-or-nothing via NVMC.ERASEUICR
+    rather than per-page ERASEPAGE. Partial erase is unsupported —
+    any erase call must cover the whole region."""
+
+    async def erase(self, offset, size):
+        if offset != 0 or size != self.size:
+            raise ValueError(
+                "UicrFlash erase is all-or-nothing; "
+                "offset must be 0 and size must equal region size")
+        await self.set_config(NVMC_CONFIG_EEN)
+        try:
+            await self.mem_ap.write32(NVMC_ERASEUICR, 1)
+            await self.wait_ready()
+        finally:
+            await self.set_config(NVMC_CONFIG_REN)
+        self.is_blank = True
+
+
+class Nrf52Loadable(Loadable):
+    """nRF52 Loadable with CPU halt around flash ops and an
+    optional CTRL-AP mass-erase shortcut.
+
+    Halting before flash programming is required for reliability —
+    NVMC operations contend with CPU access to flash. Without it,
+    the first attempt against a chip running user code typically
+    fails until something else (mass-erase + reset) clears the
+    flash bus."""
+
+    def __init__(self, name: str = "main", *, ctrl_ap: CtrlAp | None = None):
+        super().__init__(name)
+        self.ctrl_ap = ctrl_ap
+
+    async def pre_program(self, *, do_erase, assume_clean):
+        core = self.__core()
+        if core is not None:
+            await core.halt()
+        await super().pre_program(do_erase=do_erase, assume_clean=assume_clean)
+
+    async def post_program(self, *, success, do_start):
+        if do_start and success:
+            core = self.__core()
+            if core is not None:
+                await core.reset(stop=False)
+
+    async def erase_all(self):
+        """Prefer CTRL-AP ERASEALL when available — single 175ms
+        operation that clears flash + UICR + APPROTECT in one go.
+
+        Falls back to per-region per-page NVMC erase if no CTRL-AP
+        is wired."""
+        if self.ctrl_ap is None:
+            await super().erase_all()
+            return
+        await self.ctrl_ap.erase_all()
+        for f in self.children_of_class(Flash):
+            f.is_blank = True
+        # CTRL-AP ERASEALL leaves the CPU held in reset on some
+        # nRF52 revisions; release and bring debug back up.
+        await self.ctrl_ap.release_reset()
+        core = self.__core()
+        if core is not None:
+            await core.reset(stop=True)
+
+    def __core(self):
+        target = self._parent
+        if target is None:
+            return None
+        debuggables = target.children_of_class(Debuggable)
+        if not debuggables or not debuggables[0].cores:
+            return None
+        return debuggables[0].cores[0]
 
 
 class Nrf52Target(CortexMTarget):
@@ -152,9 +236,6 @@ async def nrf52_probe(dp):
     aps = dp.children_of_class(MemAp)
     if not aps:
         raise NoMatch("nrf52_probe", "no MemAp under DP")
-    # Try every MemAp — multi-AP layouts may park flash MMIO behind
-    # the second AP. The first AP that successfully reads FICR.INFO.PART
-    # with a matching part number wins.
     for ap in aps:
         try:
             part = await ap.read32(FICR_INFO_PART)
@@ -176,13 +257,20 @@ async def _build_nrf52_target(dp, ap, part):
     if rt is None:
         raise NoMatch("nrf52_probe", "no SCS under MemAp")
 
+    ctrl_aps = dp.children_of_class(CtrlAp)
+    ctrl_ap = ctrl_aps[0] if ctrl_aps else None
+
     name = NRF52_PARTS[part]
     target = Nrf52Target(name)
     target.claim(dp, ap, rt)
+    if ctrl_ap is not None:
+        target.claim(ctrl_ap)
     target.child_add(CortexMDebuggable.from_romtable(rt, ap))
 
-    loadable = Loadable("main")
+    loadable = Nrf52Loadable("main", ctrl_ap=ctrl_ap)
     loadable.child_add(
         NvmcFlash("code", 0x00000000, flash_size, ap, page_size=page_size))
+    loadable.child_add(
+        UicrFlash("uicr", UICR_BASE, page_size, ap, page_size=page_size))
     target.child_add(loadable)
     return target

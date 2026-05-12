@@ -14,8 +14,9 @@ from acrobe.target.arm.cortex_m import CortexMDebuggable
 from acrobe.target.arm.nrf52 import (
     FICR_CODEPAGESIZE, FICR_CODESIZE, FICR_INFO_PART,
     NRF52_PARTS, NVMC_CONFIG, NVMC_CONFIG_EEN,
-    NVMC_CONFIG_REN, NVMC_CONFIG_WEN, NVMC_ERASEPAGE, NVMC_READY,
-    NVMC_READY_BIT, Nrf52Target, NvmcFlash, nrf52_probe,
+    NVMC_CONFIG_REN, NVMC_CONFIG_WEN, NVMC_ERASEPAGE,
+    NVMC_ERASEUICR, NVMC_READY, NVMC_READY_BIT, UICR_BASE,
+    Nrf52Loadable, Nrf52Target, NvmcFlash, UicrFlash, nrf52_probe,
 )
 
 
@@ -229,9 +230,13 @@ class TestNrf52Probe:
         loadables = target.children_of_class(Loadable)
         assert len(loadables) == 1
         flashes = loadables[0].children_of_class(NvmcFlash)
-        assert len(flashes) == 1
-        assert flashes[0].size == 0x100000
-        assert flashes[0].write_page_size == 0x1000
+        # One main code flash + one UICR.
+        assert len(flashes) == 2
+        names = {f.name for f in flashes}
+        assert names == {"code", "uicr"}
+        code = next(f for f in flashes if f.name == "code")
+        assert code.size == 0x100000
+        assert code.write_page_size == 0x1000
 
     @pytest.mark.asyncio
     async def test_unknown_part_declines(self):
@@ -266,6 +271,208 @@ class TestNrf52Probe:
         # No ROM table; no SCS.
         with pytest.raises(NoMatch):
             await nrf52_probe(dp)
+
+
+class TestUicrFlash:
+    @pytest.mark.asyncio
+    async def test_erase_writes_eraseuicr(self):
+        ap = MockAp()
+        f = UicrFlash("uicr", UICR_BASE, 0x1000, ap, page_size=0x1000)
+        await f.erase(0, 0x1000)
+        # ERASEUICR was written with 1.
+        assert (NVMC_ERASEUICR, 1) in ap.writes
+        # Region marked blank.
+        assert f.is_blank
+
+    @pytest.mark.asyncio
+    async def test_partial_erase_rejected(self):
+        ap = MockAp()
+        f = UicrFlash("uicr", UICR_BASE, 0x1000, ap, page_size=0x1000)
+        with pytest.raises(ValueError):
+            await f.erase(0, 0x800)
+
+
+class FakeCore:
+    def __init__(self):
+        self.history = []
+
+    async def halt(self):
+        self.history.append("halt")
+
+    async def reset(self, *, stop=True):
+        self.history.append(f"reset(stop={stop})")
+
+
+class FakeDebuggable:
+    """Stub Debuggable that the Nrf52Loadable's __core() helper
+    walks to. Has the same shape as the real one."""
+
+    def __init__(self, core):
+        self.core = core
+        self.cores = [core]
+
+    def children_of_class(self, klass):
+        return []
+
+
+class _FakeTarget(Node):
+    """Minimal Node parent that exposes a Debuggable child for the
+    Loadable's __core() helper. Standalone — does not run through
+    discovery."""
+
+    def __init__(self, name, core):
+        super().__init__(name)
+        from acrobe.target.debuggable import Debuggable
+        self.debuggable = Debuggable("debug")
+        self._child_attach(self.debuggable)
+        from acrobe.target.debuggable import Core
+        # Hot-patch the Debuggable to expose .cores attribute.
+        # Real Debuggable .cores walks children; we attach `core`
+        # as a real Node child of the Debuggable.
+        self.debuggable._child_attach(core)
+
+
+class HaltableCore(Node):
+    """Minimal Core-shaped Node we can attach under a Debuggable."""
+
+    from acrobe.target.debuggable import Core as _Core
+
+    def __init__(self):
+        Node.__init__(self, "core")
+        self.history = []
+
+    async def halt(self):
+        self.history.append("halt")
+
+    async def reset(self, *, stop=True):
+        self.history.append(f"reset(stop={stop})")
+
+
+class TestNrf52LoadableHalt:
+    """Pre-program halts the CPU; post-program optionally resets."""
+
+    def make(self, *, ctrl_ap=None):
+        from acrobe.target.debuggable import Core, Debuggable
+
+        # Build a stand-alone tree: Target → Debuggable → Core.
+        # We pass the real Debuggable/Core classes plus a "core" that
+        # records halt/reset calls.
+        class RecordingCore(Core):
+            def __init__(self):
+                Core.__init__(self, "core")
+                self.history = []
+
+            async def halt(self):
+                self.history.append("halt")
+
+            async def reset(self, *, stop=True):
+                self.history.append(f"reset(stop={stop})")
+
+        core = RecordingCore()
+        debug = Debuggable("debug")
+        debug.child_add(core)
+
+        target = Target("nRF52840")
+        target.child_add(debug)
+
+        loadable = Nrf52Loadable("main", ctrl_ap=ctrl_ap)
+        target.child_add(loadable)
+        return loadable, core
+
+    @pytest.mark.asyncio
+    async def test_pre_program_halts_cpu(self):
+        loadable, core = self.make()
+        await loadable.pre_program(do_erase=False, assume_clean=False)
+        assert core.history == ["halt"]
+
+    @pytest.mark.asyncio
+    async def test_post_program_reset_on_do_start(self):
+        loadable, core = self.make()
+        await loadable.post_program(success=True, do_start=True)
+        assert core.history == ["reset(stop=False)"]
+
+    @pytest.mark.asyncio
+    async def test_post_program_no_reset_on_failure(self):
+        loadable, core = self.make()
+        await loadable.post_program(success=False, do_start=True)
+        assert core.history == []
+
+    @pytest.mark.asyncio
+    async def test_no_debuggable_pre_program_is_noop(self):
+        target = Target("bare")
+        loadable = Nrf52Loadable("main")
+        target.child_add(loadable)
+        # No Debuggable sibling — pre_program must not crash.
+        await loadable.pre_program(do_erase=False, assume_clean=False)
+
+
+class FakeCtrlAp:
+    """Stub CtrlAp for Nrf52Loadable.erase_all wiring tests."""
+
+    def __init__(self):
+        self.erased = False
+        self.reset_history = []
+
+    async def erase_all(self, *, timeout=10.0):
+        self.erased = True
+
+    async def release_reset(self):
+        self.reset_history.append("release_reset")
+
+
+class TestNrf52LoadableEraseAll:
+    @pytest.mark.asyncio
+    async def test_uses_ctrl_ap_when_available(self):
+        from acrobe.target.debuggable import Core, Debuggable
+
+        class RecordingCore(Core):
+            def __init__(self):
+                Core.__init__(self, "core")
+                self.history = []
+
+            async def halt(self):
+                self.history.append("halt")
+
+            async def reset(self, *, stop=True):
+                self.history.append(f"reset(stop={stop})")
+
+        ctrl_ap = FakeCtrlAp()
+        loadable = Nrf52Loadable("main", ctrl_ap=ctrl_ap)
+        target = Target("nRF52840")
+        target.child_add(loadable)
+        debug = Debuggable("debug")
+        core = RecordingCore()
+        debug.child_add(core)
+        target.child_add(debug)
+
+        ap = MockAp()
+        loadable.child_add(
+            NvmcFlash("code", 0, 0x1000, ap, page_size=0x1000))
+
+        await loadable.erase_all()
+
+        # CTRL-AP did the heavy lifting; per-page NVMC erase did NOT
+        # run (no ERASEPAGE writes).
+        assert ctrl_ap.erased
+        assert ap.erased_pages == []
+        # Reset was cycled.
+        assert "release_reset" in ctrl_ap.reset_history
+        assert "reset(stop=True)" in core.history
+        # All flashes marked blank.
+        for f in loadable.children_of_class(NvmcFlash):
+            assert f.is_blank
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_nvmc_when_no_ctrl_ap(self):
+        ap = MockAp()
+        loadable = Nrf52Loadable("main", ctrl_ap=None)
+        target = Target("nRF52840")
+        target.child_add(loadable)
+        loadable.child_add(
+            NvmcFlash("code", 0, 0x2000, ap, page_size=0x1000))
+        await loadable.erase_all()
+        # Two pages erased through NVMC.
+        assert ap.erased_pages == [0, 0x1000]
 
 
 class TestEndToEnd:
