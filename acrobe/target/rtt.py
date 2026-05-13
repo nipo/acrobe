@@ -58,6 +58,7 @@ class Rtt(SerialPort):
 
     DEFAULT_POLL_MS = 20
     SCAN_CHUNK = 4096
+    RESCAN_INTERVAL = 1.0   # seconds between scan retries when not yet found
 
     def __init__(self, ram: Ram):
         super().__init__("rtt")
@@ -68,7 +69,8 @@ class Rtt(SerialPort):
         self.cb_addr: int | None = None
         self.poll_period = self.DEFAULT_POLL_MS / 1000
 
-        # Resolved at start():
+        # Resolved when the control block is first found (may happen
+        # immediately in start() or later via the background rescan).
         self.__up_buf_addr = 0
         self.__up_buf_size = 0
         self.__up_buf_rdoff = 0
@@ -81,6 +83,7 @@ class Rtt(SerialPort):
 
         self.__rx_queue: bytearray = bytearray()
         self.__rx_wakeup = asyncio.Event()
+        self.__ready = asyncio.Event()
         self.__pump_task: asyncio.Task | None = None
 
     # -- Option / lifecycle -----------------------------------------
@@ -101,10 +104,23 @@ class Rtt(SerialPort):
         super().option_set(key, value)
 
     async def start(self):
-        if self.cb_addr is None:
-            self.cb_addr = await self.__scan()
-        await self.__resolve_descriptors()
-        self.__pump_task = asyncio.create_task(self.__pump_up())
+        """Start the pump task. The task handles three phases:
+
+        1. Find the control block — either honour an explicit
+           `address=` option, or scan the parent Ram. If the scan
+           fails, retry every RESCAN_INTERVAL seconds rather than
+           failing the start. This is the case where the firmware
+           hasn't run yet, or hasn't called `SEGGER_RTT_Init`.
+
+        2. Resolve descriptors — read header + UP / DOWN buffer
+           descriptors, cache the offsets, signal `__ready`.
+
+        3. Poll loop — pull bytes from UP into the local read queue.
+
+        Means `serial-server` can attach before the firmware is
+        ready; the TCP socket stays open and bytes start flowing
+        once RTT initialises."""
+        self.__pump_task = asyncio.create_task(self.__main_loop())
 
     async def stop(self):
         if self.__pump_task is not None:
@@ -130,9 +146,14 @@ class Rtt(SerialPort):
 
     async def write(self, data: bytes) -> None:
         """Push `data` into the DOWN ring buffer. Blocks while the
-        buffer is full (polls the target RdOff between attempts)."""
+        buffer is full (polls the target RdOff between attempts).
+
+        Also blocks until the control block has been found — for
+        firmware that hasn't initialised RTT yet, writes pile up
+        client-side rather than disappearing."""
         if not data:
             return
+        await self.__ready.wait()
         remaining = bytes(data)
         while remaining:
             free = await self.__down_free_space()
@@ -247,18 +268,36 @@ class Rtt(SerialPort):
             self.up_channel, u_size, u_buf,
             self.down_channel, d_size, d_buf)
 
-    # -- UP pump ----------------------------------------------------
+    # -- Pump main loop ----------------------------------------------
 
-    async def __pump_up(self):
+    async def __main_loop(self):
         try:
+            await self.__wait_for_cb()
+            await self.__resolve_descriptors()
+            self.__ready.set()
             while True:
                 await self.__drain_up_once()
                 await asyncio.sleep(self.poll_period)
         except asyncio.CancelledError:
             raise
         except Exception:
-            self.logger.exception("RTT UP pump crashed")
+            self.logger.exception("RTT pump crashed")
             raise
+
+    async def __wait_for_cb(self):
+        """Locate the control block; retry-scan until it appears."""
+        if self.cb_addr is not None:
+            return
+        while True:
+            try:
+                self.cb_addr = await self.__scan()
+                return
+            except RttError as exc:
+                self.logger.info(
+                    "%s — retrying in %.1f s "
+                    "(firmware may not have called SEGGER_RTT_Init yet)",
+                    exc, self.RESCAN_INTERVAL)
+                await asyncio.sleep(self.RESCAN_INTERVAL)
 
     async def __drain_up_once(self):
         # Target writes WrOff at descriptor offset 12.

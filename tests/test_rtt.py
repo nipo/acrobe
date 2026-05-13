@@ -119,6 +119,36 @@ class TestScan:
         _stage_control_block(bus, cb_addr=0x20000400)
         rtt, _ = _make_rtt(bus)
         await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
+        assert rtt.cb_addr == 0x20000400
+        await rtt.stop()
+
+    @pytest.mark.asyncio
+    async def test_finds_magic_at_low_offset(self):
+        """Real-world: SEGGER tends to land the control block early
+        in SRAM (e.g. 0x20000080 on nRF52). Verify low-offset hit."""
+        bus = MockBus()
+        _stage_control_block(bus, cb_addr=0x20000080)
+        rtt, _ = _make_rtt(bus)
+        await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
+        assert rtt.cb_addr == 0x20000080
+        await rtt.stop()
+
+    @pytest.mark.asyncio
+    async def test_rescan_until_magic_appears(self):
+        """If the firmware hasn't called SEGGER_RTT_Init yet, the
+        scan retries until it does."""
+        bus = MockBus()
+        rtt, _ = _make_rtt(bus)
+        rtt.RESCAN_INTERVAL = 0.05  # speed up the test
+        await rtt.start()
+        # First couple of poll rounds: nothing.
+        await asyncio.sleep(0.1)
+        assert not rtt._Rtt__ready.is_set()
+        # Now "firmware" initialises RTT.
+        _stage_control_block(bus, cb_addr=0x20000400)
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
         assert rtt.cb_addr == 0x20000400
         await rtt.stop()
 
@@ -128,17 +158,22 @@ class TestScan:
         _stage_control_block(bus, cb_addr=0x20001000)
         rtt, _ = _make_rtt(bus, cb_addr=0x20001000)
         await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
         assert rtt.cb_addr == 0x20001000
         await rtt.stop()
 
     @pytest.mark.asyncio
     async def test_magic_at_odd_alignment_is_ignored(self):
         bus = MockBus()
-        # Plant the magic at a non-4B aligned offset; scan must miss.
+        # Plant the magic at a non-4B aligned offset; scan must miss
+        # and keep retrying without setting ready.
         bus.memory[0x402:0x402 + len(RTT_MAGIC)] = RTT_MAGIC
         rtt, _ = _make_rtt(bus)
-        with pytest.raises(RttError):
-            await rtt.start()
+        rtt.RESCAN_INTERVAL = 0.05
+        await rtt.start()
+        await asyncio.sleep(0.2)
+        assert not rtt._Rtt__ready.is_set()
+        await rtt.stop()
 
     @pytest.mark.asyncio
     async def test_crossing_chunk_boundary(self):
@@ -150,6 +185,7 @@ class TestScan:
         _stage_control_block(bus, cb_addr=addr)
         rtt, _ = _make_rtt(bus)
         await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
         assert rtt.cb_addr == addr
         await rtt.stop()
 
@@ -165,6 +201,7 @@ class TestResolve:
             up_buf_size=128, down_buf_size=256)
         rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
         await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
         assert rtt._Rtt__up_buf_size == 128
         assert rtt._Rtt__up_buf_addr == ud["up_buf_addr"]
         assert rtt._Rtt__down_buf_size == 256
@@ -177,8 +214,11 @@ class TestResolve:
         _stage_control_block(bus, cb_addr=0x20000400, max_up=1)
         rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
         rtt.up_channel = 5
+        await rtt.start()
+        # Pump task fails on the bad channel; the failure surfaces
+        # when we await it.
         with pytest.raises(RttError):
-            await rtt.start()
+            await rtt._Rtt__pump_task
 
 
 # -- UP pump --------------------------------------------------------
@@ -191,6 +231,7 @@ class TestUpPump:
         rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
         rtt.poll_period = 0.005  # quick polling for the test
         await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
 
         # Target writes "hello"
         _wr_target_up(bus, ud, 0, b"hello")
@@ -211,6 +252,7 @@ class TestUpPump:
         rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
         rtt.poll_period = 0.005
         await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
 
         # Manually set RdOff to 6 (so available window wraps).
         bus.memory[ud["up_desc_addr"] - bus.base + 16:
@@ -239,6 +281,7 @@ class TestDownWrite:
         rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
         rtt.poll_period = 0.005
         await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
         await rtt.write(b"hello")
         # Bytes landed in the DOWN ring.
         buf_off = ud["down_buf_addr"] - bus.base
@@ -256,6 +299,7 @@ class TestDownWrite:
         rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
         rtt.poll_period = 0.005
         await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
 
         # Position WrOff at 7 (last slot) by faking that the target
         # consumed 7 bytes; RdOff = 7 so free_space = 7.
