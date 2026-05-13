@@ -369,6 +369,78 @@ class TestRevalidate:
         await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
         await rtt.stop()
 
+    @pytest.mark.asyncio
+    async def test_target_reset_in_place_triggers_reestablish(self):
+        """`monitor reset; continue` leaves the magic alone but
+        snaps WrOff/RdOff back to zero. The bare WrOff poll can't
+        tell that from a normal advance — the full-descriptor
+        check should catch it via RdOff drift."""
+        bus = MockBus()
+        ud = _stage_control_block(bus, cb_addr=0x20000400, up_buf_size=64)
+        rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
+        rtt.poll_period = 0.005
+        rtt.REVALIDATE_INTERVAL = 0.05
+        rtt.RESCAN_INTERVAL = 0.05
+        await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
+
+        # Drain some bytes so our cached RdOff is non-zero.
+        _wr_target_up(bus, ud, 0, b"before-reset")
+        data = await asyncio.wait_for(rtt.read(len(b"before-reset")),
+                                       timeout=1)
+        assert data == b"before-reset"
+        assert rtt._Rtt__up_buf_rdoff == len(b"before-reset")
+
+        # Simulate target reset: WrOff and RdOff snap back to 0,
+        # magic and the rest of the descriptor unchanged.
+        desc_off = ud["up_desc_addr"] - bus.base
+        bus.memory[desc_off + 12:desc_off + 16] = struct.pack("<I", 0)
+        bus.memory[desc_off + 16:desc_off + 20] = struct.pack("<I", 0)
+
+        # Pump must notice and re-establish (RdOff drift).
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if not rtt._Rtt__ready.is_set():
+                break
+        # The re-establish loop will quickly re-resolve descriptors
+        # — verify the pump came back ready and cached fresh state.
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
+        assert rtt._Rtt__up_buf_rdoff == 0
+
+        # Fresh post-reset traffic should flow through.
+        _wr_target_up(bus, ud, 0, b"after")
+        data = await asyncio.wait_for(rtt.read(5), timeout=1)
+        assert data == b"after"
+        await rtt.stop()
+
+    @pytest.mark.asyncio
+    async def test_down_descriptor_drift_triggers_reestablish(self):
+        """If the target also reset the DOWN descriptor (WrOff
+        moved without us writing), the revalidate-cadence DOWN
+        check must catch it."""
+        bus = MockBus()
+        ud = _stage_control_block(bus, cb_addr=0x20000400)
+        rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
+        rtt.poll_period = 0.01
+        rtt.REVALIDATE_INTERVAL = 0.02
+        rtt.RESCAN_INTERVAL = 0.05
+        await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
+
+        # Stomp DOWN WrOff to a value we didn't write — only host
+        # is supposed to touch WrOff on the DOWN buffer.
+        down_desc_off = ud["down_desc_addr"] - bus.base
+        bus.memory[down_desc_off + 12:down_desc_off + 16] = struct.pack(
+            "<I", 42)
+
+        for _ in range(30):
+            await asyncio.sleep(0.02)
+            if not rtt._Rtt__ready.is_set():
+                break
+        # After the drift, the pump should have re-established.
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
+        await rtt.stop()
+
 
 class TestUpPump:
     @pytest.mark.asyncio

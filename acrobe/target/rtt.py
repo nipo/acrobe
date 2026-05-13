@@ -93,12 +93,16 @@ class Rtt(SerialPort):
         self.__up_buf_addr = 0
         self.__up_buf_size = 0
         self.__up_buf_rdoff = 0
+        self.__up_desc_addr = 0
         self.__up_desc_rdoff_addr = 0
+        self.__up_ref: tuple[int, int, int, int] | None = None
         self.__down_buf_addr = 0
         self.__down_buf_size = 0
         self.__down_buf_wroff = 0
+        self.__down_desc_addr = 0
         self.__down_desc_rdoff_addr = 0
         self.__down_desc_wroff_addr = 0
+        self.__down_ref: tuple[int, int, int, int] | None = None
 
         self.__rx_queue: bytearray = bytearray()
         self.__rx_wakeup = asyncio.Event()
@@ -297,24 +301,28 @@ class Rtt(SerialPort):
                 f"(target advertises {max_down} DOWN buffers)")
 
         sides = []
+        u_name = u_flags = 0
         if max_up > 0:
             up_desc_addr = (self.cb_addr + RTT_HEADER_LEN
                             + self.up_channel * RTT_BUFFER_DESC_LEN)
             up = await self.ram.bus.mem_read(
                 up_desc_addr, RTT_BUFFER_DESC_LEN)
-            _u_name, u_buf, u_size, u_wr, u_rd, _ = struct.unpack("<6I", up)
+            u_name, u_buf, u_size, u_wr, u_rd, u_flags = struct.unpack(
+                "<6I", up)
             sides.append(("UP", up_desc_addr, u_buf, u_size, u_wr, u_rd))
         else:
             up_desc_addr = None
             u_buf = u_size = u_wr = u_rd = 0
 
+        d_name = d_flags = 0
         if max_down > 0:
             down_desc_addr = (self.cb_addr + RTT_HEADER_LEN
                               + max_up * RTT_BUFFER_DESC_LEN
                               + self.down_channel * RTT_BUFFER_DESC_LEN)
             down = await self.ram.bus.mem_read(
                 down_desc_addr, RTT_BUFFER_DESC_LEN)
-            _d_name, d_buf, d_size, d_wr, d_rd, _ = struct.unpack("<6I", down)
+            d_name, d_buf, d_size, d_wr, d_rd, d_flags = struct.unpack(
+                "<6I", down)
             sides.append(("DOWN", down_desc_addr, d_buf, d_size, d_wr, d_rd))
         else:
             down_desc_addr = None
@@ -341,17 +349,29 @@ class Rtt(SerialPort):
         self.__up_buf_addr = u_buf
         self.__up_buf_size = u_size
         self.__up_buf_rdoff = u_rd
+        self.__up_desc_addr = up_desc_addr or 0
         # RdOff sits at offset 16 in the descriptor.
         self.__up_desc_rdoff_addr = (
             up_desc_addr + 16 if up_desc_addr is not None else 0)
+        # Snapshot of the fields that the target should not touch
+        # after init. Any drift here while the pump is running
+        # means the firmware was reset and SEGGER_RTT_Init ran
+        # again — invalidate and re-establish.
+        self.__up_ref = (
+            (u_name, u_buf, u_size, u_flags) if up_desc_addr is not None
+            else None)
 
         self.__down_buf_addr = d_buf
         self.__down_buf_size = d_size
         self.__down_buf_wroff = d_wr
+        self.__down_desc_addr = down_desc_addr or 0
         self.__down_desc_wroff_addr = (
             down_desc_addr + 12 if down_desc_addr is not None else 0)
         self.__down_desc_rdoff_addr = (
             down_desc_addr + 16 if down_desc_addr is not None else 0)
+        self.__down_ref = (
+            (d_name, d_buf, d_size, d_flags) if down_desc_addr is not None
+            else None)
 
         up_info = (f"UP[{self.up_channel}]: {u_size}-byte @ 0x{u_buf:08x}"
                    if max_up > 0 else "UP: absent")
@@ -369,6 +389,29 @@ class Rtt(SerialPort):
             raise RttError(
                 f"control block at 0x{self.cb_addr:08x} no longer "
                 f"holds the SEGGER magic — firmware likely reloaded")
+
+    async def __check_down_descriptor(self):
+        """Periodic DOWN-descriptor drift check. Mirrors the UP
+        check but folded into the revalidate cadence — write()
+        traffic is typically sparse, so we can't rely on it for
+        timely reset detection."""
+        if self.__down_ref is None:
+            return
+        desc = await self.ram.bus.mem_read(
+            self.__down_desc_addr, RTT_BUFFER_DESC_LEN)
+        name, buf, size, wroff, rdoff, flags = struct.unpack("<6I", desc)
+        if (name, buf, size, flags) != self.__down_ref:
+            raise RttError(
+                f"DOWN descriptor fixed fields drifted "
+                f"(ref={self.__down_ref}, now=({name}, {buf}, "
+                f"{size}, {flags})) — firmware likely reset")
+        if wroff != self.__down_buf_wroff:
+            raise RttError(
+                f"DOWN WrOff moved by target ({wroff} != cached "
+                f"{self.__down_buf_wroff}) — firmware likely reset")
+        if rdoff >= size:
+            raise RttError(
+                f"DOWN RdOff={rdoff} >= size {size} — corrupted")
 
     # -- Pump main loop ----------------------------------------------
 
@@ -389,12 +432,22 @@ class Rtt(SerialPort):
                 await self.__establish_cb()
                 self.__ready.set()
                 last_revalidate = asyncio.get_event_loop().time()
-                while True:
+                invalidated = False
+                while not invalidated:
                     if self.__up_buf_size > 0:
                         try:
                             await self.__drain_up_once()
                         except asyncio.CancelledError:
                             raise
+                        except RttError as exc:
+                            # Descriptor drift — target was reset
+                            # underneath us. Re-establish so we
+                            # pick up the fresh state.
+                            self.logger.info(
+                                "RTT UP invalidated: %s — "
+                                "re-establishing", exc)
+                            invalidated = True
+                            continue
                         except Exception as exc:
                             # Transient bus errors do happen — log
                             # and retry next tick.
@@ -406,16 +459,19 @@ class Rtt(SerialPort):
                     if now - last_revalidate >= self.REVALIDATE_INTERVAL:
                         try:
                             await self.__check_magic()
+                            await self.__check_down_descriptor()
                             last_revalidate = now
                         except RttError as exc:
                             self.logger.info(
                                 "RTT control block invalidated: %s — "
                                 "re-establishing", exc)
-                            self.__ready.clear()
-                            self.cb_addr = self.__fixed_cb_addr
-                            break  # back to ESTABLISH
+                            invalidated = True
+                            continue
 
                     await asyncio.sleep(self.poll_period)
+
+                self.__ready.clear()
+                self.cb_addr = self.__fixed_cb_addr
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -452,13 +508,28 @@ class Rtt(SerialPort):
                 await asyncio.sleep(self.RESCAN_INTERVAL)
 
     async def __drain_up_once(self):
-        # Target writes WrOff at descriptor offset 12.
-        wroff_bytes = await self.ram.bus.mem_read(
-            self.__up_desc_rdoff_addr - 4, 4)
-        wroff = struct.unpack("<I", wroff_bytes)[0]
+        # Read the whole UP descriptor — not just WrOff. That way
+        # we detect a firmware reset that re-ran SEGGER_RTT_Init
+        # in place: the magic stays valid but RdOff/WrOff/buffer
+        # fields snap back to their init values. A bare WrOff
+        # poll can't tell that apart from a normal write.
+        desc = await self.ram.bus.mem_read(
+            self.__up_desc_addr, RTT_BUFFER_DESC_LEN)
+        name, buf, size, wroff, rdoff, flags = struct.unpack("<6I", desc)
+        if (name, buf, size, flags) != self.__up_ref:
+            raise RttError(
+                f"UP descriptor fixed fields drifted "
+                f"(ref={self.__up_ref}, now=({name}, {buf}, "
+                f"{size}, {flags})) — firmware likely reset")
+        if rdoff != self.__up_buf_rdoff:
+            raise RttError(
+                f"UP RdOff moved by target ({rdoff} != cached "
+                f"{self.__up_buf_rdoff}) — firmware likely reset")
+        if wroff >= size:
+            raise RttError(
+                f"UP WrOff={wroff} >= size {size} — corrupted")
         if wroff == self.__up_buf_rdoff:
             return
-        size = self.__up_buf_size
         rd = self.__up_buf_rdoff
         if wroff > rd:
             data = await self.ram.bus.mem_read(
