@@ -225,7 +225,11 @@ class Responder:
             return message.error(1)
         if size == 0:
             return b""
-        data = await self.debuggable.mem_read(addr, size)
+        try:
+            data = await self.debuggable.mem_read(addr, size)
+        except Exception as exc:
+            self.__log_mem_failure("read", addr, size, exc)
+            return message.error(1)
         return data.hex().encode("ascii")
 
     async def handle_M(self, payload: bytes) -> bytes:
@@ -237,7 +241,11 @@ class Responder:
             data = binascii.a2b_hex(payload[colon + 1:])
         except (ValueError, binascii.Error):
             return message.error(1)
-        await self.debuggable.mem_write(addr, data)
+        try:
+            await self.debuggable.mem_write(addr, data)
+        except Exception as exc:
+            self.__log_mem_failure("write", addr, len(data), exc)
+            return message.error(1)
         return message.ok()
 
     async def handle_X(self, payload: bytes) -> bytes:
@@ -251,9 +259,24 @@ class Responder:
         except ValueError:
             return message.error(1)
         data = bytes(payload[colon + 1:])
-        if data:
+        if not data:
+            return message.ok()
+        try:
             await self.debuggable.mem_write(addr, data)
+        except Exception as exc:
+            self.__log_mem_failure("write", addr, len(data), exc)
+            return message.error(1)
         return message.ok()
+
+    def __log_mem_failure(self, op: str, addr: int, size: int, exc):
+        """Surface a memory access failure at debug level. GDB sees
+        the E01 reply and reports "Cannot access memory"; the log
+        line is for the acrobe operator. Stays out of the protocol
+        stream — only emitted when -vvv or above."""
+        logger = getattr(self.debuggable, "logger", None)
+        if logger is not None:
+            logger.debug("mem_%s 0x%x +%d failed: %s: %s",
+                         op, addr, size, type(exc).__name__, exc)
 
     async def handle_c(self, payload: bytes) -> bytes:
         await self.current_core.resume()

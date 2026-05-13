@@ -25,6 +25,7 @@ from ...db import NoMatch
 from ..debuggable import (
     Core, CoreState, Debuggable, HaltCause, Register, RegisterType,
 )
+from ..region import Ram
 from ..target import Target
 
 
@@ -297,6 +298,11 @@ class CortexMDebuggable(Debuggable):
     def __init__(self, mem_ap, name: str = "debug"):
         super().__init__(name)
         self.mem_ap = mem_ap
+        # ARM-defined private peripheral bus (PPB) — SCS, DWT, FPB,
+        # ITM, TPIU, ETM, vendor extensions. Always at 0xE0000000,
+        # 1 MiB span. Declared so GDB's memory-map clamping doesn't
+        # block `x/...` of debug peripherals.
+        self.memory_map.append(Ram("ppb", 0xE0000000, 0x100000))
 
     @classmethod
     def from_romtable(cls, rom_table, mem_ap, *, name: str = "debug"):

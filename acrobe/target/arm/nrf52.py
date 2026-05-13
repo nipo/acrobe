@@ -340,10 +340,20 @@ async def _build_nrf52_target(dp, ap, part, ctrl_ap):
         target.claim(ctrl_ap)
 
     debug = CortexMDebuggable.from_romtable(rt, ap)
-    # Tell GDB the chip's RAM range is accessible — without this the
-    # client's memory-map clamping rejects `x/...` of any 0x2000_xxxx
-    # address before even sending an `m` packet.
+    # Tell GDB which ranges are accessible — without these, its
+    # memory-map clamping rejects `x/...` of any address outside the
+    # declared map before even sending an `m` packet.
+    #
+    # The Cortex-M PPB (0xE0000000) is already in `memory_map` by
+    # default. We add the nRF52-specific ranges:
+    #   FICR @ 0x10000000 (4 KiB)       — factory info, read-only
+    #   SRAM @ 0x20000000 (ram_kb KiB)  — main RAM
+    #   APB peripherals @ 0x40000000-0x40080000
+    #   AHB peripherals @ 0x50000000-0x50080000
+    debug.memory_map.append(Ram("ficr", 0x10000000, 0x1000))
     debug.memory_map.append(Ram("sram", 0x20000000, ram_kb * 1024))
+    debug.memory_map.append(Ram("apb",  0x40000000, 0x80000))
+    debug.memory_map.append(Ram("ahb",  0x50000000, 0x80000))
     target.child_add(debug)
 
     loadable = Nrf52Loadable("main", ctrl_ap=ctrl_ap)

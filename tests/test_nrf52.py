@@ -266,9 +266,10 @@ class TestNrf52Probe:
         assert code.write_page_size == 0x1000
 
     @pytest.mark.asyncio
-    async def test_ram_in_debuggable_memory_map(self):
-        """GDB needs the SRAM range advertised in qXfer:memory-map
-        or it refuses to send `m` for any 0x2000_xxxx address."""
+    async def test_memory_map_covers_ram_ficr_peripherals_ppb(self):
+        """GDB needs every range we want the user to inspect declared
+        in qXfer:memory-map, otherwise its memory-map clamping rejects
+        out-of-region reads before sending an `m` packet."""
         from acrobe.target.region import Ram
 
         dp = FakeDp()
@@ -277,10 +278,13 @@ class TestNrf52Probe:
         _make_rom_table_with_scs(ap)
         target = await nrf52_probe(dp)
         debug = target.children_of_class(CortexMDebuggable)[0]
-        rams = [r for r in debug.memory_map if isinstance(r, Ram)]
-        assert len(rams) == 1
-        assert rams[0].address == 0x20000000
-        assert rams[0].size == 256 * 1024  # nRF52840: 256 KiB
+        ranges = {r.name: (r.address, r.size)
+                  for r in debug.memory_map if isinstance(r, Ram)}
+        assert ranges["ppb"]  == (0xE0000000, 0x100000)  # from CortexM default
+        assert ranges["sram"] == (0x20000000, 256 * 1024)
+        assert ranges["ficr"] == (0x10000000, 0x1000)
+        assert ranges["apb"]  == (0x40000000, 0x80000)
+        assert ranges["ahb"]  == (0x50000000, 0x80000)
 
     @pytest.mark.asyncio
     async def test_unknown_part_declines(self):
