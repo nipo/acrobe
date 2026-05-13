@@ -155,7 +155,11 @@ class Rtt(SerialPort):
 
     async def read(self, size: int) -> bytes:
         """Return up to `size` bytes from the UP channel. Blocks
-        until at least one byte is available."""
+        until at least one byte is available. Raises RttError if
+        the target advertises no UP buffer (MaxNumUpBuffers == 0)."""
+        await self.__ready.wait()
+        if self.__up_buf_size == 0:
+            raise RttError("target has no UP buffer (MaxNumUpBuffers=0)")
         while not self.__rx_queue:
             self.__rx_wakeup.clear()
             await self.__rx_wakeup.wait()
@@ -170,10 +174,15 @@ class Rtt(SerialPort):
 
         Also blocks until the control block has been found — for
         firmware that hasn't initialised RTT yet, writes pile up
-        client-side rather than disappearing."""
+        client-side rather than disappearing.
+
+        Raises RttError if the target advertises no DOWN buffer
+        (MaxNumDownBuffers == 0)."""
         if not data:
             return
         await self.__ready.wait()
+        if self.__down_buf_size == 0:
+            raise RttError("target has no DOWN buffer (MaxNumDownBuffers=0)")
         remaining = bytes(data)
         while remaining:
             free = await self.__down_free_space()
@@ -263,37 +272,55 @@ class Rtt(SerialPort):
                 f"mismatch (read: {bytes(header[:RTT_MAGIC_LEN]).hex()})")
         max_up, max_down = struct.unpack(
             "<II", header[RTT_MAGIC_LEN:RTT_HEADER_LEN])
-        if not (0 < max_up <= RTT_MAX_BUFFERS):
+        # MaxNum*Buffers == 0 is legal: firmware that only logs has
+        # no DOWN channel; firmware that only takes commands has no
+        # UP. Refuse only nonsense (negative not possible since
+        # unsigned, just cap upper bound).
+        if max_up > RTT_MAX_BUFFERS:
             raise RttError(
                 f"MaxNumUpBuffers={max_up} out of sanity range "
-                f"(1..{RTT_MAX_BUFFERS})")
-        if not (0 < max_down <= RTT_MAX_BUFFERS):
+                f"(0..{RTT_MAX_BUFFERS})")
+        if max_down > RTT_MAX_BUFFERS:
             raise RttError(
                 f"MaxNumDownBuffers={max_down} out of sanity range "
-                f"(1..{RTT_MAX_BUFFERS})")
-        if not (0 <= self.up_channel < max_up):
+                f"(0..{RTT_MAX_BUFFERS})")
+        # A requested channel must exist. Defaulted-to-0 against a
+        # max=0 side is accepted as "this direction is absent" —
+        # read()/write() will raise if used.
+        if max_up > 0 and not (0 <= self.up_channel < max_up):
             raise RttError(
                 f"UP channel {self.up_channel} out of range "
                 f"(target advertises {max_up} UP buffers)")
-        if not (0 <= self.down_channel < max_down):
+        if max_down > 0 and not (0 <= self.down_channel < max_down):
             raise RttError(
                 f"DOWN channel {self.down_channel} out of range "
                 f"(target advertises {max_down} DOWN buffers)")
 
-        up_desc_addr = (self.cb_addr + RTT_HEADER_LEN
-                        + self.up_channel * RTT_BUFFER_DESC_LEN)
-        down_desc_addr = (self.cb_addr + RTT_HEADER_LEN
-                          + max_up * RTT_BUFFER_DESC_LEN
-                          + self.down_channel * RTT_BUFFER_DESC_LEN)
+        sides = []
+        if max_up > 0:
+            up_desc_addr = (self.cb_addr + RTT_HEADER_LEN
+                            + self.up_channel * RTT_BUFFER_DESC_LEN)
+            up = await self.ram.bus.mem_read(
+                up_desc_addr, RTT_BUFFER_DESC_LEN)
+            _u_name, u_buf, u_size, u_wr, u_rd, _ = struct.unpack("<6I", up)
+            sides.append(("UP", up_desc_addr, u_buf, u_size, u_wr, u_rd))
+        else:
+            up_desc_addr = None
+            u_buf = u_size = u_wr = u_rd = 0
 
-        up = await self.ram.bus.mem_read(up_desc_addr, RTT_BUFFER_DESC_LEN)
-        down = await self.ram.bus.mem_read(down_desc_addr, RTT_BUFFER_DESC_LEN)
-        _u_name, u_buf, u_size, u_wr, u_rd, _ = struct.unpack("<6I", up)
-        _d_name, d_buf, d_size, d_wr, d_rd, _ = struct.unpack("<6I", down)
+        if max_down > 0:
+            down_desc_addr = (self.cb_addr + RTT_HEADER_LEN
+                              + max_up * RTT_BUFFER_DESC_LEN
+                              + self.down_channel * RTT_BUFFER_DESC_LEN)
+            down = await self.ram.bus.mem_read(
+                down_desc_addr, RTT_BUFFER_DESC_LEN)
+            _d_name, d_buf, d_size, d_wr, d_rd, _ = struct.unpack("<6I", down)
+            sides.append(("DOWN", down_desc_addr, d_buf, d_size, d_wr, d_rd))
+        else:
+            down_desc_addr = None
+            d_buf = d_size = d_wr = d_rd = 0
 
-        for label, buf, size, wr, rd in [
-                ("UP", u_buf, u_size, u_wr, u_rd),
-                ("DOWN", d_buf, d_size, d_wr, d_rd)]:
+        for label, _desc, buf, size, wr, rd in sides:
             if not (0 < size <= RTT_MAX_BUFFER_SIZE):
                 raise RttError(
                     f"{label} buffer size {size} out of sanity range "
@@ -315,18 +342,23 @@ class Rtt(SerialPort):
         self.__up_buf_size = u_size
         self.__up_buf_rdoff = u_rd
         # RdOff sits at offset 16 in the descriptor.
-        self.__up_desc_rdoff_addr = up_desc_addr + 16
+        self.__up_desc_rdoff_addr = (
+            up_desc_addr + 16 if up_desc_addr is not None else 0)
 
         self.__down_buf_addr = d_buf
         self.__down_buf_size = d_size
         self.__down_buf_wroff = d_wr
-        self.__down_desc_wroff_addr = down_desc_addr + 12
-        self.__down_desc_rdoff_addr = down_desc_addr + 16
+        self.__down_desc_wroff_addr = (
+            down_desc_addr + 12 if down_desc_addr is not None else 0)
+        self.__down_desc_rdoff_addr = (
+            down_desc_addr + 16 if down_desc_addr is not None else 0)
 
-        self.logger.info(
-            "UP[%d]: %d-byte buffer @ 0x%08x; DOWN[%d]: %d-byte @ 0x%08x",
-            self.up_channel, u_size, u_buf,
-            self.down_channel, d_size, d_buf)
+        up_info = (f"UP[{self.up_channel}]: {u_size}-byte @ 0x{u_buf:08x}"
+                   if max_up > 0 else "UP: absent")
+        down_info = (
+            f"DOWN[{self.down_channel}]: {d_size}-byte @ 0x{d_buf:08x}"
+            if max_down > 0 else "DOWN: absent")
+        self.logger.info("%s; %s", up_info, down_info)
 
     async def __check_magic(self):
         """Cheap recheck: is the 16-byte magic still there? If the
@@ -358,16 +390,17 @@ class Rtt(SerialPort):
                 self.__ready.set()
                 last_revalidate = asyncio.get_event_loop().time()
                 while True:
-                    try:
-                        await self.__drain_up_once()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
-                        # Transient bus errors do happen — log
-                        # and retry next tick.
-                        self.logger.debug(
-                            "RTT UP-poll dropped: %s: %s",
-                            type(exc).__name__, exc)
+                    if self.__up_buf_size > 0:
+                        try:
+                            await self.__drain_up_once()
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            # Transient bus errors do happen — log
+                            # and retry next tick.
+                            self.logger.debug(
+                                "RTT UP-poll dropped: %s: %s",
+                                type(exc).__name__, exc)
 
                     now = asyncio.get_event_loop().time()
                     if now - last_revalidate >= self.REVALIDATE_INTERVAL:

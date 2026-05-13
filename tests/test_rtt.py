@@ -59,7 +59,9 @@ class MockBus:
 def _stage_control_block(bus, *, cb_addr, max_up=1, max_down=1,
                           up_buf_addr=None, up_buf_size=64,
                           down_buf_addr=None, down_buf_size=64):
-    """Write a minimal RTT control block + buffers into the mock RAM."""
+    """Write a minimal RTT control block + buffers into the mock RAM.
+
+    Channels with max=0 are header-only — no descriptor written."""
     if up_buf_addr is None:
         up_buf_addr = cb_addr + 0x100
     if down_buf_addr is None:
@@ -70,20 +72,21 @@ def _stage_control_block(bus, *, cb_addr, max_up=1, max_down=1,
     bus.memory[cb_off:cb_off + 16] = RTT_MAGIC
     bus.memory[cb_off + 16:cb_off + 20] = struct.pack("<I", max_up)
     bus.memory[cb_off + 20:cb_off + 24] = struct.pack("<I", max_down)
-    # UP[0] descriptor
-    up_off = cb_off + 24
-    bus.memory[up_off:up_off + 24] = struct.pack(
-        "<6I", 0, up_buf_addr, up_buf_size, 0, 0, 0)
-    # DOWN[0] descriptor
-    down_off = cb_off + 24 + max_up * 24
-    bus.memory[down_off:down_off + 24] = struct.pack(
-        "<6I", 0, down_buf_addr, down_buf_size, 0, 0, 0)
-    return {
+    info = {
         "up_buf_addr": up_buf_addr, "up_buf_size": up_buf_size,
         "down_buf_addr": down_buf_addr, "down_buf_size": down_buf_size,
-        "up_desc_addr": base + up_off,
-        "down_desc_addr": base + down_off,
     }
+    up_off = cb_off + 24
+    if max_up > 0:
+        bus.memory[up_off:up_off + 24] = struct.pack(
+            "<6I", 0, up_buf_addr, up_buf_size, 0, 0, 0)
+        info["up_desc_addr"] = base + up_off
+    down_off = cb_off + 24 + max_up * 24
+    if max_down > 0:
+        bus.memory[down_off:down_off + 24] = struct.pack(
+            "<6I", 0, down_buf_addr, down_buf_size, 0, 0, 0)
+        info["down_desc_addr"] = base + down_off
+    return info
 
 
 def _wr_target_up(bus, ud, wroff, payload):
@@ -206,6 +209,38 @@ class TestResolve:
         assert rtt._Rtt__up_buf_addr == ud["up_buf_addr"]
         assert rtt._Rtt__down_buf_size == 256
         assert rtt._Rtt__down_buf_addr == ud["down_buf_addr"]
+        await rtt.stop()
+
+    @pytest.mark.asyncio
+    async def test_no_down_channel_accepted(self):
+        """Firmware that only logs (MaxNumDownBuffers=0) must be
+        accepted — UP works, write() raises if used."""
+        bus = MockBus()
+        ud = _stage_control_block(
+            bus, cb_addr=0x20000400, max_up=1, max_down=0)
+        rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
+        await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
+        assert rtt._Rtt__up_buf_addr == ud["up_buf_addr"]
+        assert rtt._Rtt__down_buf_size == 0
+        with pytest.raises(RttError):
+            await rtt.write(b"hello")
+        await rtt.stop()
+
+    @pytest.mark.asyncio
+    async def test_no_up_channel_accepted(self):
+        """Symmetric: firmware that only takes commands
+        (MaxNumUpBuffers=0) — DOWN works, read() raises if used."""
+        bus = MockBus()
+        ud = _stage_control_block(
+            bus, cb_addr=0x20000400, max_up=0, max_down=1)
+        rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
+        await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
+        assert rtt._Rtt__down_buf_addr == ud["down_buf_addr"]
+        assert rtt._Rtt__up_buf_size == 0
+        with pytest.raises(RttError):
+            await rtt.read(8)
         await rtt.stop()
 
     @pytest.mark.asyncio
