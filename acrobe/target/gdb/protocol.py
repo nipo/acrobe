@@ -69,7 +69,14 @@ class Responder:
     """
 
     PACKET_SIZE = 4096
-    RUN_POLL_INTERVAL = 0.05
+    # How often to recheck DHCSR.S_HALT while waiting for the core
+    # to halt after a `c` or `s`. 50 ms hammered the DAP at 20
+    # reads/sec, visibly disruptive when GDB and other commands
+    # share the bus. 200 ms is invisible from a user's perspective
+    # (any breakpoint hit takes microseconds; the 200 ms delay
+    # between "core halts" and "GDB sees stop reply" doesn't
+    # matter) and 4× lighter on the bus.
+    RUN_POLL_INTERVAL = 0.2
 
     def __init__(self, debuggable, loadable=None, *, transport=None):
         self.debuggable = debuggable
@@ -503,11 +510,21 @@ class Responder:
         except NotImplementedError:
             return b"T00"
         if state == CoreState.RUN:
-            # Reached when the caller's wait_for_halt exit raced the
-            # core's actual S_HALT settle. Never return an empty
-            # packet — GDB rejects that as "Invalid remote reply".
-            # T05 with no extra info is "stopped, reason unknown".
-            return b"T05"
+            # Reached when wait_for_halt's exit raced the core's
+            # actual S_HALT settle, or the core is genuinely
+            # still running (e.g. stuck in a fault loop). Force
+            # halt and re-read so GDB sees a stable halted target
+            # rather than a `T05` that's a lie about state.
+            try:
+                await self.current_core.halt()
+                state = await self.current_core.state()
+            except NotImplementedError:
+                return b"T05"
+            if state == CoreState.RUN:
+                # Core wouldn't halt — chip in lockup or worse.
+                # Best we can do: report a SIGSEGV-flavoured stop
+                # so GDB doesn't keep spinning.
+                return b"T0b"
         try:
             cause = await self.current_core.halt_cause()
         except NotImplementedError:
