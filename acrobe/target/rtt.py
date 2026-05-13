@@ -69,11 +69,6 @@ class Rtt(SerialPort):
     DEFAULT_POLL_MS = 100
     SCAN_CHUNK = 4096
     RESCAN_INTERVAL = 1.0   # seconds between scan retries when not yet found
-    # Period between magic-still-present checks while the pump is
-    # running. Less aggressive than the buffer poll — its job is to
-    # detect a firmware reload (GDB-driven flash, hard reset, …)
-    # that wiped the previous control block.
-    REVALIDATE_INTERVAL = 1.0
 
     def __init__(self, ram: Ram):
         super().__init__("rtt")
@@ -380,25 +375,33 @@ class Rtt(SerialPort):
             if max_down > 0 else "DOWN: absent")
         self.logger.info("%s; %s", up_info, down_info)
 
-    async def __check_magic(self):
-        """Cheap recheck: is the 16-byte magic still there? If the
-        firmware was reloaded (GDB `load`, hardware reset) the old
-        control block is gone — we need to re-establish."""
-        magic = await self.ram.bus.mem_read(self.cb_addr, RTT_MAGIC_LEN)
+    def __validate_magic(self, magic: bytes):
         if bytes(magic) != RTT_MAGIC:
             raise RttError(
                 f"control block at 0x{self.cb_addr:08x} no longer "
                 f"holds the SEGGER magic — firmware likely reloaded")
 
-    async def __check_down_descriptor(self):
-        """Periodic DOWN-descriptor drift check. Mirrors the UP
-        check but folded into the revalidate cadence — write()
-        traffic is typically sparse, so we can't rely on it for
-        timely reset detection."""
-        if self.__down_ref is None:
-            return
-        desc = await self.ram.bus.mem_read(
-            self.__down_desc_addr, RTT_BUFFER_DESC_LEN)
+    def __validate_up_descriptor(self, desc: bytes) -> int:
+        """Parse + validate the 24-byte UP descriptor. Returns the
+        target's current WrOff so the caller can decide whether to
+        drain. Raises RttError on any drift the host shouldn't
+        have caused."""
+        name, buf, size, wroff, rdoff, flags = struct.unpack("<6I", desc)
+        if (name, buf, size, flags) != self.__up_ref:
+            raise RttError(
+                f"UP descriptor fixed fields drifted "
+                f"(ref={self.__up_ref}, now=({name}, {buf}, "
+                f"{size}, {flags})) — firmware likely reset")
+        if rdoff != self.__up_buf_rdoff:
+            raise RttError(
+                f"UP RdOff moved by target ({rdoff} != cached "
+                f"{self.__up_buf_rdoff}) — firmware likely reset")
+        if wroff >= size:
+            raise RttError(
+                f"UP WrOff={wroff} >= size {size} — corrupted")
+        return wroff
+
+    def __validate_down_descriptor(self, desc: bytes):
         name, buf, size, wroff, rdoff, flags = struct.unpack("<6I", desc)
         if (name, buf, size, flags) != self.__down_ref:
             raise RttError(
@@ -416,58 +419,39 @@ class Rtt(SerialPort):
     # -- Pump main loop ----------------------------------------------
 
     async def __main_loop(self):
-        """Three-state pump:
+        """Two-state pump:
 
         ESTABLISH — find a candidate cb_addr (scan or fixed),
             validate everything, cache descriptors. Loops on
             failure with RESCAN_INTERVAL sleeps.
-        READY → POLL — set the event; drain UP every poll_period.
-            Every REVALIDATE_INTERVAL also re-check that the
-            magic is still at cb_addr (cheap 16-byte read).
-        On revalidate failure, clear the event, reset cb_addr to
-        the user's fixed value (or None for scan), loop back to
-        ESTABLISH."""
+        POLL — set ready; run `__poll_cycle` every poll_period.
+            Each cycle batches magic + UP + DOWN descriptor reads
+            (and any pending UP buffer drain) so the Batcher can
+            flush them as one bus transaction. Any descriptor
+            drift raises RttError → clear ready, reset cb_addr,
+            back to ESTABLISH."""
         try:
             while True:
                 await self.__establish_cb()
                 self.__ready.set()
-                last_revalidate = asyncio.get_event_loop().time()
-                invalidated = False
-                while not invalidated:
-                    if self.__up_buf_size > 0:
-                        try:
-                            await self.__drain_up_once()
-                        except asyncio.CancelledError:
-                            raise
-                        except RttError as exc:
-                            # Descriptor drift — target was reset
-                            # underneath us. Re-establish so we
-                            # pick up the fresh state.
-                            self.logger.info(
-                                "RTT UP invalidated: %s — "
-                                "re-establishing", exc)
-                            invalidated = True
-                            continue
-                        except Exception as exc:
-                            # Transient bus errors do happen — log
-                            # and retry next tick.
-                            self.logger.debug(
-                                "RTT UP-poll dropped: %s: %s",
-                                type(exc).__name__, exc)
-
-                    now = asyncio.get_event_loop().time()
-                    if now - last_revalidate >= self.REVALIDATE_INTERVAL:
-                        try:
-                            await self.__check_magic()
-                            await self.__check_down_descriptor()
-                            last_revalidate = now
-                        except RttError as exc:
-                            self.logger.info(
-                                "RTT control block invalidated: %s — "
-                                "re-establishing", exc)
-                            invalidated = True
-                            continue
-
+                while True:
+                    try:
+                        await self.__poll_cycle()
+                    except asyncio.CancelledError:
+                        raise
+                    except RttError as exc:
+                        # Descriptor drift — target was reset
+                        # underneath us. Re-establish so we
+                        # pick up the fresh state.
+                        self.logger.info(
+                            "RTT invalidated: %s — re-establishing",
+                            exc)
+                        break
+                    except Exception as exc:
+                        # Transient bus errors — log and retry.
+                        self.logger.debug(
+                            "RTT poll dropped: %s: %s",
+                            type(exc).__name__, exc)
                     await asyncio.sleep(self.poll_period)
 
                 self.__ready.clear()
@@ -507,45 +491,58 @@ class Rtt(SerialPort):
                 self.cb_addr = self.__fixed_cb_addr
                 await asyncio.sleep(self.RESCAN_INTERVAL)
 
-    async def __drain_up_once(self):
-        # Read the whole UP descriptor — not just WrOff. That way
-        # we detect a firmware reset that re-ran SEGGER_RTT_Init
-        # in place: the magic stays valid but RdOff/WrOff/buffer
-        # fields snap back to their init values. A bare WrOff
-        # poll can't tell that apart from a normal write.
-        desc = await self.ram.bus.mem_read(
-            self.__up_desc_addr, RTT_BUFFER_DESC_LEN)
-        name, buf, size, wroff, rdoff, flags = struct.unpack("<6I", desc)
-        if (name, buf, size, flags) != self.__up_ref:
-            raise RttError(
-                f"UP descriptor fixed fields drifted "
-                f"(ref={self.__up_ref}, now=({name}, {buf}, "
-                f"{size}, {flags})) — firmware likely reset")
-        if rdoff != self.__up_buf_rdoff:
-            raise RttError(
-                f"UP RdOff moved by target ({rdoff} != cached "
-                f"{self.__up_buf_rdoff}) — firmware likely reset")
-        if wroff >= size:
-            raise RttError(
-                f"UP WrOff={wroff} >= size {size} — corrupted")
-        if wroff == self.__up_buf_rdoff:
+    async def __poll_cycle(self):
+        """One pump iteration. Posts every required read up-front
+        so the Batcher coalesces magic + UP descriptor + DOWN
+        descriptor into a single bus flush, then awaits and
+        validates. If UP has new bytes, a second batch (buffer
+        read[s] + RdOff writeback) is posted together.
+
+        Raises RttError on any drift that means the firmware was
+        reset; the caller breaks out of the poll loop and re-
+        establishes."""
+        # Phase 1: post all sanity reads in one batch.
+        magic_fut = self.ram.bus.mem_read(self.cb_addr, RTT_MAGIC_LEN)
+        up_desc_fut = (
+            self.ram.bus.mem_read(self.__up_desc_addr, RTT_BUFFER_DESC_LEN)
+            if self.__up_ref is not None else None)
+        down_desc_fut = (
+            self.ram.bus.mem_read(
+                self.__down_desc_addr, RTT_BUFFER_DESC_LEN)
+            if self.__down_ref is not None else None)
+
+        # Phase 1 await + validate.
+        self.__validate_magic(await magic_fut)
+        wroff = None
+        if up_desc_fut is not None:
+            wroff = self.__validate_up_descriptor(await up_desc_fut)
+        if down_desc_fut is not None:
+            self.__validate_down_descriptor(await down_desc_fut)
+
+        if wroff is None or wroff == self.__up_buf_rdoff:
             return
+
+        # Phase 2: drain the new UP bytes. Both the buffer read(s)
+        # and the RdOff writeback go into the same batch.
         rd = self.__up_buf_rdoff
+        size = self.__up_buf_size
         if wroff > rd:
-            data = await self.ram.bus.mem_read(
-                self.__up_buf_addr + rd, wroff - rd)
+            data_futs = [self.ram.bus.mem_read(
+                self.__up_buf_addr + rd, wroff - rd)]
         else:
-            # Wrap: two reads.
-            tail = await self.ram.bus.mem_read(
-                self.__up_buf_addr + rd, size - rd)
-            head = await self.ram.bus.mem_read(
-                self.__up_buf_addr, wroff)
-            data = tail + head
+            data_futs = [
+                self.ram.bus.mem_read(
+                    self.__up_buf_addr + rd, size - rd),
+                self.ram.bus.mem_read(self.__up_buf_addr, wroff),
+            ]
+        rdoff_fut = self.ram.bus.mem_write(
+            self.__up_desc_rdoff_addr, struct.pack("<I", wroff))
+
+        data = b"".join([await f for f in data_futs])
+        await rdoff_fut
+
         self.__rx_queue.extend(data)
         self.__up_buf_rdoff = wroff
-        await self.ram.bus.mem_write(
-            self.__up_desc_rdoff_addr,
-            struct.pack("<I", wroff))
         if data:
             self.__rx_wakeup.set()
 

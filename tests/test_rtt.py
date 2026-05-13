@@ -348,7 +348,6 @@ class TestRevalidate:
         ud = _stage_control_block(bus, cb_addr=0x20000400)
         rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
         rtt.poll_period = 0.005
-        rtt.REVALIDATE_INTERVAL = 0.02
         rtt.RESCAN_INTERVAL = 0.05
         await rtt.start()
         await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
@@ -356,8 +355,7 @@ class TestRevalidate:
         # Simulate firmware wiping the control block.
         bus.memory[0x400:0x400 + 16] = b"\x00" * 16
 
-        # Within REVALIDATE_INTERVAL, the pump notices and clears
-        # ready.
+        # On the next poll cycle the pump notices and clears ready.
         for _ in range(20):
             await asyncio.sleep(0.02)
             if not rtt._Rtt__ready.is_set():
@@ -379,7 +377,6 @@ class TestRevalidate:
         ud = _stage_control_block(bus, cb_addr=0x20000400, up_buf_size=64)
         rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
         rtt.poll_period = 0.005
-        rtt.REVALIDATE_INTERVAL = 0.05
         rtt.RESCAN_INTERVAL = 0.05
         await rtt.start()
         await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
@@ -416,13 +413,12 @@ class TestRevalidate:
     @pytest.mark.asyncio
     async def test_down_descriptor_drift_triggers_reestablish(self):
         """If the target also reset the DOWN descriptor (WrOff
-        moved without us writing), the revalidate-cadence DOWN
-        check must catch it."""
+        moved without us writing), the per-cycle DOWN check
+        must catch it."""
         bus = MockBus()
         ud = _stage_control_block(bus, cb_addr=0x20000400)
         rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
         rtt.poll_period = 0.01
-        rtt.REVALIDATE_INTERVAL = 0.02
         rtt.RESCAN_INTERVAL = 0.05
         await rtt.start()
         await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
