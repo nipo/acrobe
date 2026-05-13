@@ -21,11 +21,13 @@ import asyncio
 from ...component.arm.coresight.rom_table import RomTable
 from ...component.arm.coresight.scs import Scs
 from ...component.arm.dp import Dp, DpAccessFailure
+from ...component.arm.memory import BusRam
 from ...component.arm.mem_ap import MemAp
 from ...component.nordic.ctrl_ap import CtrlAp
 from ...db import NoMatch
 from ..debuggable import Debuggable
 from ..loadable import Loadable
+from ..memory import Memory
 from ..region import Flash, Ram
 from ..target import Target
 from .cortex_m import CortexMDebuggable, CortexMTarget
@@ -355,6 +357,18 @@ async def _build_nrf52_target(dp, ap, part, ctrl_ap):
     debug.memory_map.append(Ram("apb",  0x40000000, 0x80000))
     debug.memory_map.append(Ram("ahb",  0x50000000, 0x80000))
     target.child_add(debug)
+
+    # Memory view — same ranges, but as functional BusRam children
+    # backed by the AHB-AP. Anchor for memory-aware clients (RTT
+    # under sram, future peripheral drivers under apb / ahb).
+    memory = Memory(ap)
+    memory.child_add(BusRam("flash", 0x00000000, flash_size, ap))
+    memory.child_add(BusRam("ficr",  0x10000000, 0x1000, ap))
+    memory.child_add(BusRam("sram",  0x20000000, ram_kb * 1024, ap))
+    memory.child_add(BusRam("apb",   0x40000000, 0x80000, ap))
+    memory.child_add(BusRam("ahb",   0x50000000, 0x80000, ap))
+    memory.child_add(BusRam("ppb",   0xE0000000, 0x100000, ap))
+    target.child_add(memory)
 
     loadable = Nrf52Loadable("main", ctrl_ap=ctrl_ap)
     loadable.child_add(

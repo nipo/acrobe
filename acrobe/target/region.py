@@ -20,6 +20,7 @@ Regions that physically can't be reprogrammed raise
 `NotUpdatable` from `update` / `plan_update`.
 """
 
+from ..db import Db, NoMatch
 from ..node import Node
 
 
@@ -95,7 +96,24 @@ class Region(Node):
 
 
 class Ram(Region):
-    """Volatile read/write memory."""
+    """Volatile read/write memory.
+
+    Doubles as the anchor point for on-demand client nodes that
+    need bounded RAM access: SEGGER RTT, ITM-in-RAM logs, future
+    memory-mapped peripheral drivers spawned via APB/AHB pseudo-
+    RAM regions. Clients register against `Ram.db` keyed on the
+    name the path resolves with (e.g. `"rtt"`); `child_spawn`
+    instantiates them with `self` as the parent so they inherit
+    address/size bounds for scanning and a working `bus` ref."""
+
+    db: Db = Db("Ram client")
+
+    async def child_spawn(self, name):
+        try:
+            cls = self.db.get(name)[0]
+        except NoMatch:
+            raise NoMatch("child", name)
+        return cls(self)
 
 
 class Flash(Region):

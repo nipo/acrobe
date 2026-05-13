@@ -11,13 +11,13 @@ class BusRam(Ram):
 
     def __init__(self, name, address, size, mem_ap):
         super().__init__(name, address, size)
-        self._ap = mem_ap
+        self.bus = mem_ap
 
     async def read(self, offset, size):
-        return await self._ap.mem_read(self.address + offset, size)
+        return await self.bus.mem_read(self.address + offset, size)
 
     async def write(self, offset, data):
-        await self._ap.mem_write(self.address + offset, data)
+        await self.bus.mem_write(self.address + offset, data)
 
 
 class BusFlash(Flash):
@@ -30,7 +30,7 @@ class BusFlash(Flash):
     def __init__(self, name, address, size, write_page_size,
                  erase_page_sizes, mem_ap):
         super().__init__(name, address, size, write_page_size, erase_page_sizes)
-        self._ap = mem_ap
+        self.bus = mem_ap
 
     async def read(self, offset, size):
-        return await self._ap.mem_read(self.address + offset, size)
+        return await self.bus.mem_read(self.address + offset, size)
