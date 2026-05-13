@@ -318,6 +318,72 @@ class CortexMDebuggable(Debuggable):
     async def mem_write(self, addr: int, data) -> None:
         await self.mem_ap.mem_write(addr, data)
 
+    async def monitor(self, cmd: str, args: list[str]) -> str:
+        """GDB `monitor <cmd>` dispatch.
+
+        Standard Cortex-M verbs (reset / halt / resume / erase /
+        help). Returns the text echoed back to the GDB user via the
+        qRcmd reply. Raise `NotImplementedError` for unknown commands
+        — the Responder turns that into "Unknown monitor command:
+        <name>" so chip subclasses can override only the additions
+        they want.
+        """
+        if cmd == "help":
+            return self.__help_text()
+        if cmd == "reset":
+            mode = args[0] if args else "halt"
+            if mode in ("halt", "stop"):
+                for core in self.cores:
+                    await core.reset(stop=True)
+                return "Reset (halted at vector).\n"
+            if mode in ("run", "go"):
+                for core in self.cores:
+                    await core.reset(stop=False)
+                return "Reset (running).\n"
+            return (f"Unknown reset mode {mode!r}. "
+                    f"Try `monitor reset halt` or `monitor reset run`.\n")
+        if cmd == "halt":
+            for core in self.cores:
+                await core.halt()
+            return "Halted.\n"
+        if cmd in ("resume", "continue", "cont", "go"):
+            for core in self.cores:
+                await core.resume()
+            return "Resumed.\n"
+        if cmd in ("erase", "erase-all", "erase_all"):
+            return await self.__monitor_erase()
+        raise NotImplementedError(cmd)
+
+    async def __monitor_erase(self) -> str:
+        """Route `monitor erase` to the sibling Loadable.erase_all.
+
+        Works for any Cortex-M target with a Loadable — nRF52
+        picks up the CTRL-AP fast path automatically since
+        Nrf52Loadable.erase_all overrides the default."""
+        from ..loadable import Loadable
+        target = self._parent
+        if target is None:
+            return "no target attached\n"
+        loadables = target.children_of_class(Loadable)
+        if not loadables:
+            return "no Loadable attached to this target\n"
+        if len(loadables) > 1:
+            names = ", ".join(l.name for l in loadables)
+            return (f"target has multiple Loadables ({names}); "
+                    f"use the CLI's `chip erase-all` with --loadable.\n")
+        await loadables[0].erase_all()
+        return "Erased.\n"
+
+    @staticmethod
+    def __help_text() -> str:
+        return (
+            "Monitor commands:\n"
+            "  reset [halt|run]   Reset the target (default: halt at vector).\n"
+            "  halt               Halt all cores.\n"
+            "  resume             Resume all cores.\n"
+            "  erase              Mass-erase via the sibling Loadable.\n"
+            "  help               Show this help.\n")
+
 
 @Target.register(Dp, precedence=10000)
 def cortex_m_generic_target(dp):

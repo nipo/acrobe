@@ -656,3 +656,120 @@ class TestCortexMDebuggable:
         names = [r.name for r in CORTEX_M_REGISTERS]
         assert len(set(numbers)) == len(numbers)
         assert len(set(names)) == len(names)
+
+
+class TestCortexMMonitor:
+    """`monitor <cmd>` dispatch — visible from GDB as `mon reset` etc."""
+
+    def make(self):
+        from acrobe.target.target import Target as _T
+        bus = MockBus()
+        scs = Scs(bus, 0xE000E000, ComponentIds.empty())
+        # Pre-populate DHCSR so the post-op settle waits return
+        # quickly. Each command flips S_HALT inside cpu_halt /
+        # cpu_step etc. via the actual register writes; the mock
+        # doesn't track those side effects, so we hand-roll the
+        # value to the expected post-op state.
+        bus.memory[scs.base + scs.DHCSR_OFFSET] = scs.DHCSR_S_HALT
+        core = CortexMCore("core", scs)
+        # Stub-out reset/halt/resume so we don't depend on DEMCR /
+        # AIRCR / settle behaviour here — we're testing dispatch.
+        core.history = []
+        async def reset(*, stop=True):
+            core.history.append(f"reset(stop={stop})")
+        async def halt():
+            core.history.append("halt")
+        async def resume(*, allow_interrupts=True):
+            core.history.append("resume")
+        core.reset = reset
+        core.halt = halt
+        core.resume = resume
+
+        debug = CortexMDebuggable(bus)
+        debug.child_add(core)
+        target = _T("test")
+        target.child_add(debug)
+        return target, debug, core
+
+    @pytest.mark.asyncio
+    async def test_help_lists_commands(self):
+        _, debug, _ = self.make()
+        text = await debug.monitor("help", [])
+        assert "reset" in text
+        assert "halt" in text
+        assert "resume" in text
+        assert "erase" in text
+
+    @pytest.mark.asyncio
+    async def test_reset_default_is_halt(self):
+        _, debug, core = self.make()
+        text = await debug.monitor("reset", [])
+        assert "halt" in text.lower()
+        assert "reset(stop=True)" in core.history
+
+    @pytest.mark.asyncio
+    async def test_reset_run(self):
+        _, debug, core = self.make()
+        text = await debug.monitor("reset", ["run"])
+        assert "running" in text.lower()
+        assert "reset(stop=False)" in core.history
+
+    @pytest.mark.asyncio
+    async def test_reset_unknown_mode(self):
+        _, debug, core = self.make()
+        text = await debug.monitor("reset", ["banana"])
+        assert "Unknown reset mode" in text
+        assert core.history == []
+
+    @pytest.mark.asyncio
+    async def test_halt(self):
+        _, debug, core = self.make()
+        text = await debug.monitor("halt", [])
+        assert "halted" in text.lower()
+        assert "halt" in core.history
+
+    @pytest.mark.asyncio
+    async def test_resume_aliases(self):
+        for alias in ("resume", "continue", "cont", "go"):
+            _, debug, core = self.make()
+            text = await debug.monitor(alias, [])
+            assert "resume" in core.history
+            assert "resumed" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_unknown_command_raises(self):
+        _, debug, _ = self.make()
+        with pytest.raises(NotImplementedError):
+            await debug.monitor("nonsense", [])
+
+    @pytest.mark.asyncio
+    async def test_erase_routes_to_loadable(self):
+        from acrobe.target.loadable import Loadable
+
+        target, debug, _ = self.make()
+        erased = []
+
+        class RecordingLoadable(Loadable):
+            async def erase_all(self):
+                erased.append(True)
+
+        target.child_add(RecordingLoadable("main"))
+        text = await debug.monitor("erase", [])
+        assert erased == [True]
+        assert "erased" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_erase_no_loadable(self):
+        _, debug, _ = self.make()
+        # Target has no Loadable child.
+        text = await debug.monitor("erase", [])
+        assert "no Loadable" in text
+
+    @pytest.mark.asyncio
+    async def test_erase_multi_loadable_refuses(self):
+        from acrobe.target.loadable import Loadable
+        target, debug, _ = self.make()
+        target.child_add(Loadable("sram"))
+        target.child_add(Loadable("flash"))
+        text = await debug.monitor("erase", [])
+        assert "multiple Loadables" in text
