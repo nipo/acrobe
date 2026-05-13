@@ -19,7 +19,14 @@ from .protocol import Responder
 class Session:
     """One client connection. Owns the parser state and the
     Responder. Cancellation-safe: closing the writer cleanly
-    surfaces as a SocketClosed-equivalent at the end of `serve`."""
+    surfaces as a SocketClosed-equivalent at the end of `serve`.
+
+    Doubles as the Responder's `transport`: while a `c`/`s` handler
+    waits for the core to halt, the Responder calls
+    `next_interrupt_byte` to race the wait against the next 0x03
+    byte from the client. The Session's main read loop is paused
+    while the handler runs, so handing the reader to the Responder
+    temporarily is safe — only one task reads bytes."""
 
     INTERRUPT = 0x03  # Ctrl-C, sent outside packets
 
@@ -31,6 +38,9 @@ class Session:
         self.buffer = bytearray()
         peer = writer.get_extra_info("peername")
         self.peer_name = f"{peer[0]}:{peer[1]}" if peer else "?"
+        # Hand ourselves to the Responder as its transport, so
+        # handle_c / handle_s can await next_interrupt_byte().
+        responder.transport = self
 
     async def serve(self) -> None:
         self.logger.info("session start: %s", self.peer_name)
@@ -104,6 +114,27 @@ class Session:
         framed = message.frame(payload)
         self.writer.write(framed)
         await self.writer.drain()
+
+    # -- Transport hook for the Responder --------------------------
+
+    async def next_interrupt_byte(self) -> None:
+        """Block until the client sends 0x03 (Ctrl-C). Bytes that
+        aren't 0x03 (stray +/-, garbage during a resume) are
+        discarded. Raises ConnectionResetError if the client
+        disconnects."""
+        while True:
+            while self.buffer:
+                b = self.buffer[0]
+                if b == self.INTERRUPT:
+                    self.buffer.pop(0)
+                    return
+                # Drop anything else silently — GDB shouldn't be
+                # sending packets while the target is running.
+                self.buffer.pop(0)
+            chunk = await self.reader.read(4096)
+            if not chunk:
+                raise ConnectionResetError("client disconnected")
+            self.buffer.extend(chunk)
 
 
 class GdbServer:

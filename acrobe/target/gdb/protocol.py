@@ -10,10 +10,17 @@ The Responder is **CPU-family agnostic**: it pulls
 the `Core` objects under the Debuggable; routes `vFlashErase/
 Write/Done` into the Loadable; and exposes `qRcmd` to the
 Debuggable's `monitor` hook.
+
+For continue / step the Responder polls the current Core's
+state() in a loop and races that against an optional `transport`
+hook that resolves when the client sends a 0x03 interrupt byte.
+The Session in `server.py` provides the transport — tests can
+pass a stub.
 """
 
 from __future__ import annotations
 
+import asyncio
 import binascii
 from xml.etree import ElementTree as et
 
@@ -62,8 +69,9 @@ class Responder:
     """
 
     PACKET_SIZE = 4096
+    RUN_POLL_INTERVAL = 0.05
 
-    def __init__(self, debuggable, loadable=None):
+    def __init__(self, debuggable, loadable=None, *, transport=None):
         self.debuggable = debuggable
         self.loadable = loadable
         # Thread IDs are 1-based per the GDB protocol; we map each
@@ -76,6 +84,13 @@ class Responder:
         self.packet_ack = True
         self.no_ack_mode_requested = False
         self.flash_image: list[tuple[int, bytes]] = []
+        # `transport` exposes `next_interrupt_byte() -> awaitable` —
+        # resolves when the client sends a 0x03 byte while we're
+        # waiting for a continue/step to complete. None disables
+        # interrupt support (handle_c then waits forever for the
+        # core to halt on its own — fine for tests, wrong for live
+        # use without breakpoints).
+        self.transport = transport
         self.__target_xml = self.__build_target_xml()
         self.__memory_map_xml = self.__build_memory_map_xml()
 
@@ -242,11 +257,43 @@ class Responder:
 
     async def handle_c(self, payload: bytes) -> bytes:
         await self.current_core.resume()
-        return await self.__stop_reason()
+        return await self.__wait_for_halt()
 
     async def handle_s(self, payload: bytes) -> bytes:
         await self.current_core.step()
+        return await self.__wait_for_halt()
+
+    async def __wait_for_halt(self) -> bytes:
+        """Block until the core leaves RUN or the client sends an
+        interrupt byte. On interrupt, halt the core. Returns the
+        stop-reason packet."""
+        poll = asyncio.create_task(self.__poll_until_not_running())
+        waiters = {poll}
+        interrupt = None
+        if self.transport is not None:
+            interrupt = asyncio.create_task(
+                self.transport.next_interrupt_byte())
+            waiters.add(interrupt)
+        try:
+            done, _ = await asyncio.wait(
+                waiters, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for t in waiters:
+                if not t.done():
+                    t.cancel()
+        if interrupt is not None and interrupt in done:
+            await self.current_core.halt()
         return await self.__stop_reason()
+
+    async def __poll_until_not_running(self):
+        while True:
+            try:
+                state = await self.current_core.state()
+            except NotImplementedError:
+                return
+            if state != CoreState.RUN:
+                return
+            await asyncio.sleep(self.RUN_POLL_INTERVAL)
 
     async def handle_R(self, payload: bytes) -> bytes | None:
         await self.current_core.reset(stop=True)

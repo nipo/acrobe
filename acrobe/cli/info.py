@@ -79,9 +79,14 @@ async def enumerate(ctx, root_path):
 @info.command(help="Run target discovery and list spawned Targets")
 @click.option('-r', '--root', 'root_paths', required=True, multiple=True,
               help="Component path to resolve before discovery")
+@click.option('-v', '--verbose', is_flag=True, default=False,
+              help="Show each Target's view children: Loadable regions, "
+                   "Debuggable cores + memory map, etc.")
 @click.pass_context
-async def target(ctx, root_paths):
+async def target(ctx, root_paths, verbose):
     from ..target import Loadable, Target
+    from ..target.debuggable import Core, Debuggable
+    from ..target.region import Flash, Region
 
     hw_root = ctx.obj.hw_root
     for path in root_paths:
@@ -93,10 +98,67 @@ async def target(ctx, root_paths):
     if not targets:
         click.echo("No targets found.")
         return
+
     for t in targets:
-        click.echo(f"  {t.name}")
-        for loadable in t.children_of_class(Loadable):
-            click.echo(f"    loadable: {loadable.name}")
+        if not verbose:
+            click.echo(f"  {t.name}")
+            for loadable in t.children_of_class(Loadable):
+                click.echo(f"    loadable: {loadable.name}")
+            continue
+
+        click.echo(f"{t.name}  [{type(t).__name__}]")
+        claimed = sorted(c.fqdn for c in t.claimed_components())
+        if claimed:
+            click.echo(f"  references:")
+            for c in claimed:
+                click.echo(f"    - {c}")
+        for child in t.children:
+            _dump_view(child)
+
+
+def _dump_view(view):
+    from ..target import Loadable
+    from ..target.debuggable import Core, Debuggable
+    from ..target.region import Flash, Region
+
+    if isinstance(view, Loadable):
+        click.echo(f"  loadable: {view.name}  [{type(view).__name__}]")
+        regions = sorted(view.regions, key=lambda r: r.address)
+        if not regions:
+            click.echo(f"    (no regions)")
+        for r in regions:
+            kind = type(r).__name__
+            span = f"0x{r.address:08x}-0x{r.end:08x}  ({r.size:#x} bytes)"
+            extras = []
+            if isinstance(r, Flash):
+                extras.append(f"write_page={r.write_page_size:#x}")
+                extras.append(f"erase_pages={[hex(p) for p in r.erase_page_sizes]}")
+                extras.append(f"blank={r.is_blank}")
+            tail = ("  " + "  ".join(extras)) if extras else ""
+            click.echo(f"    {kind:<14} {r.name:<10} {span}{tail}")
+        return
+
+    if isinstance(view, Debuggable):
+        click.echo(f"  debug:    {view.name}  [{type(view).__name__}]")
+        cores = view.cores
+        if not cores:
+            click.echo(f"    (no cores)")
+        for c in cores:
+            click.echo(
+                f"    core      {c.name:<10}  "
+                f"feature={c.gdb_feature_name!r}  "
+                f"byteorder={c.gdb_byteorder}  "
+                f"#regs={len(c.registers)}")
+        mm = view.memory_map
+        if mm:
+            click.echo(f"    memory_map:")
+            for r in sorted(mm, key=lambda r: r.address):
+                click.echo(f"      {type(r).__name__:<14} {r.name:<10} "
+                           f"0x{r.address:08x}-0x{r.end:08x}")
+        return
+
+    # Generic child (Puppet, DebugAuth, custom)
+    click.echo(f"  child:    {view.name}  [{type(view).__name__}]")
 
 
 @info.command(help="Walk the target tree, dump CPU identification "
