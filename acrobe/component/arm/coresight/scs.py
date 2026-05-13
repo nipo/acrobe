@@ -438,37 +438,35 @@ class Scs(MemoryMappedComponent):
         """Batch-read core registers by their DCRSR number.
 
         Per ARMv7-M ARM C1.6.3 the host must observe
-        `DHCSR.S_REGRDY=1` between a DCRSR write and the matching
-        DCRDR read — otherwise DCRDR is UNKNOWN (returns zero on
-        every core we've tested).
+        `DHCSR.S_REGRDY=1` between the DCRSR write and the
+        matching DCRDR read — otherwise DCRDR is UNKNOWN (returns
+        zero on every core we've tested).
 
-        Our sequence per register is `write DCRSR(sel)` → `read
-        DHCSR` → `read DCRDR`. The three ops are posted to the
-        Batcher in sequence and `gather` waits for the whole
-        batch in one flush. The DHCSR read sits between DCRSR and
-        DCRDR so the DAP round-trip itself buys the CPU the few
-        cycles it needs to set REGRDY — by the time the DHCSR
-        transaction lands, the transfer is complete. An assert
-        keeps us honest (it has never been observed to fire on
-        live silicon; running under `python -O` skips it for
-        production)."""
-        all_futs = []
-        dhcsr_futs = []
-        dcrdr_futs = []
-        for n in register_numbers:
-            all_futs.append(self.reg_write(self.DCRSR_OFFSET, n))
-            f_dhcsr = self.reg_read(self.DHCSR_OFFSET)
-            dhcsr_futs.append((n, f_dhcsr))
-            all_futs.append(f_dhcsr)
-            f_dcrdr = self.reg_read(self.DCRDR_OFFSET)
-            dcrdr_futs.append(f_dcrdr)
-            all_futs.append(f_dcrdr)
-        await asyncio.gather(*all_futs)
-        for n, f in dhcsr_futs:
-            assert f.result() & self.DHCSR_S_REGRDY, (
+        Sequence per register: write DCRSR(sel) → read DHCSR →
+        read DCRDR. The reads are posted synchronously to the
+        Batcher; the first `await` in the result loop triggers
+        the flush, every subsequent `await` resolves immediately
+        from the same batch. The DHCSR read between DCRSR and
+        DCRDR buys the CPU its round-trip's worth of cycles to
+        set REGRDY — by spec it should always be 1 by then; the
+        assert documents the invariant and trips if real silicon
+        ever surprises us."""
+        pending = [
+            (n,
+             self.reg_write(self.DCRSR_OFFSET, n),
+             self.reg_read(self.DHCSR_OFFSET),
+             self.reg_read(self.DCRDR_OFFSET))
+            for n in register_numbers
+        ]
+        values = []
+        for n, fw, fh, fd in pending:
+            await fw
+            dhcsr = await fh
+            assert dhcsr & self.DHCSR_S_REGRDY, (
                 f"DCRSR read of reg {n} did not complete "
-                f"(DHCSR=0x{f.result():08x}, S_REGRDY=0)")
-        return [f.result() for f in dcrdr_futs]
+                f"(DHCSR=0x{dhcsr:08x}, S_REGRDY=0)")
+            values.append(await fd)
+        return values
 
     async def cpu_regs_set(self, pairs) -> None:
         """Batch-write `(register_number, value)` pairs to the core.
@@ -477,20 +475,20 @@ class Scs(MemoryMappedComponent):
         selector|WRITE to DCRSR → read DHCSR. The DHCSR read
         commits the previous DCRSR transfer's REGRDY status,
         same pattern as cpu_regs_get."""
-        all_futs = []
-        dhcsr_futs = []
-        for n, value in pairs:
-            all_futs.append(self.reg_write(self.DCRDR_OFFSET, value))
-            all_futs.append(self.reg_write(
-                self.DCRSR_OFFSET, n | self.DCRSR_WRITE))
-            f_dhcsr = self.reg_read(self.DHCSR_OFFSET)
-            dhcsr_futs.append((n, f_dhcsr))
-            all_futs.append(f_dhcsr)
-        await asyncio.gather(*all_futs)
-        for n, f in dhcsr_futs:
-            assert f.result() & self.DHCSR_S_REGRDY, (
+        pending = [
+            (n,
+             self.reg_write(self.DCRDR_OFFSET, value),
+             self.reg_write(self.DCRSR_OFFSET, n | self.DCRSR_WRITE),
+             self.reg_read(self.DHCSR_OFFSET))
+            for n, value in pairs
+        ]
+        for n, fd, fs, fh in pending:
+            await fd
+            await fs
+            dhcsr = await fh
+            assert dhcsr & self.DHCSR_S_REGRDY, (
                 f"DCRSR write of reg {n} did not complete "
-                f"(DHCSR=0x{f.result():08x}, S_REGRDY=0)")
+                f"(DHCSR=0x{dhcsr:08x}, S_REGRDY=0)")
 
     async def cpu_reset(self, *, poll_interval: float = 0.01,
                         max_polls: int = 100) -> None:
