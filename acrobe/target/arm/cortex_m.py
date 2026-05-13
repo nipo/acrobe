@@ -325,9 +325,22 @@ class CortexMDebuggable(Debuggable):
         return debuggable
 
     async def attach(self) -> None:
-        """Enable debug on every Core's SCS."""
+        """Enable debug, halt every core, and turn on the hardware
+        breakpoint unit. Run in that order: halt needs DEBUGEN
+        already set; FPB enables don't take effect on a running
+        core.
+
+        Halt-on-attach is the convention every GDB front-end
+        expects — `?` and `g` are sent immediately after the
+        connection handshake, and DCRSR / DCRDR register transfers
+        only return valid data on a halted core. Without halting,
+        the first `info reg` shows zeros and GDB then trips itself
+        up trying to unwind from PC=0.
+        """
         for core in self.cores:
             await core.scs.enable_debug()
+        for core in self.cores:
+            await core.halt()
         for core in self.cores:
             if core.fpb is not None:
                 await core.fpb.enable(True)

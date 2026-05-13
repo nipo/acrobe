@@ -617,19 +617,24 @@ class TestCortexMDebuggable:
         assert bus.memory[0x101] == 0xbb
 
     @pytest.mark.asyncio
-    async def test_attach_enables_debug_on_every_scs(self):
+    async def test_attach_enables_debug_and_halts(self):
         bus = MockBus()
         scs1 = Scs(bus, 0xE000E000, ComponentIds.empty())
         scs2 = Scs(bus, 0xE100E000, ComponentIds.empty())
+        # halt() polls DHCSR until S_HALT settles; pre-set so the
+        # settle returns on the first read instead of timing out.
+        bus.memory[scs1.base + scs1.DHCSR_OFFSET] = scs1.DHCSR_S_HALT
+        bus.memory[scs2.base + scs2.DHCSR_OFFSET] = scs2.DHCSR_S_HALT
         debug = CortexMDebuggable(bus)
         debug.child_add(CortexMCore("core0", scs1))
         debug.child_add(CortexMCore("core1", scs2))
         await debug.attach()
-        dhcsr_writes = [a for a, _ in bus.writes
+        dhcsr_writes = [v for a, v in bus.writes
                         if a in (scs1.base + scs1.DHCSR_OFFSET,
                                  scs2.base + scs2.DHCSR_OFFSET)]
-        assert (scs1.base + scs1.DHCSR_OFFSET) in dhcsr_writes
-        assert (scs2.base + scs2.DHCSR_OFFSET) in dhcsr_writes
+        # Both SCS got DEBUGEN set and a C_HALT request.
+        assert any(v & scs1.DHCSR_C_DEBUGEN for v in dhcsr_writes)
+        assert any(v & scs1.DHCSR_C_HALT for v in dhcsr_writes)
 
     @pytest.mark.asyncio
     async def test_from_romtable_builds_cores(self):
