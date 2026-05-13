@@ -457,6 +457,30 @@ genuinely safe to read concurrently. FICR is read-only and stable
 on Nordic, so reads are safe — but verify the chip's manual for
 your peripheral.
 
+### GDB silently can't read peripherals
+
+Symptom: in `arm-none-eabi-gdb` connected via `gdb-server`,
+`x/w 0x40000000` (or any peripheral address) reports `Cannot
+access memory at address 0x4000_0000` — and there's **no
+matching `m` packet in the acrobe protocol log**.
+
+Cause: GDB applies strict memory-map clamping whenever the
+server advertises a memory-map (which we do as soon as any
+flash region exists). Addresses outside every declared region
+get rejected client-side before any packet is sent.
+
+Fix: add the peripheral / RAM / FICR ranges to
+`Debuggable.memory_map` in your probe — see "Declaring the
+memory map" under "GDB" above. The Cortex-M PPB
+(`0xE0000000`-`0xE00FFFFF`) is already covered by
+`CortexMDebuggable`'s default; add whatever else your chip
+exposes.
+
+Quick escape hatch for one-off poking: `set mem
+inaccessible-by-default off` in the gdb session disables the
+clamping client-side. Useful while debugging the map, not a
+substitute for declaring it server-side.
+
 ### Mistaking a SOF for an RBF
 
 Symptom (Altera-specific): `Configuration failed: CONF_DONE not
@@ -482,10 +506,13 @@ work needed.
 `acrobe gdb-server -r <path>` picks the first Target with a
 Debuggable, attaches, and serves. The Responder builds
 `target.xml` from `Core.gdb_feature_name` and `Core.registers`;
-memory-map from the Loadable's regions; routes `vFlashErase/
-Write/Done` into `Loadable.write` (so GDB's `load` command works).
-Watchpoints (Z2/Z3/Z4) go through `Core.watchpoint_add` which
-hits the DWT.
+memory-map from `Debuggable.memory_map` plus the Loadable's
+regions; routes `vFlashErase/Write/Done` into `Loadable.write`
+(so GDB's `load` command works). Watchpoints (Z2/Z3/Z4) go
+through `Core.watchpoint_add` which hits the DWT. Monitor
+commands (`monitor reset|halt|resume|erase`) come from
+`CortexMDebuggable.monitor`; override and `super()` for chip-
+specific extensions.
 
 If your chip needs a custom GDB feature name (RISC-V, ARMv8
 heterogeneous), set it on the Core:
@@ -494,6 +521,67 @@ heterogeneous), set it on the Core:
 class MyCore(CortexMCore):
     gdb_feature_name = "com.example.my-arch"
 ```
+
+#### Declaring the memory map
+
+The biggest gotcha when bringing a new chip online: GDB applies
+strict **memory-map clamping**. When we advertise a memory-map
+via `qXfer:memory-map:read+` (we always do, as soon as any flash
+region exists), GDB refuses to send `m` packets to addresses
+outside any declared region. The failure is invisible from our
+side — no protocol traffic, no log line — the user just sees
+`Cannot access memory at address 0x4000_xxxx` in the gdb prompt.
+
+What's covered out of the box:
+
+- **Loadable.regions** — every Flash / Ram / Eeprom region you
+  attach to your Loadable is in the map. So your chip's main
+  flash and any volatile RAM region you declared automatically
+  works.
+- **`CortexMDebuggable.memory_map` default** — the ARM private
+  peripheral bus at `0xE0000000` (1 MiB) is pre-populated, so
+  SCS / DWT / FPB / ITM addresses are always GDB-accessible.
+
+What you add per chip (typically in the probe, on the
+`CortexMDebuggable` returned by `from_romtable`):
+
+```python
+from ..region import Ram
+
+debug = CortexMDebuggable.from_romtable(rt, ap)
+# Chip-specific ranges GDB should be able to inspect.
+debug.memory_map.append(Ram("sram", 0x20000000, ram_size))
+debug.memory_map.append(Ram("ficr", 0x10000000, 0x1000))
+debug.memory_map.append(Ram("apb",  0x40000000, 0x80000))
+debug.memory_map.append(Ram("ahb",  0x50000000, 0x80000))
+```
+
+`Ram` is used as the GDB region type for "accessible but not
+flash-programmable" — peripherals, SRAM, factory info ranges,
+anything GDB should `m`-read but not try to `vFlashErase`.
+Pulling a `Ram` into the debug map doesn't make it a real RAM
+target for `Loadable.write` (that path uses `Loadable.regions`
+separately) — it's purely a hint to GDB.
+
+Reads against declared-but-reserved addresses (the holes
+between AHB and APB blocks, etc.) propagate as bus errors;
+`Responder.handle_m` catches them and replies `E01` so GDB
+shows `Cannot access` instead of the session dying. No need to
+trim the declared range to "only the actually-mapped" sub-block —
+declare the architectural span and let the bus return errors on
+the holes.
+
+#### Register numbering
+
+Cortex-M `Register.number` is the **GDB regnum** matching stock
+GDB's `org.gnu.gdb.arm.m-profile` / `m-system` features:
+`xpsr=25`, `msp=26`, `psp=27`. `CortexMCore.__DCRSR_SELECTOR`
+maps register names to the chip-side DCRSR selector (the
+ARM-defined numbering: `xpsr=16`, `msp=17`, `psp=18`) — used
+internally for register I/O. Don't conflate the two when adding
+a new core type: the GDB unwinder hard-codes specific regnums
+for unwind state (xpsr=25 in particular), so target.xml needs
+to match those even if the chip's own selectors disagree.
 
 For chip-specific `monitor` commands, override
 `Debuggable.monitor` and dispatch on the command word.
@@ -575,6 +663,9 @@ Use this as a final pass before merging:
 - [ ] Mass-erase path uses a vendor AP if available.
 - [ ] Vendor APs registered against `Ap.db` by IDR, module
       imported from the target file so registration fires.
+- [ ] `Debuggable.memory_map` declares every range you want GDB
+      to be able to inspect (RAM, FICR / DEVINFO, peripheral
+      blocks). The Cortex-M PPB is already covered.
 - [ ] Module imported from `acrobe/target/__init__.py`.
 - [ ] Tests: probe success/decline, region erase + write
       sequencing, full Loadable.write through to mock bus.
