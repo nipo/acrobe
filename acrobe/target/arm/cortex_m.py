@@ -28,8 +28,15 @@ from ..debuggable import (
 from ..target import Target
 
 
-# Cortex-M DCRSR register selectors. Numbers match the ARMv7-M /
-# ARMv8-M ARM definitions.
+# Cortex-M registers — `number` is the **GDB regnum** as expected by
+# stock GDB's `org.gnu.gdb.arm.m-profile` / `m-system` features.
+# These match what GDB's internal ARM unwinder hard-codes (notably
+# xpsr at 25); a `g` reply that disagrees on regnum makes GDB
+# misalign on unwind.
+#
+# The chip-side DCRSR selector — completely different numbering —
+# lives in `CortexMCore.__DCRSR_SELECTOR` and is consulted only
+# inside `reg_read` / `reg_write`.
 CORTEX_M_REGISTERS = (
     Register(0,  "r0",   32, RegisterType.GPR,    "general"),
     Register(1,  "r1",   32, RegisterType.GPR,    "general"),
@@ -47,10 +54,10 @@ CORTEX_M_REGISTERS = (
     Register(13, "sp",   32, RegisterType.SP,     "general"),
     Register(14, "lr",   32, RegisterType.LR,     "general"),
     Register(15, "pc",   32, RegisterType.PC,     "general"),
-    Register(16, "xpsr", 32, RegisterType.SYSTEM, "general"),
-    Register(17, "msp",  32, RegisterType.SP,     "system"),
-    Register(18, "psp",  32, RegisterType.SP,     "system"),
-    Register(20, "cfbp", 32, RegisterType.SYSTEM, "system"),
+    Register(25, "xpsr", 32, RegisterType.SYSTEM, "general"),
+    Register(26, "msp",  32, RegisterType.SP,     "system"),
+    Register(27, "psp",  32, RegisterType.SP,     "system"),
+    Register(28, "cfbp", 32, RegisterType.SYSTEM, "system"),
 )
 
 
@@ -59,6 +66,20 @@ class CortexMCore(Core):
 
     gdb_feature_name = "org.gnu.gdb.arm.m-profile"
     gdb_byteorder = "little"
+
+    # GDB regnum (in CORTEX_M_REGISTERS) → DCRSR selector. The two
+    # number spaces coincide for r0..pc, then diverge: stock GDB
+    # has xpsr at regnum 25 (its internal unwinder hard-codes it),
+    # while DCRSR carries xpsr at selector 16.
+    __DCRSR_SELECTOR = {
+        "r0": 0, "r1": 1, "r2": 2, "r3": 3, "r4": 4, "r5": 5,
+        "r6": 6, "r7": 7, "r8": 8, "r9": 9, "r10": 10, "r11": 11,
+        "r12": 12,
+        "sp": 13, "lr": 14, "pc": 15,
+        "xpsr": 16,
+        "msp": 17, "psp": 18,
+        "cfbp": 20,
+    }
 
     def __init__(self, name: str, scs: Scs, fpb: Fpb | None = None,
                  dwt: Dwt | None = None):
@@ -153,15 +174,15 @@ class CortexMCore(Core):
 
     async def reg_read(self, regs):
         registers = [self.lookup_register(r) for r in regs]
-        numbers = [r.number for r in registers]
-        values = await self.scs.cpu_regs_get(numbers)
+        selectors = [self.__DCRSR_SELECTOR[r.name] for r in registers]
+        values = await self.scs.cpu_regs_get(selectors)
         return dict(zip(registers, values))
 
     async def reg_write(self, reg_values):
         pairs = []
         for k, v in reg_values.items():
             r = self.lookup_register(k)
-            pairs.append((r.number, v))
+            pairs.append((self.__DCRSR_SELECTOR[r.name], v))
         await self.scs.cpu_regs_set(pairs)
 
     async def breakpoint_add(self, addr, kind):

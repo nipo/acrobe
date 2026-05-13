@@ -26,7 +26,7 @@ from ...component.nordic.ctrl_ap import CtrlAp
 from ...db import NoMatch
 from ..debuggable import Debuggable
 from ..loadable import Loadable
-from ..region import Flash
+from ..region import Flash, Ram
 from ..target import Target
 from .cortex_m import CortexMDebuggable, CortexMTarget
 
@@ -326,6 +326,7 @@ async def _build_nrf52_target(dp, ap, part, ctrl_ap):
     page_size = await ap.read32(FICR_CODEPAGESIZE)
     page_count = await ap.read32(FICR_CODESIZE)
     flash_size = page_size * page_count
+    ram_kb = await ap.read32(FICR_INFO_RAM)
 
     rom_tables = ap.children_of_class(RomTable)
     rt = next((r for r in rom_tables if r.children_of_class(Scs)), None)
@@ -337,7 +338,13 @@ async def _build_nrf52_target(dp, ap, part, ctrl_ap):
     target.claim(dp, ap, rt)
     if ctrl_ap is not None:
         target.claim(ctrl_ap)
-    target.child_add(CortexMDebuggable.from_romtable(rt, ap))
+
+    debug = CortexMDebuggable.from_romtable(rt, ap)
+    # Tell GDB the chip's RAM range is accessible — without this the
+    # client's memory-map clamping rejects `x/...` of any 0x2000_xxxx
+    # address before even sending an `m` packet.
+    debug.memory_map.append(Ram("sram", 0x20000000, ram_kb * 1024))
+    target.child_add(debug)
 
     loadable = Nrf52Loadable("main", ctrl_ap=ctrl_ap)
     loadable.child_add(

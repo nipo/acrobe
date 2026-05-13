@@ -14,7 +14,7 @@ from acrobe.target import Loadable, Target
 from acrobe.target.arm.cortex_m import CortexMDebuggable
 from acrobe.target.debuggable import Debuggable
 from acrobe.target.arm.nrf52 import (
-    FICR_CODEPAGESIZE, FICR_CODESIZE, FICR_INFO_PART,
+    FICR_CODEPAGESIZE, FICR_CODESIZE, FICR_INFO_PART, FICR_INFO_RAM,
     NRF52_PARTS, NVMC_CONFIG, NVMC_CONFIG_EEN,
     NVMC_CONFIG_REN, NVMC_CONFIG_WEN, NVMC_ERASEPAGE,
     NVMC_ERASEUICR, NVMC_READY, NVMC_READY_BIT, UICR_BASE,
@@ -33,12 +33,13 @@ class MockAp(MemAp):
     immediately — keeps tests fast."""
 
     def __init__(self, name="ap", *, flash_size=0x100000, page_size=0x1000,
-                 part=0x52840):
+                 part=0x52840, ram_kb=256):
         Node.__init__(self, name)
         self.flash = bytearray(b"\xff" * flash_size)
         self.flash_size = flash_size
         self.page_size = page_size
         self.part = part
+        self.ram_kb = ram_kb
         self.config = NVMC_CONFIG_REN
         self.config_history: list[int] = []
         self.erased_pages: list[int] = []
@@ -69,6 +70,8 @@ class MockAp(MemAp):
             return self.__future(self.page_size)
         if addr == FICR_CODESIZE:
             return self.__future(self.flash_size // self.page_size)
+        if addr == FICR_INFO_RAM:
+            return self.__future(self.ram_kb)
         if addr == NVMC_READY:
             return self.__future(NVMC_READY_BIT)
         if 0 <= addr < self.flash_size:
@@ -261,6 +264,23 @@ class TestNrf52Probe:
         code = next(f for f in flashes if f.name == "code")
         assert code.size == 0x100000
         assert code.write_page_size == 0x1000
+
+    @pytest.mark.asyncio
+    async def test_ram_in_debuggable_memory_map(self):
+        """GDB needs the SRAM range advertised in qXfer:memory-map
+        or it refuses to send `m` for any 0x2000_xxxx address."""
+        from acrobe.target.region import Ram
+
+        dp = FakeDp()
+        ap = MockAp(part=0x52840)
+        dp._child_attach(ap)
+        _make_rom_table_with_scs(ap)
+        target = await nrf52_probe(dp)
+        debug = target.children_of_class(CortexMDebuggable)[0]
+        rams = [r for r in debug.memory_map if isinstance(r, Ram)]
+        assert len(rams) == 1
+        assert rams[0].address == 0x20000000
+        assert rams[0].size == 256 * 1024  # nRF52840: 256 KiB
 
     @pytest.mark.asyncio
     async def test_unknown_part_declines(self):
