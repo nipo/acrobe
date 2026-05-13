@@ -5,6 +5,11 @@ Responder bound to the shared Debuggable / Loadable. The server
 loop reads bytes, accumulates them into packets, hands packets to
 the Responder, and writes responses. Ack-mode and Ctrl-C (0x03)
 interrupts are handled at the Session layer.
+
+Every command in and response out is logged at PROTOCOL level
+(`-vvvvv` on the CLI) — invaluable when a real GDB client
+complains "Invalid remote reply" or hangs mid-session. ASCII
+payloads log as text; non-printable ones fall back to hex.
 """
 
 from __future__ import annotations
@@ -14,6 +19,24 @@ import logging
 
 from . import message
 from .protocol import Responder
+
+
+_PRINTABLE = set(range(0x20, 0x7F))
+
+
+def _pretty(payload: bytes, *, limit: int = 256) -> str:
+    """Format a packet payload for the log.
+
+    Printable ASCII → quoted text. Anything with non-printable
+    bytes → hex. Truncated to `limit` bytes with an ellipsis when
+    longer."""
+    if not payload:
+        return "<empty>"
+    snippet = payload[:limit]
+    trailer = "..." if len(payload) > limit else ""
+    if all(b in _PRINTABLE for b in snippet):
+        return repr(snippet.decode("ascii")) + trailer
+    return snippet.hex() + trailer
 
 
 class Session:
@@ -69,22 +92,25 @@ class Session:
             b = self.buffer[0]
             if b == self.INTERRUPT:
                 self.buffer.pop(0)
+                self.logger.protocol("<- INTERRUPT")
                 response = await self.responder.handle_interrupt()
                 if response is not None:
                     await self.__send_response(response)
                 continue
             if b == 0x2B:  # '+', client ACK
                 self.buffer.pop(0)
+                self.logger.protocol("<- ACK")
                 continue
             if b == 0x2D:  # '-', client NACK
                 self.buffer.pop(0)
                 # Spec says retransmit last packet; we don't keep one
                 # because no-ack mode is the common case. Logging only.
-                self.logger.debug("got NACK from %s", self.peer_name)
+                self.logger.protocol("<- NACK")
                 continue
             if b != 0x24:  # '$'
                 # Resynchronise on $.
-                self.buffer.pop(0)
+                dropped = self.buffer.pop(0)
+                self.logger.protocol("<- drop stray byte 0x%02x", dropped)
                 continue
             end = self.buffer.find(b"#")
             if end < 0 or end + 2 >= len(self.buffer):
@@ -99,6 +125,7 @@ class Session:
                 self.logger.warning("bad packet from %s: %s",
                                     self.peer_name, packet)
                 continue
+            self.logger.protocol("<- %s", _pretty(payload))
             if self.responder.packet_ack:
                 self.writer.write(b"+")
                 await self.writer.drain()
@@ -111,6 +138,7 @@ class Session:
                 self.responder.no_ack_mode_requested = False
 
     async def __send_response(self, payload: bytes) -> None:
+        self.logger.protocol("-> %s", _pretty(payload))
         framed = message.frame(payload)
         self.writer.write(framed)
         await self.writer.drain()
