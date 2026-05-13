@@ -210,18 +210,130 @@ class TestResolve:
 
     @pytest.mark.asyncio
     async def test_channel_out_of_range(self):
+        """An unreachable channel keeps the pump in the
+        ESTABLISH loop — ready never sets, writes block, no
+        crash."""
         bus = MockBus()
         _stage_control_block(bus, cb_addr=0x20000400, max_up=1)
         rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
         rtt.up_channel = 5
+        rtt.RESCAN_INTERVAL = 0.05
         await rtt.start()
-        # Pump task fails on the bad channel; the failure surfaces
-        # when we await it.
-        with pytest.raises(RttError):
-            await rtt._Rtt__pump_task
+        await asyncio.sleep(0.2)
+        assert not rtt._Rtt__ready.is_set()
+        await rtt.stop()
 
 
 # -- UP pump --------------------------------------------------------
+
+class TestValidation:
+    """`__resolve_descriptors` refuses anything that doesn't look
+    like a real RTT control block — protects against the user
+    pointing `address=` at noise or a half-initialised block."""
+
+    @pytest.mark.asyncio
+    async def test_missing_magic(self):
+        bus = MockBus()
+        rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
+        rtt.RESCAN_INTERVAL = 0.05
+        # No control block staged → all zero bytes at cb_addr.
+        await rtt.start()
+        await asyncio.sleep(0.2)
+        assert not rtt._Rtt__ready.is_set()
+        await rtt.stop()
+
+    @pytest.mark.asyncio
+    async def test_absurd_max_buffers(self):
+        bus = MockBus()
+        # Stage a header with a bogus MaxNumUpBuffers.
+        off = 0x400
+        bus.memory[off:off + 16] = RTT_MAGIC
+        bus.memory[off + 16:off + 20] = struct.pack("<I", 99)  # > sanity cap
+        bus.memory[off + 20:off + 24] = struct.pack("<I", 1)
+        rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
+        rtt.RESCAN_INTERVAL = 0.05
+        await rtt.start()
+        await asyncio.sleep(0.2)
+        assert not rtt._Rtt__ready.is_set()
+        await rtt.stop()
+
+    @pytest.mark.asyncio
+    async def test_buffer_pointer_outside_parent_ram(self):
+        bus = MockBus()
+        # Stage a normal header but point the UP buffer outside SRAM.
+        ud = _stage_control_block(bus, cb_addr=0x20000400)
+        # Rewrite up_buf_addr to something well past parent Ram end.
+        up_desc_off = ud["up_desc_addr"] - bus.base
+        bus.memory[up_desc_off + 4:up_desc_off + 8] = struct.pack(
+            "<I", 0x40000000)
+        rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
+        rtt.RESCAN_INTERVAL = 0.05
+        await rtt.start()
+        await asyncio.sleep(0.2)
+        assert not rtt._Rtt__ready.is_set()
+        await rtt.stop()
+
+    @pytest.mark.asyncio
+    async def test_buffer_size_absurd(self):
+        bus = MockBus()
+        ud = _stage_control_block(bus, cb_addr=0x20000400)
+        # 1 MB buffer in 256 KB SRAM — both absurd-size and overflow.
+        up_desc_off = ud["up_desc_addr"] - bus.base
+        bus.memory[up_desc_off + 8:up_desc_off + 12] = struct.pack(
+            "<I", 1 << 20)
+        rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
+        rtt.RESCAN_INTERVAL = 0.05
+        await rtt.start()
+        await asyncio.sleep(0.2)
+        assert not rtt._Rtt__ready.is_set()
+        await rtt.stop()
+
+    @pytest.mark.asyncio
+    async def test_head_past_buffer_size(self):
+        bus = MockBus()
+        ud = _stage_control_block(bus, cb_addr=0x20000400, up_buf_size=64)
+        # WrOff = 100, but size is 64 → invalid.
+        up_desc_off = ud["up_desc_addr"] - bus.base
+        bus.memory[up_desc_off + 12:up_desc_off + 16] = struct.pack(
+            "<I", 100)
+        rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
+        rtt.RESCAN_INTERVAL = 0.05
+        await rtt.start()
+        await asyncio.sleep(0.2)
+        assert not rtt._Rtt__ready.is_set()
+        await rtt.stop()
+
+
+class TestRevalidate:
+    """Once the pump is running, magic disappearing → re-establish."""
+
+    @pytest.mark.asyncio
+    async def test_firmware_reload_triggers_reestablish(self):
+        bus = MockBus()
+        ud = _stage_control_block(bus, cb_addr=0x20000400)
+        rtt, _ = _make_rtt(bus, cb_addr=0x20000400)
+        rtt.poll_period = 0.005
+        rtt.REVALIDATE_INTERVAL = 0.02
+        rtt.RESCAN_INTERVAL = 0.05
+        await rtt.start()
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
+
+        # Simulate firmware wiping the control block.
+        bus.memory[0x400:0x400 + 16] = b"\x00" * 16
+
+        # Within REVALIDATE_INTERVAL, the pump notices and clears
+        # ready.
+        for _ in range(20):
+            await asyncio.sleep(0.02)
+            if not rtt._Rtt__ready.is_set():
+                break
+        assert not rtt._Rtt__ready.is_set()
+
+        # Restage the control block — pump should re-establish.
+        _stage_control_block(bus, cb_addr=0x20000400)
+        await asyncio.wait_for(rtt._Rtt__ready.wait(), timeout=1)
+        await rtt.stop()
+
 
 class TestUpPump:
     @pytest.mark.asyncio

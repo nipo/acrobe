@@ -33,10 +33,16 @@ RTT_MAGIC_LEN = len(RTT_MAGIC)
 RTT_HEADER_LEN = RTT_MAGIC_LEN + 8       # magic + max_up + max_down
 RTT_BUFFER_DESC_LEN = 24                  # 6 × uint32
 
+# Sanity bounds applied to whatever we read from the candidate
+# control block. They're generous — the goal is "this can't be
+# real RTT" detection, not "this matches my exact firmware".
+RTT_MAX_BUFFERS = 32
+RTT_MAX_BUFFER_SIZE = 64 * 1024
+
 
 class RttError(Exception):
-    """Raised when the control block can't be found or the requested
-    channel doesn't exist."""
+    """Raised when the control block can't be found, fails sanity
+    validation, or the requested channel doesn't exist."""
 
 
 @Ram.db.register("rtt")
@@ -63,6 +69,11 @@ class Rtt(SerialPort):
     DEFAULT_POLL_MS = 100
     SCAN_CHUNK = 4096
     RESCAN_INTERVAL = 1.0   # seconds between scan retries when not yet found
+    # Period between magic-still-present checks while the pump is
+    # running. Less aggressive than the buffer poll — its job is to
+    # detect a firmware reload (GDB-driven flash, hard reset, …)
+    # that wiped the previous control block.
+    REVALIDATE_INTERVAL = 1.0
 
     def __init__(self, ram: Ram):
         super().__init__("rtt")
@@ -71,6 +82,10 @@ class Rtt(SerialPort):
         self.up_channel = 0
         self.down_channel = 0
         self.cb_addr: int | None = None
+        # User-supplied address (via `address=` option) — preserved
+        # so we can fall back to it after an invalidation. None means
+        # "scan from scratch".
+        self.__fixed_cb_addr: int | None = None
         self.poll_period = self.DEFAULT_POLL_MS / 1000
 
         # Resolved when the control block is first found (may happen
@@ -101,6 +116,7 @@ class Rtt(SerialPort):
             return
         if key in ("address", "addr"):
             self.cb_addr = int(value, 0)
+            self.__fixed_cb_addr = self.cb_addr
             return
         if key == "poll":
             self.poll_period = int(value, 0) / 1000
@@ -230,11 +246,31 @@ class Rtt(SerialPort):
         raise RttError(f"SEGGER RTT magic not found in {self.ram.name}")
 
     async def __resolve_descriptors(self):
-        """Read the header + the two descriptors we care about and
-        cache the addresses / sizes / offsets for the pump."""
+        """Validate the candidate control block end-to-end and
+        cache the per-channel ring-buffer state.
+
+        Validation refuses anything that doesn't look like a real
+        RTT control block: missing magic, MaxNumUp/Down out of
+        sanity range, ring-buffer pointers outside the parent
+        Ram, buffer sizes absurd, head/tail offsets past the end
+        of their ring. Raises RttError on any of these — the
+        outer loop logs and retries (scan again or revisit the
+        user-fixed address)."""
         header = await self.ram.bus.mem_read(self.cb_addr, RTT_HEADER_LEN)
+        if bytes(header[:RTT_MAGIC_LEN]) != RTT_MAGIC:
+            raise RttError(
+                f"control block at 0x{self.cb_addr:08x}: magic "
+                f"mismatch (read: {bytes(header[:RTT_MAGIC_LEN]).hex()})")
         max_up, max_down = struct.unpack(
             "<II", header[RTT_MAGIC_LEN:RTT_HEADER_LEN])
+        if not (0 < max_up <= RTT_MAX_BUFFERS):
+            raise RttError(
+                f"MaxNumUpBuffers={max_up} out of sanity range "
+                f"(1..{RTT_MAX_BUFFERS})")
+        if not (0 < max_down <= RTT_MAX_BUFFERS):
+            raise RttError(
+                f"MaxNumDownBuffers={max_down} out of sanity range "
+                f"(1..{RTT_MAX_BUFFERS})")
         if not (0 <= self.up_channel < max_up):
             raise RttError(
                 f"UP channel {self.up_channel} out of range "
@@ -252,8 +288,28 @@ class Rtt(SerialPort):
 
         up = await self.ram.bus.mem_read(up_desc_addr, RTT_BUFFER_DESC_LEN)
         down = await self.ram.bus.mem_read(down_desc_addr, RTT_BUFFER_DESC_LEN)
-        u_name, u_buf, u_size, u_wr, u_rd, _ = struct.unpack("<6I", up)
-        d_name, d_buf, d_size, d_wr, d_rd, _ = struct.unpack("<6I", down)
+        _u_name, u_buf, u_size, u_wr, u_rd, _ = struct.unpack("<6I", up)
+        _d_name, d_buf, d_size, d_wr, d_rd, _ = struct.unpack("<6I", down)
+
+        for label, buf, size, wr, rd in [
+                ("UP", u_buf, u_size, u_wr, u_rd),
+                ("DOWN", d_buf, d_size, d_wr, d_rd)]:
+            if not (0 < size <= RTT_MAX_BUFFER_SIZE):
+                raise RttError(
+                    f"{label} buffer size {size} out of sanity range "
+                    f"(1..{RTT_MAX_BUFFER_SIZE})")
+            if not (self.ram.address <= buf < self.ram.end):
+                raise RttError(
+                    f"{label} buffer @ 0x{buf:08x} is outside parent "
+                    f"Ram 0x{self.ram.address:08x}-0x{self.ram.end:08x}")
+            if buf + size > self.ram.end:
+                raise RttError(
+                    f"{label} buffer @ 0x{buf:08x}+{size} extends past "
+                    f"parent Ram end 0x{self.ram.end:08x}")
+            if wr >= size or rd >= size:
+                raise RttError(
+                    f"{label} offsets WrOff={wr} RdOff={rd} past "
+                    f"buffer size {size}")
 
         self.__up_buf_addr = u_buf
         self.__up_buf_size = u_size
@@ -272,47 +328,94 @@ class Rtt(SerialPort):
             self.up_channel, u_size, u_buf,
             self.down_channel, d_size, d_buf)
 
+    async def __check_magic(self):
+        """Cheap recheck: is the 16-byte magic still there? If the
+        firmware was reloaded (GDB `load`, hardware reset) the old
+        control block is gone — we need to re-establish."""
+        magic = await self.ram.bus.mem_read(self.cb_addr, RTT_MAGIC_LEN)
+        if bytes(magic) != RTT_MAGIC:
+            raise RttError(
+                f"control block at 0x{self.cb_addr:08x} no longer "
+                f"holds the SEGGER magic — firmware likely reloaded")
+
     # -- Pump main loop ----------------------------------------------
 
     async def __main_loop(self):
+        """Three-state pump:
+
+        ESTABLISH — find a candidate cb_addr (scan or fixed),
+            validate everything, cache descriptors. Loops on
+            failure with RESCAN_INTERVAL sleeps.
+        READY → POLL — set the event; drain UP every poll_period.
+            Every REVALIDATE_INTERVAL also re-check that the
+            magic is still at cb_addr (cheap 16-byte read).
+        On revalidate failure, clear the event, reset cb_addr to
+        the user's fixed value (or None for scan), loop back to
+        ESTABLISH."""
         try:
-            await self.__wait_for_cb()
-            await self.__resolve_descriptors()
-            self.__ready.set()
             while True:
-                try:
-                    await self.__drain_up_once()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    # Transient bus errors do happen — GDB stomping
-                    # the AP's TAR state mid-poll, DAP STICKY flags
-                    # from a peripheral access, etc. Log and retry
-                    # next tick rather than killing the pump (which
-                    # leaves the RFC 2217 socket open but silent).
-                    self.logger.debug(
-                        "RTT UP-poll dropped: %s: %s",
-                        type(exc).__name__, exc)
-                await asyncio.sleep(self.poll_period)
+                await self.__establish_cb()
+                self.__ready.set()
+                last_revalidate = asyncio.get_event_loop().time()
+                while True:
+                    try:
+                        await self.__drain_up_once()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        # Transient bus errors do happen — log
+                        # and retry next tick.
+                        self.logger.debug(
+                            "RTT UP-poll dropped: %s: %s",
+                            type(exc).__name__, exc)
+
+                    now = asyncio.get_event_loop().time()
+                    if now - last_revalidate >= self.REVALIDATE_INTERVAL:
+                        try:
+                            await self.__check_magic()
+                            last_revalidate = now
+                        except RttError as exc:
+                            self.logger.info(
+                                "RTT control block invalidated: %s — "
+                                "re-establishing", exc)
+                            self.__ready.clear()
+                            self.cb_addr = self.__fixed_cb_addr
+                            break  # back to ESTABLISH
+
+                    await asyncio.sleep(self.poll_period)
         except asyncio.CancelledError:
             raise
         except Exception:
             self.logger.exception("RTT pump crashed")
             raise
 
-    async def __wait_for_cb(self):
-        """Locate the control block; retry-scan until it appears."""
-        if self.cb_addr is not None:
-            return
+    async def __establish_cb(self):
+        """Find a valid control block. Loops scan-or-revisit until
+        validation passes — covers both 'firmware hasn't run yet'
+        and 'fixed address turned out to be wrong'."""
         while True:
+            if self.cb_addr is None:
+                try:
+                    self.cb_addr = await self.__scan()
+                except RttError as exc:
+                    self.logger.info(
+                        "%s — retrying in %.1f s "
+                        "(firmware may not have called "
+                        "SEGGER_RTT_Init yet)",
+                        exc, self.RESCAN_INTERVAL)
+                    await asyncio.sleep(self.RESCAN_INTERVAL)
+                    continue
             try:
-                self.cb_addr = await self.__scan()
+                await self.__resolve_descriptors()
                 return
             except RttError as exc:
                 self.logger.info(
-                    "%s — retrying in %.1f s "
-                    "(firmware may not have called SEGGER_RTT_Init yet)",
-                    exc, self.RESCAN_INTERVAL)
+                    "RTT control block at 0x%08x rejected: %s — "
+                    "retrying in %.1f s",
+                    self.cb_addr, exc, self.RESCAN_INTERVAL)
+                # If the user pinned an address, revisit it; else
+                # null out so the next iteration scans afresh.
+                self.cb_addr = self.__fixed_cb_addr
                 await asyncio.sleep(self.RESCAN_INTERVAL)
 
     async def __drain_up_once(self):

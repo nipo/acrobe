@@ -465,8 +465,9 @@ class Scs(MemoryMappedComponent):
                 dhcsr = fh.result()
                 if not dhcsr & self.DHCSR_S_REGRDY:
                     ret.set_exception(RuntimeError(
-                    f"DCRSR read of reg {n} did not complete "
-                    f"(DHCSR=0x{dhcsr:08x}, S_REGRDY=0)"))
+                        f"DCRSR read of reg {n} did not complete "
+                        f"(DHCSR=0x{dhcsr:08x}, S_REGRDY=0)"))
+                    return
                 values.append(fd.result())
             ret.set_result(values)
 
