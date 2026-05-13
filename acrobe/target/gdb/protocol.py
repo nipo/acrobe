@@ -316,12 +316,19 @@ class Responder:
         return await self.__stop_reason()
 
     async def __poll_until_not_running(self):
+        # Only terminal-halt states end the wait. SLEEP (WFI/WFE) is
+        # *not* halted as far as GDB's `c` semantics go: the core
+        # will resume on the next interrupt, and the user expects
+        # Ctrl-C to be able to halt it. Treat SLEEP like RUN — keep
+        # polling until something genuinely stops execution or the
+        # interrupt task wins the race.
+        terminal = (CoreState.HALT, CoreState.LOCKUP, CoreState.FAULT)
         while True:
             try:
                 state = await self.current_core.state()
             except NotImplementedError:
                 return
-            if state != CoreState.RUN:
+            if state in terminal:
                 return
             await asyncio.sleep(self.RUN_POLL_INTERVAL)
 
@@ -509,21 +516,20 @@ class Responder:
             state = await self.current_core.state()
         except NotImplementedError:
             return b"T00"
-        if state == CoreState.RUN:
-            # Reached when wait_for_halt's exit raced the core's
-            # actual S_HALT settle, or the core is genuinely
-            # still running (e.g. stuck in a fault loop). Force
-            # halt and re-read so GDB sees a stable halted target
-            # rather than a `T05` that's a lie about state.
+        if state in (CoreState.RUN, CoreState.SLEEP):
+            # The core is not actually halted but we're about to
+            # tell GDB it is. Force a halt and re-read so the
+            # stop reply is truthful. SLEEP (WFI/WFE) still
+            # executes — same treatment as RUN.
             try:
                 await self.current_core.halt()
                 state = await self.current_core.state()
             except NotImplementedError:
                 return b"T05"
-            if state == CoreState.RUN:
-                # Core wouldn't halt — chip in lockup or worse.
-                # Best we can do: report a SIGSEGV-flavoured stop
-                # so GDB doesn't keep spinning.
+            if state in (CoreState.RUN, CoreState.SLEEP):
+                # Core wouldn't halt — lockup or worse. Best we
+                # can do: SIGSEGV-flavoured stop so GDB doesn't
+                # keep spinning.
                 return b"T0b"
         try:
             cause = await self.current_core.halt_cause()

@@ -1,5 +1,6 @@
 """Tests for the GDB Remote Serial Protocol responder."""
 
+import asyncio
 import binascii
 import pytest
 
@@ -335,6 +336,31 @@ class TestResponderRunControl:
         resp = await responder.handle_interrupt()
         assert "halt" in responder.current_core.history
         # Halt flipped the state; halt_cause is DEBUGGER → T05hwbreak.
+        assert resp == b"T05hwbreak:;"
+
+    @pytest.mark.asyncio
+    async def test_sleep_does_not_count_as_halted(self, responder):
+        # WFI/WFE keeps the chip executable. `c` must not return
+        # a stop reply just because S_SLEEP is set; GDB has to be
+        # able to Ctrl-C out of an idle loop.
+        responder.current_core.state_value = CoreState.SLEEP
+        responder.RUN_POLL_INTERVAL = 0.001
+        poll = asyncio.create_task(
+            Responder._Responder__poll_until_not_running(responder))
+        await asyncio.sleep(0.01)
+        assert not poll.done()
+        responder.current_core.state_value = CoreState.HALT
+        await asyncio.wait_for(poll, timeout=0.5)
+
+    @pytest.mark.asyncio
+    async def test_stop_reason_force_halts_from_sleep(self, responder):
+        responder.current_core.state_value = CoreState.SLEEP
+        responder.current_core.history.clear()
+        resp = await responder.handle_interrupt()
+        # SLEEP must trigger the force-halt path (handle_interrupt
+        # calls halt itself, then __stop_reason re-reads). State
+        # ends up HALT, halt_cause DEBUGGER → T05hwbreak.
+        assert "halt" in responder.current_core.history
         assert resp == b"T05hwbreak:;"
 
 
