@@ -437,28 +437,45 @@ class Scs(MemoryMappedComponent):
     async def cpu_regs_get(self, register_numbers) -> list[int]:
         """Batch-read core registers by their DCRSR number.
 
-        Each transfer is `write DCRSR(sel) → read DCRDR`. The
-        REGRDY status bit is not polled here — the DAP back-end's
-        in-order delivery is enough on every Cortex-M that lets us
-        access the SCS via Mem-AP at all."""
-        all_futures = []
-        read_futures = []
+        Each transfer is `write DCRSR(sel)` → wait for
+        `DHCSR.S_REGRDY=1` → `read DCRDR`. Per ARMv7-M ARM
+        C1.6.3: reading DCRDR while S_REGRDY is 0 returns
+        UNKNOWN — most cores return 0, which is exactly the
+        all-zeros symptom that shows up with DAP contention.
+        """
+        values = []
         for n in register_numbers:
-            all_futures.append(self.reg_write(self.DCRSR_OFFSET, n))
-            fut = self.reg_read(self.DCRDR_OFFSET)
-            read_futures.append(fut)
-            all_futures.append(fut)
-        await asyncio.gather(*all_futures)
-        return [fut.result() for fut in read_futures]
+            await self.reg_write(self.DCRSR_OFFSET, n)
+            await self.__wait_regrdy(op=f"read reg {n}")
+            values.append(await self.reg_read(self.DCRDR_OFFSET))
+        return values
 
     async def cpu_regs_set(self, pairs) -> None:
-        """Batch-write `(register_number, value)` pairs to the core."""
-        futures = []
+        """Batch-write `(register_number, value)` pairs to the core.
+
+        Sequence per register: write value to DCRDR → write
+        selector|WRITE to DCRSR → wait for S_REGRDY=1 (transfer
+        committed into the target register)."""
         for n, value in pairs:
-            futures.append(self.reg_write(self.DCRDR_OFFSET, value))
-            futures.append(self.reg_write(
-                self.DCRSR_OFFSET, n | self.DCRSR_WRITE))
-        await asyncio.gather(*futures)
+            await self.reg_write(self.DCRDR_OFFSET, value)
+            await self.reg_write(
+                self.DCRSR_OFFSET, n | self.DCRSR_WRITE)
+            await self.__wait_regrdy(op=f"write reg {n}")
+
+    async def __wait_regrdy(self, *, op: str,
+                            max_polls: int = 10) -> None:
+        """Poll DHCSR.S_REGRDY until set, or raise after `max_polls`
+        round-trips. Per ARMv7-M ARM, S_REGRDY is the only correct
+        signal that a DCRSR-initiated transfer has actually
+        finished."""
+        for _ in range(max_polls):
+            dhcsr = await self.reg_read(self.DHCSR_OFFSET)
+            if dhcsr & self.DHCSR_S_REGRDY:
+                return
+        raise RuntimeError(
+            f"DCRSR transfer did not complete ({op}) — "
+            f"DHCSR.S_REGRDY never set after {max_polls} polls. "
+            "Is the core actually halted?")
 
     async def cpu_reset(self, *, poll_interval: float = 0.01,
                         max_polls: int = 100) -> None:

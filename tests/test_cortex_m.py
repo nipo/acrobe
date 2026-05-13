@@ -167,9 +167,11 @@ class TestScsRegisterIo:
     @pytest.mark.asyncio
     async def test_cpu_regs_get_writes_selector_reads_data(self):
         scs, bus = make_scs()
-        # Stage DCRDR with sequential values; the test verifies the
-        # DCRSR write/DCRDR read sequence rather than realistic CPU
-        # behaviour. Increment DCRDR on every selector write.
+        # S_REGRDY must be set in DHCSR for the post-DCRSR poll to
+        # exit; without that, cpu_regs_get times out per ARMv7-M
+        # ARM C1.6.3 (DCRDR is UNKNOWN until S_REGRDY is set).
+        bus.memory[scs.base + scs.DHCSR_OFFSET] = scs.DHCSR_S_REGRDY
+
         counter = [0]
         results = [0x11111111, 0x22222222, 0x33333333]
 
@@ -180,7 +182,6 @@ class TestScsRegisterIo:
         bus.write_hooks[scs.base + scs.DCRSR_OFFSET] = on_dcrsr_write
         values = await scs.cpu_regs_get([0, 1, 15])
         assert values == results
-        # Each register triggered one DCRSR write + one DCRDR read.
         dcrsr_writes = [v for a, v in bus.writes
                         if a == scs.base + scs.DCRSR_OFFSET]
         assert dcrsr_writes == [0, 1, 15]
@@ -188,8 +189,8 @@ class TestScsRegisterIo:
     @pytest.mark.asyncio
     async def test_cpu_regs_set_writes_data_then_selector_with_write_bit(self):
         scs, bus = make_scs()
+        bus.memory[scs.base + scs.DHCSR_OFFSET] = scs.DHCSR_S_REGRDY
         await scs.cpu_regs_set([(0, 0xDEADBEEF), (15, 0x08000001)])
-        # Walk through bus.writes in submission order.
         scs_writes = [(a, v) for a, v in bus.writes
                       if a in (scs.base + scs.DCRDR_OFFSET,
                                scs.base + scs.DCRSR_OFFSET)]
@@ -199,6 +200,14 @@ class TestScsRegisterIo:
             (scs.base + scs.DCRDR_OFFSET, 0x08000001),
             (scs.base + scs.DCRSR_OFFSET, 15 | scs.DCRSR_WRITE),
         ]
+
+    @pytest.mark.asyncio
+    async def test_cpu_regs_get_times_out_if_regrdy_never_sets(self):
+        scs, bus = make_scs()
+        # DHCSR has S_REGRDY=0; poll should exhaust and raise.
+        bus.memory[scs.base + scs.DHCSR_OFFSET] = 0
+        with pytest.raises(RuntimeError, match="S_REGRDY never set"):
+            await scs.cpu_regs_get([0])
 
 
 class TestScsReset:
@@ -448,6 +457,9 @@ class TestCortexMCore:
     @pytest.mark.asyncio
     async def test_reg_read_returns_dict(self):
         core, scs, _, bus = self.make()
+        # S_REGRDY must be set for the post-DCRSR poll to clear;
+        # leave it asserted throughout.
+        bus.memory[scs.base + scs.DHCSR_OFFSET] = scs.DHCSR_S_REGRDY
         counter = [0]
         results = [0xAAAA0000, 0xBBBB0000]
         bus.write_hooks[scs.base + scs.DCRSR_OFFSET] = lambda _: (
@@ -461,12 +473,13 @@ class TestCortexMCore:
     @pytest.mark.asyncio
     async def test_reg_write(self):
         core, scs, _, bus = self.make()
+        bus.memory[scs.base + scs.DHCSR_OFFSET] = scs.DHCSR_S_REGRDY
         await core.reg_write({"pc": 0x08000001})
         # DCRDR data + DCRSR with write bit set + register 15.
         pc = core.lookup_register("pc")
         writes = bus.writes
         assert (scs.base + scs.DCRDR_OFFSET, 0x08000001) in writes
-        assert (scs.base + scs.DCRSR_OFFSET, pc.number | scs.DCRSR_WRITE) in writes
+        assert (scs.base + scs.DCRSR_OFFSET, 15 | scs.DCRSR_WRITE) in writes
 
     @pytest.mark.asyncio
     async def test_reset_cycles_catch(self):
