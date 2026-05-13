@@ -434,7 +434,7 @@ class Scs(MemoryMappedComponent):
             self.reg_write(self.DHCSR_OFFSET, base),
         )
 
-    async def cpu_regs_get(self, register_numbers) -> list[int]:
+    def cpu_regs_get(self, register_numbers) -> asyncio.Future:
         """Batch-read core registers by their DCRSR number.
 
         Per ARMv7-M ARM C1.6.3 the host must observe
@@ -442,15 +442,15 @@ class Scs(MemoryMappedComponent):
         matching DCRDR read — otherwise DCRDR is UNKNOWN (returns
         zero on every core we've tested).
 
-        Sequence per register: write DCRSR(sel) → read DHCSR →
-        read DCRDR. The reads are posted synchronously to the
-        Batcher; the first `await` in the result loop triggers
-        the flush, every subsequent `await` resolves immediately
-        from the same batch. The DHCSR read between DCRSR and
-        DCRDR buys the CPU its round-trip's worth of cycles to
-        set REGRDY — by spec it should always be 1 by then; the
-        assert documents the invariant and trips if real silicon
-        ever surprises us."""
+        The DHCSR read between DCRSR and DCRDR buys the CPU its
+        round-trip's worth of cycles to set REGRDY — by spec it should
+        always be 1 by then; the assert documents the invariant and
+        trips if real silicon ever surprises us.
+
+        """
+
+        ret = asyncio.Future()
+
         pending = [
             (n,
              self.reg_write(self.DCRSR_OFFSET, n),
@@ -458,23 +458,31 @@ class Scs(MemoryMappedComponent):
              self.reg_read(self.DCRDR_OFFSET))
             for n in register_numbers
         ]
-        values = []
-        for n, fw, fh, fd in pending:
-            await fw
-            dhcsr = await fh
-            assert dhcsr & self.DHCSR_S_REGRDY, (
-                f"DCRSR read of reg {n} did not complete "
-                f"(DHCSR=0x{dhcsr:08x}, S_REGRDY=0)")
-            values.append(await fd)
-        return values
 
-    async def cpu_regs_set(self, pairs) -> None:
+        def gather(fut):
+            values = []
+            for n, fw, fh, fd in pending:
+                dhcsr = fh.result()
+                if not dhcsr & self.DHCSR_S_REGRDY:
+                    ret.set_exception(RuntimeError(
+                    f"DCRSR read of reg {n} did not complete "
+                    f"(DHCSR=0x{dhcsr:08x}, S_REGRDY=0)"))
+                values.append(fd.result())
+            ret.set_result(values)
+
+        pending[-1][-1].add_done_callback(gather)
+        return ret
+
+    def cpu_regs_set(self, pairs) -> asyncio.Future:
         """Batch-write `(register_number, value)` pairs to the core.
 
         Sequence per register: write value to DCRDR → write
         selector|WRITE to DCRSR → read DHCSR. The DHCSR read
         commits the previous DCRSR transfer's REGRDY status,
         same pattern as cpu_regs_get."""
+
+        ret = asyncio.Future()
+
         pending = [
             (n,
              self.reg_write(self.DCRDR_OFFSET, value),
@@ -482,13 +490,19 @@ class Scs(MemoryMappedComponent):
              self.reg_read(self.DHCSR_OFFSET))
             for n, value in pairs
         ]
-        for n, fd, fs, fh in pending:
-            await fd
-            await fs
-            dhcsr = await fh
-            assert dhcsr & self.DHCSR_S_REGRDY, (
-                f"DCRSR write of reg {n} did not complete "
-                f"(DHCSR=0x{dhcsr:08x}, S_REGRDY=0)")
+
+        def gather(fut):
+            for n, fd, fs, fh in pending:
+                dhcsr = fh.result()
+                if not dhcsr & self.DHCSR_S_REGRDY:
+                    ret.set_exception(RuntimeError(
+                    f"DCRSR write of reg {n} did not complete "
+                    f"(DHCSR=0x{dhcsr:08x}, S_REGRDY=0)"))
+                    return
+            ret.set_result(None)
+        pending[-1][-1].add_done_callback(gather)
+
+        return ret
 
     async def cpu_reset(self, *, poll_interval: float = 0.01,
                         max_polls: int = 100) -> None:
