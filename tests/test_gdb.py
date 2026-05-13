@@ -201,7 +201,10 @@ class TestResponderQuery:
     @pytest.mark.asyncio
     async def test_question_returns_stop_reason(self, responder):
         resp = await responder.handle_packet(b"?")
-        assert resp == b"T05hwbreak:;"
+        # FakeCore reports DEBUGGER halt cause → bare SIGTRAP
+        # (S-form). hwbreak qualifier is reserved for actual HW
+        # breakpoint hits.
+        assert resp == b"S05"
 
     @pytest.mark.asyncio
     async def test_q_supported(self, responder):
@@ -335,8 +338,9 @@ class TestResponderRunControl:
         responder.current_core.history.clear()
         resp = await responder.handle_interrupt()
         assert "halt" in responder.current_core.history
-        # Halt flipped the state; halt_cause is DEBUGGER → T05hwbreak.
-        assert resp == b"T05hwbreak:;"
+        # Ctrl-C path → SIGINT, not SIGTRAP. GDB needs SIGINT to
+        # surface the interrupt at the user prompt.
+        assert resp == b"S02"
 
     @pytest.mark.asyncio
     async def test_sleep_does_not_count_as_halted(self, responder):
@@ -357,11 +361,10 @@ class TestResponderRunControl:
         responder.current_core.state_value = CoreState.SLEEP
         responder.current_core.history.clear()
         resp = await responder.handle_interrupt()
-        # SLEEP must trigger the force-halt path (handle_interrupt
-        # calls halt itself, then __stop_reason re-reads). State
-        # ends up HALT, halt_cause DEBUGGER → T05hwbreak.
+        # Whether SLEEP forced an extra halt or not, the user-
+        # initiated interrupt path always returns SIGINT.
         assert "halt" in responder.current_core.history
-        assert resp == b"T05hwbreak:;"
+        assert resp == b"S02"
 
 
 class TestResponderBreakpoints:
@@ -490,6 +493,59 @@ class TestServer:
             await writer.wait_closed()
         finally:
             await server.close()
+
+
+class TestSessionInterrupt:
+    """next_interrupt_byte must recognize both the bare 0x03 byte
+    and the $vCtrlC# packet — some GDB versions send the latter
+    while target is running."""
+
+    async def __make_session(self):
+        from acrobe.target.gdb.protocol import Responder
+        from acrobe.target.gdb.server import Session
+        reader = asyncio.StreamReader()
+        # Minimal writer stub — captures writes so we can inspect
+        # the OK reply for vCtrlC and the bare ack bytes.
+        sink = bytearray()
+
+        class FakeWriter:
+            def write(self, data): sink.extend(data)
+            async def drain(self): pass
+            def get_extra_info(self, _): return ("test", 0)
+            def close(self): pass
+            async def wait_closed(self): pass
+
+        debug = FakeDebuggable()
+        responder = Responder(debug)
+        session = Session(reader, FakeWriter(), responder)
+        return session, reader, sink
+
+    @pytest.mark.asyncio
+    async def test_bare_03_byte_returns(self):
+        session, reader, _ = await self.__make_session()
+        reader.feed_data(b"\x03")
+        await asyncio.wait_for(session.next_interrupt_byte(), timeout=0.5)
+
+    @pytest.mark.asyncio
+    async def test_vctrlc_packet_returns_and_acks_ok(self):
+        session, reader, sink = await self.__make_session()
+        reader.feed_data(message.frame(b"vCtrlC"))
+        await asyncio.wait_for(session.next_interrupt_byte(), timeout=0.5)
+        # vCtrlC must be acked at the protocol level (`+`) and then
+        # answered with a framed OK so GDB knows the interrupt was
+        # accepted.
+        assert b"+" in sink
+        assert b"$OK#" in bytes(sink)
+
+    @pytest.mark.asyncio
+    async def test_unrelated_packet_during_continue_is_dropped(self):
+        session, reader, sink = await self.__make_session()
+        reader.feed_data(message.frame(b"qfThreadInfo"))
+        reader.feed_data(b"\x03")
+        await asyncio.wait_for(session.next_interrupt_byte(), timeout=0.5)
+        # Unrelated packet must be acked (so GDB doesn't retransmit
+        # forever) but otherwise ignored.
+        assert sink.count(b"+") >= 1
 
 
 class TestResponderVCont:

@@ -52,11 +52,23 @@ STOP_REASON = {
 HALT_CAUSE_TAG = {
     HaltCause.BREAKPOINT:  "T05hwbreak:;",
     HaltCause.WATCHPOINT:  "T05watch:;",
-    HaltCause.DEBUGGER:    "T05hwbreak:;",
+    # DEBUGGER means "we wrote C_HALT" — single-step completion or
+    # an explicit halt. Bare SIGTRAP. The `hwbreak` qualifier is
+    # contractual ("stopped at a hardware breakpoint GDB knows
+    # about") and lying about it makes GDB silently resume; the
+    # T-form needs valid n:r pairs, so use the S-form for a bare
+    # signal.
+    HaltCause.DEBUGGER:    "S05",
     HaltCause.INSTRUCTION: "S04",  # SIGILL
     HaltCause.EXCEPTION:   "T05syscall_entry:;",
     HaltCause.UNKNOWN:     "T00",
 }
+
+# Stop reply for a user-initiated Ctrl-C / vCtrlC interrupt.
+# SIGINT (signal 02) is what GDB expects for that path — without it
+# GDB will not surface the stop to the user prompt. Bare S-form
+# because we have no extra info to send.
+INTERRUPT_STOP_REPLY = b"S02"
 
 
 class Responder:
@@ -124,7 +136,8 @@ class Responder:
     async def handle_interrupt(self) -> bytes | None:
         """Ctrl-C (0x03) byte received outside a packet."""
         await self.current_core.halt()
-        return await self.__stop_reason()
+        # SIGINT, not SIGTRAP — see INTERRUPT_STOP_REPLY.
+        return INTERRUPT_STOP_REPLY
 
     # -- Handlers --------------------------------------------------
 
@@ -313,6 +326,10 @@ class Responder:
                     t.cancel()
         if interrupt is not None and interrupt in done:
             await self.current_core.halt()
+            # The wait ended because the user pressed Ctrl-C / sent
+            # vCtrlC. SIGINT is the correct stop reply, regardless
+            # of where execution happened to stop.
+            return INTERRUPT_STOP_REPLY
         return await self.__stop_reason()
 
     async def __poll_until_not_running(self):

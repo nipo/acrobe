@@ -322,7 +322,8 @@ class TestContinueAndInterrupt:
         # resume() leaves state=HALT (state_provider unchanged).
         await client.disable_ack()
         reply = await client.send_packet(b"c")
-        assert reply.startswith(b"T05")
+        # DEBUGGER halt cause → bare SIGTRAP.
+        assert reply == b"S05"
         assert "resume" in core.history
 
     @pytest.mark.asyncio
@@ -348,7 +349,8 @@ class TestContinueAndInterrupt:
         await client.writer.drain()
         # Read the stop-reply packet.
         reply = await client._GdbClient__read_packet()
-        assert reply.startswith(b"T05") or reply.startswith(b"S")
+        # User-initiated interrupt → SIGINT.
+        assert reply == b"S02"
         assert "halt" in core.history
 
     @pytest.mark.asyncio

@@ -146,23 +146,80 @@ class Session:
     # -- Transport hook for the Responder --------------------------
 
     async def next_interrupt_byte(self) -> None:
-        """Block until the client sends 0x03 (Ctrl-C). Bytes that
-        aren't 0x03 (stray +/-, garbage during a resume) are
-        discarded. Raises ConnectionResetError if the client
+        """Block until the client signals an interrupt. Two
+        encodings are accepted:
+
+        - Bare 0x03 byte (default all-stop Ctrl-C).
+        - `$vCtrlC#xx` packet (non-stop; some all-stop GDB
+          versions also use it).
+
+        Stray ack/nack bytes are dropped. Any other packet that
+        arrives during a continue is acknowledged (so GDB doesn't
+        retransmit) and then dropped — `c`/`s` is the only command
+        in flight, and we don't process new packets until the wait
+        completes. Raises ConnectionResetError if the client
         disconnects."""
+        self.logger.protocol("waiting for interrupt (Ctrl-C or vCtrlC)")
         while True:
-            while self.buffer:
-                b = self.buffer[0]
-                if b == self.INTERRUPT:
-                    self.buffer.pop(0)
-                    return
-                # Drop anything else silently — GDB shouldn't be
-                # sending packets while the target is running.
-                self.buffer.pop(0)
+            consumed = await self.__parse_one_interrupt()
+            if consumed:
+                return
             chunk = await self.reader.read(4096)
             if not chunk:
                 raise ConnectionResetError("client disconnected")
+            self.logger.protocol(
+                "interrupt-wait: read %d byte(s): %s",
+                len(chunk), chunk.hex())
             self.buffer.extend(chunk)
+
+    async def __parse_one_interrupt(self) -> bool:
+        """Pull from the head of the buffer. Returns True if an
+        interrupt-equivalent was consumed and the caller should
+        stop waiting; False if the buffer holds nothing actionable
+        yet (need more bytes)."""
+        while self.buffer:
+            b = self.buffer[0]
+            if b == self.INTERRUPT:
+                self.buffer.pop(0)
+                self.logger.protocol("<- INTERRUPT (byte)")
+                return True
+            if b in (0x2B, 0x2D):  # bare '+' / '-'
+                self.buffer.pop(0)
+                self.logger.protocol(
+                    "interrupt-wait: drop ack byte 0x%02x", b)
+                continue
+            if b != 0x24:  # not '$' — desync byte
+                dropped = self.buffer.pop(0)
+                self.logger.protocol(
+                    "<- drop stray byte 0x%02x (during continue)", dropped)
+                continue
+            end = self.buffer.find(b"#")
+            if end < 0 or end + 2 >= len(self.buffer):
+                return False  # incomplete packet, await more bytes
+            packet = bytes(self.buffer[:end + 3])
+            del self.buffer[:end + 3]
+            payload = message.Packet.parse(packet)
+            if payload is None:
+                if self.responder.packet_ack:
+                    self.writer.write(b"-")
+                    await self.writer.drain()
+                self.logger.warning(
+                    "bad packet from %s during continue: %s",
+                    self.peer_name, packet)
+                continue
+            if self.responder.packet_ack:
+                self.writer.write(b"+")
+                await self.writer.drain()
+            if payload == b"vCtrlC":
+                self.logger.protocol("<- INTERRUPT (vCtrlC)")
+                # vCtrlC expects an "OK" reply once we've halted —
+                # the stop reply follows separately. Send OK now;
+                # the caller will halt + send the stop reply.
+                await self.__send_response(b"OK")
+                return True
+            self.logger.protocol(
+                "<- drop packet during continue: %s", _pretty(payload))
+        return False
 
 
 class GdbServer:
