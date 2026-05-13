@@ -246,6 +246,9 @@ def get_progress() -> ProgressDelegate:
 
 # --- Setup ---
 
+_ACROBE_HANDLER_MARKER = "_acrobe_cli_handler"
+
+
 def setup(*, level=logging.WARNING, color=True, timestamp=False,
           silent=(), silent_re=None, only_re=None,
           progress=None, stream=None):
@@ -253,6 +256,12 @@ def setup(*, level=logging.WARNING, color=True, timestamp=False,
 
     Convenience function for CLI setup. Creates and attaches a
     StreamHandler with Formatter and DomainFilter to the root logger.
+
+    Idempotent: when called multiple times (e.g. once per chained
+    CLI segment, since each segment re-enters the cli group's
+    async body), any previously-installed acrobe handler is
+    removed first. Without this, chained commands produce N
+    duplicate log lines.
 
     Args:
         level: logging level (use LEVELS list for verbosity stepping)
@@ -264,12 +273,18 @@ def setup(*, level=logging.WARNING, color=True, timestamp=False,
         progress: ProgressDelegate instance (default: NullProgress)
         stream: output stream (default: stderr)
     """
+    root = logging.getLogger()
+    # Drop any handler we installed in a previous setup() call.
+    for h in list(root.handlers):
+        if getattr(h, _ACROBE_HANDLER_MARKER, False):
+            root.removeHandler(h)
+
     handler = logging.StreamHandler(stream)
     handler.setFormatter(Formatter(color=color, timestamp=timestamp))
     handler.addFilter(DomainFilter(
         silent=silent, silent_re=silent_re, only_re=only_re))
+    setattr(handler, _ACROBE_HANDLER_MARKER, True)
 
-    root = logging.getLogger()
     root.addHandler(handler)
     root.setLevel(level)
 
