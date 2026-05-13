@@ -490,6 +490,9 @@ class Responder:
 
     async def __breakpoint(self, payload: bytes, *, add: bool) -> bytes:
         # Z<type>,<addr>,<kind>
+        # type 0 = SW breakpoint, 1 = HW breakpoint (both → FPB)
+        # type 2 = write WP, 3 = read WP, 4 = access WP (→ DWT);
+        # kind on watchpoints is the watched span in bytes.
         rest = payload[1:].decode("ascii", errors="replace")
         try:
             type_str, addr_str, kind_str = rest.split(",")
@@ -498,18 +501,25 @@ class Responder:
             kind = int(kind_str, 16)
         except ValueError:
             return message.error(1)
-        if bp_type not in (0, 1):  # 0 = SW, 1 = HW; we serve both via FPB
-            return b""
         try:
-            if add:
-                await self.current_core.breakpoint_add(addr, kind)
+            if bp_type in (0, 1):
+                if add:
+                    await self.current_core.breakpoint_add(addr, kind)
+                else:
+                    for bp in await self.current_core.breakpoint_list():
+                        if bp[1] == addr:
+                            await self.current_core.breakpoint_remove(bp)
+                            break
+            elif bp_type in (2, 3, 4):
+                if add:
+                    await self.current_core.watchpoint_add(
+                        addr, size=kind, kind=bp_type)
+                else:
+                    await self.current_core.watchpoint_remove(
+                        (bp_type, addr, kind))
             else:
-                existing = await self.current_core.breakpoint_list()
-                for bp in existing:
-                    if bp[1] == addr:
-                        await self.current_core.breakpoint_remove(bp)
-                        break
-        except (NotImplementedError, RuntimeError):
+                return b""
+        except (NotImplementedError, RuntimeError, KeyError, ValueError):
             return message.error(1)
         return message.ok()
 

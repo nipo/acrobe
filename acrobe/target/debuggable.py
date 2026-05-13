@@ -116,6 +116,15 @@ class Core(Node):
     async def breakpoint_list(self):
         return []
 
+    async def watchpoint_add(self, addr, size, kind):
+        raise NotImplementedError
+
+    async def watchpoint_remove(self, wp):
+        raise NotImplementedError
+
+    async def watchpoint_list(self):
+        return []
+
 
 class Debuggable(Node):
     """Run-control + memory access on a Target.

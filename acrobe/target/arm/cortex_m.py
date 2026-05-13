@@ -13,6 +13,7 @@ attributes.
 
 from __future__ import annotations
 
+from ...component.arm.coresight.dwt import Dwt
 from ...component.arm.coresight.fpb import Fpb
 from ...component.arm.coresight.rom_table import RomTable
 from ...component.arm.coresight.scs import Scs
@@ -57,16 +58,20 @@ class CortexMCore(Core):
     gdb_feature_name = "org.gnu.gdb.arm.m-profile"
     gdb_byteorder = "little"
 
-    def __init__(self, name: str, scs: Scs, fpb: Fpb | None = None):
+    def __init__(self, name: str, scs: Scs, fpb: Fpb | None = None,
+                 dwt: Dwt | None = None):
         super().__init__(name)
         self.scs = scs
         self.fpb = fpb
+        self.dwt = dwt
         self.registers = list(CORTEX_M_REGISTERS)
         self.__by_name = {r.name: r for r in self.registers}
         self.__by_number = {r.number: r for r in self.registers}
         # Per-comparator GDB kind. FPB itself doesn't remember kinds,
         # so the Core tracks them to reconstruct Z-packet tuples.
         self.__bp_kinds: dict[int, int] = {}
+        # DWT watchpoint bookkeeping: index -> (addr, size, kind).
+        self.__wp_state: dict[int, tuple[int, int, int]] = {}
 
     async def dump_cpu(self, *, verbose: bool = False) -> list[str]:
         """Delegate to the underlying SCS's CPUID + feature dump."""
@@ -150,6 +155,59 @@ class CortexMCore(Core):
                 for i, addr in self.fpb.allocations.items()
                 if isinstance(addr, int) and addr >= 0]
 
+    # -- DWT watchpoints -------------------------------------------
+
+    # GDB Z-packet types → DWT FUNCTION values.
+    __DWT_FUNC = {
+        2: Dwt.FUNC_DATA_WRITE,   # Z2 — write watchpoint
+        3: Dwt.FUNC_DATA_READ,    # Z3 — read watchpoint
+        4: Dwt.FUNC_DATA_ACCESS,  # Z4 — access watchpoint
+    }
+
+    async def watchpoint_add(self, addr, size, kind):
+        """Add a data-address watchpoint.
+
+        `kind` is the GDB Z-packet type number (2/3/4 for write /
+        read / access). `size` is the watched span in bytes; the
+        DWT MASK field encodes log2(size), so the size must be a
+        power of two between 1 and 32768.
+
+        Returns a tuple usable to identify the watchpoint later in
+        `watchpoint_remove`; matches the GDB Z-tuple shape (type,
+        addr, kind=size)."""
+        if self.dwt is None:
+            raise NotImplementedError("Core has no DWT attached")
+        if self.dwt.comparator_count == 0:
+            raise RuntimeError("DWT has no comparators")
+        try:
+            function = self.__DWT_FUNC[kind]
+        except KeyError:
+            raise ValueError(f"unknown watchpoint kind {kind}") from None
+        index = self.dwt.allocate()
+        if index is None:
+            raise RuntimeError("No free DWT comparator")
+        await self.dwt.comp_set(
+            index, addr=addr, size=size, function=function)
+        self.__wp_state[index] = (addr, size, kind)
+        return (kind, addr, size)
+
+    async def watchpoint_remove(self, wp):
+        if self.dwt is None:
+            raise NotImplementedError("Core has no DWT attached")
+        kind, addr, size = wp
+        for index, (a, s, k) in list(self.__wp_state.items()):
+            if (a, s, k) == (addr, size, kind):
+                await self.dwt.comp_clear(index)
+                self.__wp_state.pop(index, None)
+                return
+        raise KeyError(f"watchpoint {wp!r} not found")
+
+    async def watchpoint_list(self):
+        if self.dwt is None:
+            return []
+        return [(kind, addr, size)
+                for (addr, size, kind) in self.__wp_state.values()]
+
     # -- Helpers ---------------------------------------------------
 
     @staticmethod
@@ -187,14 +245,18 @@ class CortexMDebuggable(Debuggable):
 
         Picks every SCS under the ROM Table — multi-core SoCs route
         each CPU's SCS through a sibling ROM Table — and pairs each
-        with its sibling FPB (if any) to construct one CortexMCore."""
+        with its sibling FPB and DWT (if any) to construct one
+        CortexMCore per SCS."""
         debuggable = cls(mem_ap, name=name)
         scs_list = rom_table.children_of_class(Scs)
         fpb_list = rom_table.children_of_class(Fpb)
+        dwt_list = rom_table.children_of_class(Dwt)
         fpb = fpb_list[0] if len(fpb_list) == 1 else None
+        dwt = dwt_list[0] if len(dwt_list) == 1 else None
         for index, scs in enumerate(scs_list):
             core_name = f"core{index}" if len(scs_list) > 1 else "core"
-            debuggable.child_add(CortexMCore(core_name, scs, fpb=fpb))
+            debuggable.child_add(
+                CortexMCore(core_name, scs, fpb=fpb, dwt=dwt))
         return debuggable
 
     async def attach(self) -> None:

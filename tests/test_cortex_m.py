@@ -3,6 +3,7 @@
 import asyncio
 import pytest
 
+from acrobe.component.arm.coresight.dwt import Dwt
 from acrobe.component.arm.coresight.fpb import Fpb
 from acrobe.component.arm.coresight.model import ComponentIds
 from acrobe.component.arm.coresight.scs import Scs
@@ -70,6 +71,13 @@ def make_fpb(bus=None, base=0xE0002000, *, code_count=6, lit_count=0):
     )
     fpb = Fpb(bus, base, ComponentIds.empty())
     return fpb, bus
+
+
+def make_dwt(bus=None, base=0xE0001000, *, comp_count=4):
+    bus = bus or MockBus()
+    bus.memory[base + Dwt.CTRL_OFFSET] = comp_count << Dwt.CTRL_NUMCOMP_SHIFT
+    dwt = Dwt(bus, base, ComponentIds.empty())
+    return dwt, bus
 
 
 # -- SCS ---------------------------------------------------------------
@@ -328,17 +336,89 @@ class TestFpbBreakpoints:
         assert fpb.allocations == {}
 
 
+# -- DWT ---------------------------------------------------------------
+
+class TestDwtStart:
+    @pytest.mark.asyncio
+    async def test_start_decodes_numcomp(self):
+        dwt, _ = make_dwt(comp_count=4)
+        await dwt.start()
+        assert dwt.comparator_count == 4
+
+
+class TestDwtComparators:
+    @pytest.mark.asyncio
+    async def test_comp_set_writes_addr_mask_function(self):
+        dwt, bus = make_dwt()
+        await dwt.start()
+        await dwt.comp_set(
+            0, addr=0x20000004, size=4, function=Dwt.FUNC_DATA_WRITE)
+        # COMP / MASK / FUNCTION for index 0.
+        assert (dwt.base + dwt.comp_offset(0), 0x20000004) in bus.writes
+        # MASK = log2(4) = 2.
+        assert (dwt.base + dwt.mask_offset(0), 2) in bus.writes
+        assert (dwt.base + dwt.function_offset(0),
+                Dwt.FUNC_DATA_WRITE) in bus.writes
+        assert dwt.allocations[0] == Dwt.FUNC_DATA_WRITE
+
+    @pytest.mark.asyncio
+    async def test_comp_set_rejects_non_power_of_two_size(self):
+        dwt, _ = make_dwt()
+        await dwt.start()
+        with pytest.raises(ValueError):
+            await dwt.comp_set(
+                0, addr=0, size=3, function=Dwt.FUNC_DATA_WRITE)
+
+    @pytest.mark.asyncio
+    async def test_comp_set_out_of_range(self):
+        dwt, _ = make_dwt(comp_count=2)
+        await dwt.start()
+        with pytest.raises(ValueError):
+            await dwt.comp_set(
+                3, addr=0, size=1, function=Dwt.FUNC_DATA_READ)
+
+    @pytest.mark.asyncio
+    async def test_comp_clear_disables(self):
+        dwt, bus = make_dwt()
+        await dwt.start()
+        await dwt.comp_set(
+            1, addr=0x20000000, size=1, function=Dwt.FUNC_DATA_READ)
+        await dwt.comp_clear(1)
+        # Last FUNCTION write zeroed the comparator.
+        funcs = [v for a, v in bus.writes
+                 if a == dwt.base + dwt.function_offset(1)]
+        assert funcs[-1] == Dwt.FUNC_DISABLED
+        assert 1 not in dwt.allocations
+
+    @pytest.mark.asyncio
+    async def test_allocate_release_cycle(self):
+        dwt, _ = make_dwt(comp_count=2)
+        await dwt.start()
+        a = dwt.allocate()
+        b = dwt.allocate()
+        c = dwt.allocate()
+        assert {a, b} == {0, 1}
+        assert c is None
+        dwt.release(a)
+        assert dwt.allocate() == a
+
+
 # -- CortexMCore -------------------------------------------------------
 
 class TestCortexMCore:
-    def make(self, *, with_fpb=False):
+    def make(self, *, with_fpb=False, with_dwt=False):
         bus = MockBus()
         scs = Scs(bus, 0xE000E000, ComponentIds.empty())
         fpb = None
         if with_fpb:
             bus.memory[0xE0002000 + Fpb.CTRL_OFFSET] = (6 << 4)
             fpb = Fpb(bus, 0xE0002000, ComponentIds.empty())
-        return CortexMCore("core", scs, fpb=fpb), scs, fpb, bus
+        dwt = None
+        if with_dwt:
+            bus.memory[0xE0001000 + Dwt.CTRL_OFFSET] = (
+                4 << Dwt.CTRL_NUMCOMP_SHIFT)
+            dwt = Dwt(bus, 0xE0001000, ComponentIds.empty())
+        return CortexMCore("core", scs, fpb=fpb, dwt=dwt), scs, fpb, bus
 
     @pytest.mark.asyncio
     async def test_state_halt(self):
@@ -422,6 +502,44 @@ class TestCortexMCore:
         with pytest.raises(NotImplementedError):
             await core.breakpoint_add(0x08000100, kind=2)
 
+    @pytest.mark.asyncio
+    async def test_watchpoint_add_remove(self):
+        core, _, _, _ = self.make(with_dwt=True)
+        await core.dwt.start()
+        wp = await core.watchpoint_add(0x20000000, size=4, kind=2)
+        assert wp == (2, 0x20000000, 4)
+        assert wp in await core.watchpoint_list()
+        await core.watchpoint_remove(wp)
+        assert wp not in await core.watchpoint_list()
+
+    @pytest.mark.asyncio
+    async def test_watchpoint_kind_maps_to_function(self):
+        core, _, _, bus = self.make(with_dwt=True)
+        await core.dwt.start()
+        await core.watchpoint_add(0x20000000, size=1, kind=2)
+        await core.watchpoint_add(0x20000004, size=1, kind=3)
+        await core.watchpoint_add(0x20000008, size=1, kind=4)
+        funcs = [v for a, v in bus.writes
+                 if a in {core.dwt.base + core.dwt.function_offset(i)
+                          for i in range(3)}]
+        # Last three writes establish the three watchpoints in order.
+        assert funcs[-3:] == [Dwt.FUNC_DATA_WRITE,
+                              Dwt.FUNC_DATA_READ,
+                              Dwt.FUNC_DATA_ACCESS]
+
+    @pytest.mark.asyncio
+    async def test_watchpoint_no_dwt_raises(self):
+        core, _, _, _ = self.make(with_dwt=False)
+        with pytest.raises(NotImplementedError):
+            await core.watchpoint_add(0x20000000, size=4, kind=2)
+
+    @pytest.mark.asyncio
+    async def test_watchpoint_unknown_kind_rejected(self):
+        core, _, _, _ = self.make(with_dwt=True)
+        await core.dwt.start()
+        with pytest.raises(ValueError):
+            await core.watchpoint_add(0x20000000, size=4, kind=9)
+
 
 # -- CortexMDebuggable -------------------------------------------------
 
@@ -464,12 +582,17 @@ class TestCortexMDebuggable:
         scs = Scs(bus, 0xE000E000, ComponentIds.empty())
         bus.memory[0xE0002000 + Fpb.CTRL_OFFSET] = (6 << 4)
         fpb = Fpb(bus, 0xE0002000, ComponentIds.empty())
+        bus.memory[0xE0001000 + Dwt.CTRL_OFFSET] = (
+            4 << Dwt.CTRL_NUMCOMP_SHIFT)
+        dwt = Dwt(bus, 0xE0001000, ComponentIds.empty())
         rom_table._child_attach(scs)
         rom_table._child_attach(fpb)
+        rom_table._child_attach(dwt)
         debug = CortexMDebuggable.from_romtable(rom_table, bus)
         assert len(debug.cores) == 1
         assert debug.cores[0].scs is scs
         assert debug.cores[0].fpb is fpb
+        assert debug.cores[0].dwt is dwt
 
     def test_register_set_complete(self):
         """All CORTEX_M_REGISTERS have distinct numbers and names."""

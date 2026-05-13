@@ -366,6 +366,76 @@ class TestBreakpoints:
         assert added == []
 
 
+class TestWatchpoints:
+    @pytest.mark.asyncio
+    async def test_set_and_clear_write_watchpoint(self, gdb_client):
+        sh, client = gdb_client
+        core = sh.debug.cores[0]
+
+        added = []
+
+        async def wp_add(addr, size, kind):
+            added.append((kind, addr, size))
+            return (kind, addr, size)
+
+        async def wp_remove(wp):
+            added.remove(wp)
+
+        async def wp_list():
+            return list(added)
+
+        core.watchpoint_add = wp_add
+        core.watchpoint_remove = wp_remove
+        core.watchpoint_list = wp_list
+
+        await client.disable_ack()
+        # Z2 = write watchpoint, addr 0x20000000, size 4.
+        reply = await client.send_packet(b"Z2,20000000,4")
+        assert reply == b"OK"
+        assert (2, 0x20000000, 4) in added
+        reply = await client.send_packet(b"z2,20000000,4")
+        assert reply == b"OK"
+        assert added == []
+
+    @pytest.mark.asyncio
+    async def test_read_and_access_watchpoint_kinds(self, gdb_client):
+        sh, client = gdb_client
+        core = sh.debug.cores[0]
+
+        added = []
+        core.watchpoint_add = lambda addr, size, kind: _make_async(
+            (kind, addr, size), added)
+        core.watchpoint_remove = lambda wp: _make_async_remove(wp, added)
+        core.watchpoint_list = lambda: _make_async_list(added)
+
+        await client.disable_ack()
+        assert (await client.send_packet(
+            b"Z3,20000004,1")) == b"OK"
+        assert (await client.send_packet(
+            b"Z4,20000008,2")) == b"OK"
+        assert (3, 0x20000004, 1) in added
+        assert (4, 0x20000008, 2) in added
+
+
+def _make_async(value, sink):
+    """Helper: synchronously appends to sink and returns a coroutine
+    yielding value."""
+    sink.append(value)
+    async def _r(): return value
+    return _r()
+
+
+def _make_async_remove(wp, sink):
+    sink.remove(wp)
+    async def _r(): return None
+    return _r()
+
+
+def _make_async_list(sink):
+    async def _r(): return list(sink)
+    return _r()
+
+
 class TestFlash:
     @pytest.mark.asyncio
     async def test_flash_program_sequence(self, gdb_client):
