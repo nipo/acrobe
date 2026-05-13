@@ -56,7 +56,11 @@ class Rtt(SerialPort):
     full (per blocking flag — the simple form blocks; future
     flag-aware variant could drop/skip)."""
 
-    DEFAULT_POLL_MS = 20
+    # Defaults tuned for live-with-GDB use. 100 ms poll is invisible
+    # for human-paced log output and keeps bus pressure modest when
+    # GDB is also reading memory through the same AP. Override with
+    # `poll=N` (ms) when latency matters more than headroom.
+    DEFAULT_POLL_MS = 100
     SCAN_CHUNK = 4096
     RESCAN_INTERVAL = 1.0   # seconds between scan retries when not yet found
 
@@ -276,7 +280,19 @@ class Rtt(SerialPort):
             await self.__resolve_descriptors()
             self.__ready.set()
             while True:
-                await self.__drain_up_once()
+                try:
+                    await self.__drain_up_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Transient bus errors do happen — GDB stomping
+                    # the AP's TAR state mid-poll, DAP STICKY flags
+                    # from a peripheral access, etc. Log and retry
+                    # next tick rather than killing the pump (which
+                    # leaves the RFC 2217 socket open but silent).
+                    self.logger.debug(
+                        "RTT UP-poll dropped: %s: %s",
+                        type(exc).__name__, exc)
                 await asyncio.sleep(self.poll_period)
         except asyncio.CancelledError:
             raise
