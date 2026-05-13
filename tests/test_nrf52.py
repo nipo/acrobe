@@ -7,10 +7,12 @@ from acrobe.component.arm.coresight.model import ComponentIds
 from acrobe.component.arm.coresight.scs import Scs
 from acrobe.component.arm.dp import DpAccessFailure
 from acrobe.component.arm.mem_ap import MemAp
+from acrobe.component.nordic.ctrl_ap import CtrlAp
 from acrobe.db import NoMatch
 from acrobe.node import Node
 from acrobe.target import Loadable, Target
 from acrobe.target.arm.cortex_m import CortexMDebuggable
+from acrobe.target.debuggable import Debuggable
 from acrobe.target.arm.nrf52 import (
     FICR_CODEPAGESIZE, FICR_CODESIZE, FICR_INFO_PART,
     NRF52_PARTS, NVMC_CONFIG, NVMC_CONFIG_EEN,
@@ -203,6 +205,28 @@ class FakeDp(Node):
 
     def __init__(self, name="dp"):
         super().__init__(name)
+
+
+class FakeCtrlAp(CtrlAp):
+    """CtrlAp subclass that bypasses the heavy Ap init (which wants
+    a real DP for AP register I/O), and replaces the CTRL-AP register
+    surface with bookkeeping the tests can assert against."""
+
+    def __init__(self, name="ctrl-ap1"):
+        Node.__init__(self, name)
+        self.locked = False
+        self.erased = False
+        self.reset_history = []
+
+    async def is_protected(self):
+        return self.locked
+
+    async def erase_all(self, *, timeout=10.0):
+        self.erased = True
+        self.locked = False
+
+    async def release_reset(self):
+        self.reset_history.append("release_reset")
 
 
 def _make_rom_table_with_scs(ap):
@@ -406,20 +430,6 @@ class TestNrf52LoadableHalt:
         await loadable.pre_program(do_erase=False, assume_clean=False)
 
 
-class FakeCtrlAp:
-    """Stub CtrlAp for Nrf52Loadable.erase_all wiring tests."""
-
-    def __init__(self):
-        self.erased = False
-        self.reset_history = []
-
-    async def erase_all(self, *, timeout=10.0):
-        self.erased = True
-
-    async def release_reset(self):
-        self.reset_history.append("release_reset")
-
-
 class TestNrf52LoadableEraseAll:
     @pytest.mark.asyncio
     async def test_uses_ctrl_ap_when_available(self):
@@ -473,6 +483,91 @@ class TestNrf52LoadableEraseAll:
         await loadable.erase_all()
         # Two pages erased through NVMC.
         assert ap.erased_pages == [0, 0x1000]
+
+
+class TestApprotect:
+    """Probe path when CTRL-AP reports APPROTECT engaged."""
+
+    @pytest.mark.asyncio
+    async def test_locked_chip_spawns_partial_target(self):
+        dp = FakeDp()
+        ctrl_ap = FakeCtrlAp()
+        ctrl_ap.locked = True
+        dp._child_attach(ctrl_ap)
+        # No Mem-AP attached at all — the locked path mustn't touch it.
+        target = await nrf52_probe(dp)
+        assert isinstance(target, Nrf52Target)
+        assert "locked" in target.name.lower()
+        # Locked target: no Debuggable, one Loadable with no regions.
+        assert target.children_of_class(Debuggable) == []
+        loadables = target.children_of_class(Loadable)
+        assert len(loadables) == 1
+        assert loadables[0].locked is True
+        assert loadables[0].children_of_class(NvmcFlash) == []
+
+    @pytest.mark.asyncio
+    async def test_locked_write_without_erase_raises(self):
+        ctrl_ap = FakeCtrlAp()
+        ctrl_ap.locked = True
+        loadable = Nrf52Loadable("main", ctrl_ap=ctrl_ap, locked=True)
+        target = Target("nRF52 (locked)")
+        target.child_add(loadable)
+        from acrobe.memory_map import MemoryMap
+        m = MemoryMap()
+        m.append(0, b"\x00" * 16)
+        with pytest.raises(RuntimeError, match="APPROTECT"):
+            await loadable.write(m, do_erase=False)
+        assert not ctrl_ap.erased
+
+    @pytest.mark.asyncio
+    async def test_locked_write_with_erase_runs_erase_all_and_stops(self):
+        ctrl_ap = FakeCtrlAp()
+        ctrl_ap.locked = True
+        loadable = Nrf52Loadable("main", ctrl_ap=ctrl_ap, locked=True)
+        target = Target("nRF52 (locked)")
+        target.child_add(loadable)
+        from acrobe.memory_map import MemoryMap
+        m = MemoryMap()
+        m.append(0, b"\x00" * 16)
+        await loadable.write(m, do_erase=True)
+        # erase_all via CTRL-AP did run; no regions to program.
+        assert ctrl_ap.erased
+
+    @pytest.mark.asyncio
+    async def test_unlocked_takes_normal_path(self):
+        """CTRL-AP present but APPROTECT clear → normal Target build."""
+        dp = FakeDp()
+        ctrl_ap = FakeCtrlAp()
+        ctrl_ap.locked = False
+        dp._child_attach(ctrl_ap)
+        ap = MockAp(part=0x52840, flash_size=0x10000, page_size=0x1000)
+        dp._child_attach(ap)
+        _make_rom_table_with_scs(ap)
+        target = await nrf52_probe(dp)
+        # Normal target — has Debuggable + Flash regions.
+        assert target.children_of_class(Debuggable) != []
+        loadables = target.children_of_class(Loadable)
+        assert loadables[0].locked is False
+        assert loadables[0].ctrl_ap is ctrl_ap
+
+    @pytest.mark.asyncio
+    async def test_is_protected_failure_falls_through(self):
+        """If reading APPROTECTSTATUS itself raises, treat as
+        unlocked and proceed normally — same as before this code
+        path existed."""
+        dp = FakeDp()
+        ctrl_ap = FakeCtrlAp()
+
+        async def boom():
+            raise DpAccessFailure("transient")
+        ctrl_ap.is_protected = boom
+
+        dp._child_attach(ctrl_ap)
+        ap = MockAp(part=0x52840)
+        dp._child_attach(ap)
+        _make_rom_table_with_scs(ap)
+        target = await nrf52_probe(dp)
+        assert target.children_of_class(Debuggable) != []
 
 
 class TestEndToEnd:

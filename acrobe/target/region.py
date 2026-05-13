@@ -68,6 +68,13 @@ class Region(Node):
         for addr, data in region_map:
             yield addr - self.address, data
 
+    def programming_total(self, region_map) -> int:
+        """Total bytes `plan_update` will hand to `write` for
+        `region_map`. Used by `Loadable.write` to size progress
+        bars. Default = `region_map.size`; Flash overrides to add
+        the page-alignment fill."""
+        return region_map.size
+
     async def update(self, offset, data):
         """Apply a single planned page to the region.
 
@@ -124,6 +131,11 @@ class Flash(Region):
             offset = addr - self.address
             for o in range(0, len(data), page):
                 yield offset + o, data[o:o + page]
+
+    def programming_total(self, region_map) -> int:
+        return region_map.paged(
+            self.write_page_size,
+            fill=bytes([self.erased_value])).size
 
     async def __erase_for(self, region_map):
         """Issue per-erase-page erases covering every chunk in

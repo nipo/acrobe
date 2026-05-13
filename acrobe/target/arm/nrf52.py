@@ -98,18 +98,32 @@ class NvmcFlash(Flash):
             raise ValueError(
                 f"NvmcFlash erase must be page-aligned "
                 f"(page={self.write_page_size:#x})")
+        n_pages = size // self.write_page_size
         await self.set_config(NVMC_CONFIG_EEN)
         try:
-            addr = self.address + offset
-            end = addr + size
-            while addr < end:
-                await self.mem_ap.write32(NVMC_ERASEPAGE, addr)
-                await self.wait_ready()
-                addr += self.write_page_size
+            # Single-page erases come from Loadable.write → plan_update
+            # and run inside the per-region "program" bar; no point
+            # opening a 1/1 bar of our own. Multi-page erases come
+            # from Loadable.erase_all (~22s for 1 MiB) — show a bar
+            # so the operator knows we're alive.
+            if n_pages > 1:
+                with self.progress("erase", n_pages, "pages") as bar:
+                    await self.__erase_pages(offset, n_pages, bar)
+            else:
+                await self.__erase_pages(offset, n_pages, None)
         finally:
             await self.set_config(NVMC_CONFIG_REN)
         if offset == 0 and size == self.size:
             self.is_blank = True
+
+    async def __erase_pages(self, offset, n_pages, bar):
+        addr = self.address + offset
+        for _ in range(n_pages):
+            await self.mem_ap.write32(NVMC_ERASEPAGE, addr)
+            await self.wait_ready()
+            addr += self.write_page_size
+            if bar is not None:
+                bar.advance(1)
 
     async def write(self, offset, data):
         if offset % 4 or len(data) % 4:
@@ -175,11 +189,34 @@ class Nrf52Loadable(Loadable):
     fails until something else (mass-erase + reset) clears the
     flash bus."""
 
-    def __init__(self, name: str = "main", *, ctrl_ap: CtrlAp | None = None):
+    def __init__(self, name: str = "main", *, ctrl_ap: CtrlAp | None = None,
+                 locked: bool = False):
         super().__init__(name)
         self.ctrl_ap = ctrl_ap
+        # `locked` reflects APPROTECT state at construction time —
+        # debug + flash R/W are unreachable; only erase_all (via
+        # CTRL-AP) does anything useful. Set when nrf52_probe finds
+        # the chip locked.
+        self.locked = locked
 
     async def pre_program(self, *, do_erase, assume_clean):
+        if self.locked:
+            if not do_erase:
+                raise RuntimeError(
+                    "APPROTECT is enabled on this nRF52 — cannot program. "
+                    "Re-run with --erase (or use `chip erase-all`) to "
+                    "mass-erase via CTRL-AP; that clears flash + UICR + "
+                    "APPROTECT in one go.")
+            # CTRL-AP ERASEALL also unlocks. After this call the chip
+            # is reachable, but our cached Target instance still
+            # carries `locked=True` and has no regions — user re-runs
+            # without --erase to actually flash.
+            await self.erase_all()
+            self.logger.note(
+                "APPROTECT cleared. Re-run `acrobe chip ... program "
+                "<file>` (no --erase) to flash now that the chip is "
+                "accessible.")
+            return
         core = self.__core()
         if core is not None:
             await core.halt()
@@ -229,10 +266,28 @@ class Nrf52Target(CortexMTarget):
 async def nrf52_probe(dp):
     """Probe a DP for an nRF52-family chip.
 
-    Walks the DP's AHB-AP children, reads FICR.INFO.PART, and
-    matches against the known part table. Declines (NoMatch) for
-    unknown parts so the generic Cortex-M target catches them.
+    Two paths:
+
+    1. CTRL-AP reports APPROTECT enabled → build a *locked* Target
+       that exposes only erase-all via CTRL-AP. Avoids the silent
+       failure of an FICR read on a locked chip.
+
+    2. APPROTECT clear (or no CTRL-AP at all): walk Mem-AP children,
+       read FICR.INFO.PART, match against the known part table.
+       Declines (NoMatch) for unknown parts so the generic Cortex-M
+       target catches them.
     """
+    ctrl_aps = dp.children_of_class(CtrlAp)
+    ctrl_ap = ctrl_aps[0] if ctrl_aps else None
+
+    if ctrl_ap is not None:
+        try:
+            locked = await ctrl_ap.is_protected()
+        except DpAccessFailure:
+            locked = False
+        if locked:
+            return _build_locked_target(dp, ctrl_ap)
+
     aps = dp.children_of_class(MemAp)
     if not aps:
         raise NoMatch("nrf52_probe", "no MemAp under DP")
@@ -243,11 +298,31 @@ async def nrf52_probe(dp):
             continue
         if part not in NRF52_PARTS:
             continue
-        return await _build_nrf52_target(dp, ap, part)
+        return await _build_nrf52_target(dp, ap, part, ctrl_ap)
     raise NoMatch("nrf52_probe", "no nRF52 found behind DP")
 
 
-async def _build_nrf52_target(dp, ap, part):
+def _build_locked_target(dp, ctrl_ap):
+    """Build a partial Target for an APPROTECT-locked nRF52.
+
+    No Debuggable (debug access denied). No Flash regions (FICR
+    read would fail). Loadable carries only the CTRL-AP path so
+    the user can mass-erase via `chip program --erase` or
+    `chip erase-all`.
+    """
+    target = Nrf52Target("nRF52 (APPROTECT locked)")
+    target.claim(dp, ctrl_ap)
+    target.logger.warning(
+        "APPROTECT is enabled — debug + flash read/write are blocked. "
+        "Run `acrobe chip ... erase-all` (or `chip ... program --erase "
+        "<file>`) to mass-erase via CTRL-AP. This clears flash + UICR "
+        "+ APPROTECT in one operation.")
+    loadable = Nrf52Loadable("main", ctrl_ap=ctrl_ap, locked=True)
+    target.child_add(loadable)
+    return target
+
+
+async def _build_nrf52_target(dp, ap, part, ctrl_ap):
     page_size = await ap.read32(FICR_CODEPAGESIZE)
     page_count = await ap.read32(FICR_CODESIZE)
     flash_size = page_size * page_count
@@ -256,9 +331,6 @@ async def _build_nrf52_target(dp, ap, part):
     rt = next((r for r in rom_tables if r.children_of_class(Scs)), None)
     if rt is None:
         raise NoMatch("nrf52_probe", "no SCS under MemAp")
-
-    ctrl_aps = dp.children_of_class(CtrlAp)
-    ctrl_ap = ctrl_aps[0] if ctrl_aps else None
 
     name = NRF52_PARTS[part]
     target = Nrf52Target(name)

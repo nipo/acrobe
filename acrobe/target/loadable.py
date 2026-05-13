@@ -50,8 +50,11 @@ class Loadable(Node):
             region_m = m.within(region.address, region.end)
             if not region_m:
                 continue
-            async for offset, data in region.plan_update(region_m):
-                await region.write(offset, data)
+            total = region.programming_total(region_m)
+            with region.progress("program", total, "B") as bar:
+                async for offset, data in region.plan_update(region_m):
+                    await region.write(offset, data)
+                    bar.advance(len(data))
 
         success = True
         if do_verify:
@@ -80,12 +83,14 @@ class Loadable(Node):
             region_m = m.within(region.address, region.end)
             if not region_m:
                 continue
-            for addr, data in region_m:
-                actual = await region.read(addr - region.address, len(data))
-                if actual != bytes(data):
-                    self.logger.error(
-                        "Mismatch in %s at 0x%08x", region.name, addr)
-                    return False
+            with region.progress("verify", region_m.size, "B") as bar:
+                for addr, data in region_m:
+                    actual = await region.read(addr - region.address, len(data))
+                    if actual != bytes(data):
+                        self.logger.error(
+                            "Mismatch in %s at 0x%08x", region.name, addr)
+                        return False
+                    bar.advance(len(data))
         return True
 
     async def erase_all(self):

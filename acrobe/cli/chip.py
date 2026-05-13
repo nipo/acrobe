@@ -126,3 +126,13 @@ async def reset(ctx):
     loadable = ctx.obj.loadable
     await loadable.reset()
     click.echo("Reset.")
+
+
+@chip.command("erase-all", help="Mass-erase the target (uses vendor "
+                                "mass-erase when available — fast, "
+                                "and on Nordic also clears APPROTECT)")
+@click.pass_context
+async def erase_all(ctx):
+    loadable = ctx.obj.loadable
+    await loadable.erase_all()
+    click.echo("Erased.")
