@@ -238,6 +238,33 @@ async def gdb_client(server_handle):
 
 # -- Tests -------------------------------------------------------------
 
+class TestSingleClient:
+    @pytest.mark.asyncio
+    async def test_second_connection_is_rejected(self, server_handle):
+        """While a client is active, a second TCP connect closes
+        immediately. Prevents stale-session triplicate-packet
+        symptoms when an old gdb didn't disconnect cleanly."""
+        sockets = server_handle.server._GdbServer__server.sockets
+        port = sockets[0].getsockname()[1]
+
+        # First client holds the slot.
+        r1, w1 = await asyncio.open_connection("127.0.0.1", port)
+        c1 = GdbClient(r1, w1)
+        # Drive one packet through so the Session is settled in
+        # serve() and self.__active is set.
+        await c1.send_packet(b"qC")
+
+        # Second connect should be promptly closed by the server.
+        r2, w2 = await asyncio.open_connection("127.0.0.1", port)
+        chunk = await asyncio.wait_for(r2.read(1024), timeout=1)
+        assert chunk == b""
+
+        w2.close()
+        await w2.wait_closed()
+        w1.close()
+        await w1.wait_closed()
+
+
 class TestHandshake:
     @pytest.mark.asyncio
     async def test_qSupported(self, gdb_client):

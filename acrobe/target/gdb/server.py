@@ -168,7 +168,17 @@ class Session:
 class GdbServer:
     """asyncio TCP server. Constructs a fresh Responder per
     connection so state (current thread, flash image, ack mode)
-    stays per-session while Debuggable + Loadable are shared."""
+    stays per-session while Debuggable + Loadable are shared.
+
+    Single-client: while one Session is active, additional
+    incoming connections are closed immediately. The GDB Remote
+    Serial Protocol assumes one client per server — multiple
+    sessions against the same Debuggable would race on
+    current-core selection, ack mode, in-flight flash images,
+    and (visibly) triple every DAP transaction. Stale TCP
+    connections from prior `target remote` attempts that didn't
+    disconnect cleanly are the common way three Sessions end up
+    alive at once."""
 
     def __init__(self, debuggable, loadable=None, *,
                  host: str = "localhost", port: int = 3333,
@@ -179,6 +189,7 @@ class GdbServer:
         self.port = port
         self.logger = logger or logging.getLogger("acrobe.gdb.server")
         self.__server: asyncio.AbstractServer | None = None
+        self.__active: Session | None = None
 
     async def start(self) -> None:
         self.__server = await asyncio.start_server(
@@ -201,6 +212,23 @@ class GdbServer:
         self.__server = None
 
     async def __on_connect(self, reader, writer) -> None:
+        peer = writer.get_extra_info("peername")
+        if self.__active is not None:
+            self.logger.warning(
+                "rejecting %s — already serving %s. (Stale TCP "
+                "connection from a prior gdb run? `lsof -i :%d` on "
+                "the host will list the culprit.)",
+                peer, self.__active.peer_name, self.port)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return
         responder = Responder(self.debuggable, self.loadable)
         session = Session(reader, writer, responder, logger=self.logger)
-        await session.serve()
+        self.__active = session
+        try:
+            await session.serve()
+        finally:
+            self.__active = None
