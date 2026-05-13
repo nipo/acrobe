@@ -54,6 +54,8 @@ FICR_CODEPAGESIZE = FICR_BASE + 0x010
 FICR_CODESIZE     = FICR_BASE + 0x014
 FICR_DEVICEID0    = FICR_BASE + 0x060
 FICR_DEVICEID1    = FICR_BASE + 0x064
+FICR_DEVICEADDR0  = FICR_BASE + 0x0A4
+FICR_DEVICEADDR1  = FICR_BASE + 0x0A8
 FICR_INFO_PART    = FICR_BASE + 0x100
 FICR_INFO_VARIANT = FICR_BASE + 0x104
 FICR_INFO_PACKAGE = FICR_BASE + 0x108
@@ -329,13 +331,18 @@ async def _build_nrf52_target(dp, ap, part, ctrl_ap):
     page_count = await ap.read32(FICR_CODESIZE)
     flash_size = page_size * page_count
     ram_kb = await ap.read32(FICR_INFO_RAM)
+    addr_lo = await ap.read32(FICR_DEVICEADDR0)
+    addr_hi = await ap.read32(FICR_DEVICEADDR1)
+    bdaddr = ((addr_hi & 0xFFFF) << 32) | addr_lo
 
     rom_tables = ap.children_of_class(RomTable)
     rt = next((r for r in rom_tables if r.children_of_class(Scs)), None)
     if rt is None:
         raise NoMatch("nrf52_probe", "no SCS under MemAp")
 
-    name = NRF52_PARTS[part]
+    # Suffix with the factory BLE address so multiple identically-
+    # modelled chips parent at distinct paths under HwRoot.
+    name = f"{NRF52_PARTS[part]}-{bdaddr:012x}"
     target = Nrf52Target(name)
     target.claim(dp, ap, rt)
     if ctrl_ap is not None:
