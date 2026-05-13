@@ -480,7 +480,11 @@ class Responder:
         except NotImplementedError:
             return b"T00"
         if state == CoreState.RUN:
-            return b""  # Should not happen — caller awaits a halt
+            # Reached when the caller's wait_for_halt exit raced the
+            # core's actual S_HALT settle. Never return an empty
+            # packet — GDB rejects that as "Invalid remote reply".
+            # T05 with no extra info is "stopped, reason unknown".
+            return b"T05"
         try:
             cause = await self.current_core.halt_cause()
         except NotImplementedError:

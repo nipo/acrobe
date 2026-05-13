@@ -13,6 +13,8 @@ attributes.
 
 from __future__ import annotations
 
+import asyncio
+
 from ...component.arm.coresight.dwt import Dwt
 from ...component.arm.coresight.fpb import Fpb
 from ...component.arm.coresight.rom_table import RomTable
@@ -93,14 +95,50 @@ class CortexMCore(Core):
         dfsr = await self.scs.read_dfsr()
         return self.__decode_halt_cause(dfsr)
 
+    # Timeouts for the post-op state-settle waits. Resume's window
+    # is microseconds in practice (one instruction); halt and step
+    # can be longer if the core is in WFI / WFE or a stalled
+    # memory transaction. These are upper bounds before we give up
+    # and return — the caller can still observe the actual state.
+    RESUME_SETTLE = 0.05
+    HALT_SETTLE = 0.5
+    STEP_SETTLE = 0.5
+
     async def halt(self) -> None:
         await self.scs.cpu_halt()
+        await self.__settle(want_halt=True, timeout=self.HALT_SETTLE)
 
     async def resume(self, *, allow_interrupts: bool = True) -> None:
         await self.scs.cpu_resume(allow_interrupts=allow_interrupts)
+        await self.__settle(want_halt=False, timeout=self.RESUME_SETTLE)
 
     async def step(self) -> None:
         await self.scs.cpu_step()
+        await self.__settle(want_halt=True, timeout=self.STEP_SETTLE)
+
+    async def __settle(self, *, want_halt: bool, timeout: float):
+        """Poll DHCSR until S_HALT matches `want_halt` or the
+        timeout elapses.
+
+        Per ARMv7-M ARM §C1.6.3, S_HALT is UNKNOWN immediately
+        after clearing C_HALT (resume) — until the first
+        instruction retires. A snapshot taken right after the
+        DHCSR write can still read 1. Same story in reverse for
+        halt / step: the bit may briefly read 0 before the core
+        finishes whatever it was mid-doing.
+
+        We poll at 1 ms granularity so the round-trip cost is
+        bounded; the typical settle is < 100 µs."""
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while True:
+            dhcsr = await self.scs.read_dhcsr()
+            halted = bool(dhcsr & Scs.DHCSR_S_HALT)
+            if halted == want_halt:
+                return
+            if loop.time() > deadline:
+                return
+            await asyncio.sleep(0.001)
 
     async def reset(self, *, stop: bool = True) -> None:
         """SYSRESETREQ. With `stop=True` set DEMCR.VC_CORERESET first

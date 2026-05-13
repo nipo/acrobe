@@ -540,6 +540,62 @@ class TestCortexMCore:
         with pytest.raises(ValueError):
             await core.watchpoint_add(0x20000000, size=4, kind=9)
 
+    @pytest.mark.asyncio
+    async def test_resume_polls_until_s_halt_clears(self):
+        """Reproduces the real-GDB race: SCS.cpu_resume returns
+        while S_HALT is still UNKNOWN-but-reads-1; CortexMCore.resume
+        must poll DHCSR until S_HALT actually clears before
+        returning, so a subsequent state() read is reliable."""
+        core, scs, _, bus = self.make()
+        dhcsr_addr = scs.base + scs.DHCSR_OFFSET
+        # Stage: S_HALT=1 initially (just stepped), and stays 1
+        # for the first read after cpu_resume; flip to 0 on a later
+        # read. We track read count via a custom read32 wrapper.
+        bus.memory[dhcsr_addr] = scs.DHCSR_S_HALT
+        post_resume_reads = [0]
+        original_read32 = bus.read32
+
+        def read32(addr):
+            if addr == dhcsr_addr and post_resume_reads[0] > 0:
+                # On the 3rd read post-resume the core has actually
+                # left halt — flip the bit.
+                if post_resume_reads[0] >= 3:
+                    bus.memory[addr] = 0
+                post_resume_reads[0] += 1
+                return original_read32(addr)
+            return original_read32(addr)
+
+        bus.read32 = read32
+
+        # Mark the start of "post-resume" reads.
+        post_resume_reads[0] = 1
+        # Speed up: shorten the settle interval check for the test.
+        core.RESUME_SETTLE = 0.5
+        await core.resume()
+        # When we get here, the core's state() must report RUN.
+        assert (await core.state()) == CoreState.RUN
+
+    @pytest.mark.asyncio
+    async def test_halt_polls_until_s_halt_sets(self):
+        core, scs, _, bus = self.make()
+        dhcsr_addr = scs.base + scs.DHCSR_OFFSET
+        # S_HALT starts 0 (running), flips to 1 after a few reads.
+        bus.memory[dhcsr_addr] = 0
+        post_writes = [0]
+        original_read32 = bus.read32
+
+        def read32(addr):
+            if addr == dhcsr_addr:
+                post_writes[0] += 1
+                if post_writes[0] >= 3:
+                    bus.memory[addr] = scs.DHCSR_S_HALT
+            return original_read32(addr)
+
+        bus.read32 = read32
+        core.HALT_SETTLE = 0.5
+        await core.halt()
+        assert (await core.state()) == CoreState.HALT
+
 
 # -- CortexMDebuggable -------------------------------------------------
 
