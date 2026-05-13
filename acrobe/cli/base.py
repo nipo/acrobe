@@ -91,6 +91,12 @@ async def cli(ctx, verbose, quiet, timestamp, no_color,
     target = min(max(0, base_index + verbose - quiet), len(log.LEVELS) - 1)
     level = log.LEVELS[target]
 
+    # Progress bars: shown only at exact default verbosity (no -v,
+    # no -q). Any -v means the user wants log messages, which a tqdm
+    # bar would interleave with badly; any -q means they want
+    # quieter output — both cases want NullProgress.
+    progress = log.TqdmProgress() if (verbose == 0 and quiet == 0) else None
+
     log.setup(
         level=level,
         color=not no_color,
@@ -98,7 +104,7 @@ async def cli(ctx, verbose, quiet, timestamp, no_color,
         silent=silent,
         silent_re=silent_re,
         only_re=only_re,
-        progress=log.TqdmProgress() if level <= log.TRACE else None,
+        progress=progress,
     )
 
 
