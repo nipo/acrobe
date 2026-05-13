@@ -119,7 +119,17 @@ async def target(ctx, root_paths, verbose):
 def _dump_view(view):
     from ..target import Loadable
     from ..target.debuggable import Core, Debuggable
+    from ..target.memory import Memory
     from ..target.region import Flash, Region
+
+    if isinstance(view, Memory):
+        click.echo(f"  memory:   {view.name}  [{type(view).__name__}]")
+        regions = sorted(view.children_of_class(Region),
+                         key=lambda r: r.address)
+        for r in regions:
+            span = f"0x{r.address:08x}-0x{r.end:08x}  ({r.size:#x} bytes)"
+            click.echo(f"    {type(r).__name__:<10} {r.name:<8} {span}")
+        return
 
     if isinstance(view, Loadable):
         click.echo(f"  loadable: {view.name}  [{type(view).__name__}]")
