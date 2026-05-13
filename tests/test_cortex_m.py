@@ -202,11 +202,14 @@ class TestScsRegisterIo:
         ]
 
     @pytest.mark.asyncio
-    async def test_cpu_regs_get_times_out_if_regrdy_never_sets(self):
+    async def test_cpu_regs_get_asserts_if_regrdy_unset(self):
         scs, bus = make_scs()
-        # DHCSR has S_REGRDY=0; poll should exhaust and raise.
+        # DHCSR.S_REGRDY=0 → the post-flush assert fires. Hasn't
+        # been observed on real silicon (the DAP round-trip alone
+        # gives the CPU enough cycles to set REGRDY) but kept as
+        # a debug invariant.
         bus.memory[scs.base + scs.DHCSR_OFFSET] = 0
-        with pytest.raises(RuntimeError, match="S_REGRDY never set"):
+        with pytest.raises(AssertionError, match="S_REGRDY=0"):
             await scs.cpu_regs_get([0])
 
 
