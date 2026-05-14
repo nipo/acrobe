@@ -101,8 +101,7 @@ class SpiTransactor(Batcher, Node):
 
         # Send command frame and receive response
         self._channel.send(bytes(cmd))
-        result = await self._channel.recv()
-        response = result.data
+        response, _ = await self._channel.recv()
 
         # Parse response: populate miso from gather info
         for idx, gather in gather_map:

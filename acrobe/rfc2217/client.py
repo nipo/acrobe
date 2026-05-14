@@ -31,7 +31,7 @@ class ComPortClient(SerialPort, ComPortRole):
         self._cfg = SerialConfig()
 
     async def start(self):
-        self._telnet.start()
+        await self._telnet.start()
         await self._opt.start(self._telnet)
 
     # ------------------------------------------------------------------

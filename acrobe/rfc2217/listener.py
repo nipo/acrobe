@@ -4,25 +4,49 @@ import asyncio
 import logging
 
 from ..protocol.serial import SerialPort
-from ..protocol.pipe import Pipe
+from ..protocol.pipe import Pipe, Read, Write
 from ..protocol.telnet import TelnetPipe
 from .server import ComPortServer
 
 
 class _StreamPipe(Pipe):
-    """Adapts an asyncio.StreamReader/StreamWriter pair to the Pipe interface."""
+    """Adapts an asyncio.StreamReader/StreamWriter pair to the Pipe
+    interface."""
 
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    def __init__(self, reader: asyncio.StreamReader,
+                 writer: asyncio.StreamWriter, name: str = "stream"):
+        super().__init__(name)
         self._reader = reader
         self._writer = writer
 
-    async def write(self, data: bytes) -> None:
-        self._writer.write(data)
-        await self._writer.drain()
+    async def flush_ops(self, batch):
+        for op, future in batch:
+            if isinstance(op, Write):
+                try:
+                    self._writer.write(op.data)
+                    await self._writer.drain()
+                except Exception as exc:
+                    if not future.done():
+                        future.set_exception(exc)
+                    continue
+                if not future.done():
+                    future.set_result(None)
+            elif isinstance(op, Read):
+                asyncio.create_task(self._read_task(op.size, future))
+            else:
+                if not future.done():
+                    future.set_exception(TypeError(
+                        f"_StreamPipe: unsupported op {type(op).__name__}"))
 
-    async def read(self, size: int) -> bytes:
-        data = await self._reader.readexactly(size)
-        return data
+    async def _read_task(self, size, future):
+        try:
+            data = await self._reader.readexactly(size)
+        except Exception as exc:
+            if not future.done():
+                future.set_exception(exc)
+            return
+        if not future.done():
+            future.set_result(data)
 
 
 class Rfc2217Listener:

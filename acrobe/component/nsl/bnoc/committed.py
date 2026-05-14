@@ -1,13 +1,19 @@
+"""NSL bnoc committed framed channel.
+
+Matches RTL ``nsl_bnoc.committed``: every transmitted frame is
+appended a one-byte commit/cancel trailer (``0x01`` for commit,
+``0x00`` for cancel). The wrapper is a `Framed` itself — the caller
+just sees a framed channel.
+"""
+
 import asyncio
 
-from .framed import Framed, FrameSend, FrameRecv
+from ....protocol.datagram import Send, Recv
+from .framed import Framed
 
 
 class Committed(Framed):
-    """Atomic frame delivery. Matches RTL nsl_bnoc_committed.
-
-    Wraps another Framed channel, appending commit byte on send.
-    """
+    """Atomic frame delivery on top of another `Framed` channel."""
 
     COMMIT = 0x01
     CANCEL = 0x00
@@ -19,20 +25,20 @@ class Committed(Framed):
     async def flush_ops(self, batch):
         lower_futures = []
         for op, future in batch:
-            if isinstance(op, FrameSend):
+            if isinstance(op, Send):
                 lf = self._channel.send(op.data + bytes([self.COMMIT]))
                 lower_futures.append((lf, future, 'send'))
-            elif isinstance(op, FrameRecv):
+            elif isinstance(op, Recv):
                 lf = self._channel.recv()
                 lower_futures.append((lf, future, 'recv'))
 
         await asyncio.gather(*[f for f, _, _ in lower_futures])
 
         for lf, mf, kind in lower_futures:
-            r = lf.result()
             if kind == 'send':
-                mf.set_result(FrameSend(r.data))
+                if not mf.done():
+                    mf.set_result(None)
             else:
-                recv = FrameRecv()
-                recv.data = r.data
-                mf.set_result(recv)
+                data, ctx = lf.result()
+                if not mf.done():
+                    mf.set_result((data, ctx))

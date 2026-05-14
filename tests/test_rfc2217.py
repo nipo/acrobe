@@ -3,7 +3,7 @@
 import asyncio
 import pytest
 
-from acrobe.protocol.pipe import Pipe
+from acrobe.protocol.pipe import Pipe, Read, Write
 from acrobe.protocol.serial import (
     SerialPort, SerialConfig, Parity, StopBits, FlowControl, Signals,
     LineState,
@@ -13,19 +13,42 @@ from acrobe.rfc2217 import ComPortClient, ComPortServer
 
 
 class LoopbackPipe(Pipe):
-    def __init__(self, rx: asyncio.Queue, tx: asyncio.Queue):
+    def __init__(self, rx: asyncio.Queue, tx: asyncio.Queue,
+                 name: str = "loopback"):
+        super().__init__(name)
         self._rx = rx
         self._tx = tx
 
-    async def write(self, data: bytes) -> None:
-        for b in data:
-            await self._tx.put(b)
+    async def flush_ops(self, batch):
+        for op, future in batch:
+            if isinstance(op, Write):
+                try:
+                    for b in op.data:
+                        await self._tx.put(b)
+                except Exception as exc:
+                    if not future.done():
+                        future.set_exception(exc)
+                    continue
+                if not future.done():
+                    future.set_result(None)
+            elif isinstance(op, Read):
+                asyncio.create_task(self._read_task(op.size, future))
+            else:
+                if not future.done():
+                    future.set_exception(TypeError(
+                        f"LoopbackPipe: unsupported op {type(op).__name__}"))
 
-    async def read(self, size: int) -> bytes:
-        out = bytearray()
-        for _ in range(size):
-            out.append(await self._rx.get())
-        return bytes(out)
+    async def _read_task(self, size, future):
+        try:
+            out = bytearray()
+            for _ in range(size):
+                out.append(await self._rx.get())
+        except Exception as exc:
+            if not future.done():
+                future.set_exception(exc)
+            return
+        if not future.done():
+            future.set_result(bytes(out))
 
     @classmethod
     def pair(cls):

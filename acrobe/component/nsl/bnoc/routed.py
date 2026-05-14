@@ -1,16 +1,35 @@
-import asyncio
+"""NSL bnoc routed channel.
+
+Matches RTL ``nsl_bnoc.routed``: a single framed channel multiplexes
+several point-to-point endpoints. Each frame on the wire carries a
+one-byte routing header ``[dst(3:0) | src(7:4)]`` followed by the
+payload.
+
+`Router` is the multiplexer (a `Datagram` with routing context).
+`Route` is a sugar wrapper that pins one (local, remote) endpoint
+pair on a `Router` and exposes itself as a `Framed` channel (no
+routing visible to its users).
+"""
+
 from collections import defaultdict, deque
 from dataclasses import dataclass
 
-from ....engine import Batcher
-from ....node import Node
-from .framed import Framed, FrameSend, FrameRecv
+import asyncio
+
+from ....protocol.datagram import Datagram, Send, Recv
+from .framed import Framed
 
 
 @dataclass(frozen=True, slots=True)
 class Context:
-    destination: int  # 0-15
-    source: int       # 0-15
+    """Routing endpoint pair: (destination, source). 4 bits each.
+
+    Used as the ``context`` value on :class:`Send` / :class:`Recv` ops
+    posted on a :class:`Router`.
+    """
+
+    destination: int
+    source: int
 
     def header(self):
         """Encode as routing header byte: dst[3:0] | src[7:4]."""
@@ -21,96 +40,71 @@ class Context:
         return cls(byte & 0xf, byte >> 4)
 
 
-class RouterSend:
-    def __init__(self, data, context):
-        self.data = data
-        self.context = context
-
-    def __repr__(self):
-        return f"<RouterSend {len(self.data)}B ctx={self.context}>"
-
-
-class RouterRecv:
-    def __init__(self, context):
-        self.context = context
-        self.data = None
-
-    def __repr__(self):
-        return f"<RouterRecv ctx={self.context}>"
-
-
-class Router(Batcher, Node):
-    """Routing dispatch over Framed. Matches RTL nsl_bnoc_routed.
-
-    Packet format: [dst(3:0) | src(7:4)] [payload...]
-    """
+class Router(Datagram):
+    """Routing dispatch over a lower `Framed` channel."""
 
     def __init__(self, framed: Framed, name: str = "router"):
-        Batcher.__init__(self)
-        Node.__init__(self, name)
+        super().__init__(name)
         self._framed = framed
         self._rx_queues: dict[Context, deque] = defaultdict(deque)
 
     async def flush_ops(self, batch):
-        # 1. Send all RouterSend ops
+        # 1. Send all Send ops via the underlying framed channel.
         send_futures = []
         for op, future in batch:
-            if isinstance(op, RouterSend):
+            if isinstance(op, Send):
                 header = bytes([op.context.header()])
                 lf = self._framed.send(header + op.data)
                 send_futures.append((lf, future))
 
-        # 2. Collect RouterRecv ops
+        # 2. Try to satisfy Recv ops from buffered frames; queue the rest.
         pending_recvs = []
         for op, future in batch:
-            if isinstance(op, RouterRecv):
-                # Check buffered frames first
+            if isinstance(op, Recv):
                 q = self._rx_queues[op.context]
                 if q:
-                    op.data = q.popleft()
-                    future.set_result(op)
+                    if not future.done():
+                        future.set_result((q.popleft(), op.context))
                 else:
                     pending_recvs.append((op, future))
 
-        # Await sends
+        # Await sends.
         if send_futures:
             await asyncio.gather(*[f for f, _ in send_futures])
             for lf, mf in send_futures:
-                mf.set_result(lf.result())
+                if not mf.done():
+                    mf.set_result(None)
 
-        # 3. Poll lower Framed for pending recvs
+        # 3. Drain the lower framed channel until every pending recv
+        #    has its frame. Mismatched frames are buffered per context.
         while pending_recvs:
-            lf = self._framed.recv()
-            result = await lf
-            frame = result.data
+            data, _ = await self._framed.recv()
+            ctx = Context.from_header(data[0])
+            payload = data[1:]
 
-            # Parse routing header
-            ctx = Context.from_header(frame[0])
-            payload = frame[1:]
-
-            # Match to pending recv
             matched = False
             for i, (op, future) in enumerate(pending_recvs):
                 if op.context == ctx:
-                    op.data = payload
-                    future.set_result(op)
+                    if not future.done():
+                        future.set_result((payload, ctx))
                     pending_recvs.pop(i)
                     matched = True
                     break
 
             if not matched:
-                # Buffer for later
                 self._rx_queues[ctx].append(payload)
 
     def route(self, local_id, remote_id):
-        """Create a Route for a specific endpoint pair."""
+        """Create a `Route` for a specific endpoint pair."""
         return Route(self, local_id, remote_id)
 
 
 class Route(Framed):
-    """Single route pair. Inherits from Framed so isinstance(route, Framed) is True."""
+    """Single fixed-endpoint route over a `Router`. Presents as a
+    plain `Framed` channel — users don't see the routing context."""
 
-    def __init__(self, router, local_id, remote_id, name=None):
+    def __init__(self, router: Router, local_id: int, remote_id: int,
+                 name: str | None = None):
         if name is None:
             name = f"route-{local_id}-{remote_id}"
         super().__init__(name)
@@ -119,34 +113,33 @@ class Route(Framed):
         self._inbound = Context(local_id, remote_id)
 
     async def flush_ops(self, batch):
-        router_futures = []
+        lower_futures = []
         for op, future in batch:
-            if isinstance(op, FrameSend):
-                rf = self._router.post(RouterSend(op.data, self._outbound))
-                router_futures.append((rf, future, 'send'))
-            elif isinstance(op, FrameRecv):
-                rf = self._router.post(RouterRecv(self._inbound))
-                router_futures.append((rf, future, 'recv'))
+            if isinstance(op, Send):
+                lf = self._router.post(Send(op.data, self._outbound))
+                lower_futures.append((lf, future, 'send'))
+            elif isinstance(op, Recv):
+                lf = self._router.post(Recv(self._inbound))
+                lower_futures.append((lf, future, 'recv'))
 
-        await asyncio.gather(*[f for f, _, _ in router_futures])
+        await asyncio.gather(*[f for f, _, _ in lower_futures])
 
-        for rf, mf, kind in router_futures:
-            result = rf.result()
-            if kind == 'recv':
-                recv = FrameRecv()
-                recv.data = result.data
-                mf.set_result(recv)
+        for lf, mf, kind in lower_futures:
+            if kind == 'send':
+                if not mf.done():
+                    mf.set_result(None)
             else:
-                mf.set_result(FrameSend(result.data))
+                data, _ = lf.result()
+                if not mf.done():
+                    mf.set_result((data, None))
 
     def __repr__(self):
         return f"<Route {self._outbound}>"
 
 
 class FramedEndpoint:
-    """Tagged request-response transactions over a Route.
-    Prepends auto-incrementing 1-byte tag for correlation.
-    """
+    """Tagged request-response transactions over a `Route`. Prepends
+    an auto-incrementing 1-byte tag for correlation."""
 
     def __init__(self, route: Route):
         self._route = route
@@ -156,8 +149,8 @@ class FramedEndpoint:
         tag = self._tag
         self._tag = (self._tag + 1) & 0xff
         self._route.send(bytes([tag]) + data)
-        result = await self._route.recv()
-        if result.data[0] != tag:
+        rx, _ = await self._route.recv()
+        if rx[0] != tag:
             raise RuntimeError(
-                f"Tag mismatch: sent 0x{tag:02x}, got 0x{result.data[0]:02x}")
-        return result.data[1:]
+                f"Tag mismatch: sent 0x{tag:02x}, got 0x{rx[0]:02x}")
+        return rx[1:]

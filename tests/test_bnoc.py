@@ -1,7 +1,8 @@
 import asyncio
 import pytest
 
-from acrobe.component.nsl.bnoc.framed import Framed, JtagFramed, FrameSend, FrameRecv
+from acrobe.protocol.datagram import Send, Recv
+from acrobe.component.nsl.bnoc.framed import Framed, JtagFramed
 from acrobe.component.nsl.bnoc.routed import Router, Route, Context, FramedEndpoint
 from acrobe.component.nsl.bnoc.committed import Committed
 
@@ -36,13 +37,12 @@ class MockFramed(Framed):
 
     async def flush_ops(self, batch):
         for op, future in batch:
-            if isinstance(op, FrameSend):
+            if isinstance(op, Send):
                 self.sent.append(op.data)
-                future.set_result(op)
-            elif isinstance(op, FrameRecv):
+                future.set_result(None)
+            elif isinstance(op, Recv):
                 frame = self._rx_frames.pop(0)
-                op.data = frame
-                future.set_result(op)
+                future.set_result((frame, None))
 
 
 # -- Framed base class tests --
@@ -112,9 +112,9 @@ class TestJtagFramed:
 
         tx_data = b'\x01\x02\x03'
         jf.send(tx_data)
-        result = await jf.recv()
+        data, _ = await jf.recv()
 
-        assert result.data == rx_data
+        assert data == rx_data
         assert fifo.tx_words == Framed.encode(tx_data)
 
     @pytest.mark.asyncio
@@ -125,25 +125,25 @@ class TestJtagFramed:
         jf.send(b'\x01')
         r1 = jf.recv()
         r2 = jf.recv()
-        res1, res2 = await asyncio.gather(r1, r2)
+        (data1, _), (data2, _) = await asyncio.gather(r1, r2)
 
-        assert res1.data == b'\x10\x11'
-        assert res2.data == b'\x20\x21\x22'
+        assert data1 == b'\x10\x11'
+        assert data2 == b'\x20\x21\x22'
 
     @pytest.mark.asyncio
     async def test_send_only(self):
         fifo = MockFifo()
         jf = JtagFramed(fifo)
         result = await jf.send(b'\x55')
-        assert isinstance(result, FrameSend)
+        assert result is None
         assert fifo.tx_words == Framed.encode(b'\x55')
 
     @pytest.mark.asyncio
     async def test_empty_frame(self):
         fifo = MockFifo(rx_frames=[b'\x00'])
         jf = JtagFramed(fifo)
-        result = await jf.recv()
-        assert result.data == b'\x00'
+        data, _ = await jf.recv()
+        assert data == b'\x00'
 
 
 # -- Router / Route tests --
@@ -161,9 +161,9 @@ class TestRouter:
         route = router.route(0xf, 5)
 
         route.send(b'\xAA')
-        result = await route.recv()
+        data, _ = await route.recv()
 
-        assert result.data == b'\xBB'
+        assert data == b'\xBB'
         # Sent frame should have header byte prepended (outbound: dst=5, src=0xf)
         assert len(mf.sent) == 1
         header = mf.sent[0][0]
@@ -190,9 +190,9 @@ class TestRouter:
         recv_a = route_a.recv()
         recv_b = route_b.recv()
 
-        ra, rb = await asyncio.gather(recv_a, recv_b)
-        assert ra.data == b'\x11'
-        assert rb.data == b'\x22'
+        (data_a, _), (data_b, _) = await asyncio.gather(recv_a, recv_b)
+        assert data_a == b'\x11'
+        assert data_b == b'\x22'
 
     @pytest.mark.asyncio
     async def test_recv_only(self):
@@ -204,8 +204,8 @@ class TestRouter:
         router = Router(mf)
         route = router.route(0xf, 3)
 
-        result = await route.recv()
-        assert result.data == b'\xCC'
+        data, _ = await route.recv()
+        assert data == b'\xCC'
 
     @pytest.mark.asyncio
     async def test_buffered_frames(self):
@@ -221,13 +221,13 @@ class TestRouter:
         route_b = router.route(0xf, 2)
 
         # Only recv on route B — frame for route A will be buffered
-        result = await route_b.recv()
-        assert result.data == b'\x22'
+        data_b, _ = await route_b.recv()
+        assert data_b == b'\x22'
 
         # Now recv on route A — should get buffered frame
         route_a = router.route(0xf, 1)
-        result_a = await route_a.recv()
-        assert result_a.data == b'\x11'
+        data_a, _ = await route_a.recv()
+        assert data_a == b'\x11'
 
 
 # -- FramedEndpoint tests --
@@ -288,9 +288,9 @@ class TestCommitted:
         c = Committed(mf)
 
         c.send(b'\x01\x02')
-        result = await c.recv()
+        data, _ = await c.recv()
 
-        assert result.data == b'\xAA'
+        assert data == b'\xAA'
         # Check that send added commit byte
         assert mf.sent[0] == b'\x01\x02\x01'  # COMMIT = 0x01
 

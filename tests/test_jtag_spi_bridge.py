@@ -1,7 +1,8 @@
 import asyncio
 import pytest
 
-from acrobe.component.nsl.bnoc.framed import Framed, JtagFramed, FrameSend, FrameRecv
+from acrobe.protocol.datagram import Send, Recv
+from acrobe.component.nsl.bnoc.framed import Framed, JtagFramed
 from acrobe.component.nsl.bnoc.fifo import JtagFifo
 from acrobe.component.nsl.transactor.spi import SpiTransactor
 from acrobe.component.jtag_spi_bridge import jtag_spi_bridge
@@ -29,14 +30,12 @@ class MockChannel(Framed):
 
     async def flush_ops(self, batch):
         for op, future in batch:
-            if isinstance(op, FrameSend):
+            if isinstance(op, Send):
                 self.sent_frames.append(op.data)
-                future.set_result(op)
-            elif isinstance(op, FrameRecv):
-                # Generate response from last sent frame
+                future.set_result(None)
+            elif isinstance(op, Recv):
                 cmd = self.sent_frames[-1] if self.sent_frames else b''
-                op.data = self._response_fn(cmd)
-                future.set_result(op)
+                future.set_result((self._response_fn(cmd), None))
 
 
 # -- SpiTransactor tests --
@@ -344,9 +343,9 @@ class TestJtagFramedIntegration:
         framed = JtagFramed(fifo)
 
         framed.send(b'\xBE\xEF')
-        result = await framed.recv()
+        data, _ = await framed.recv()
 
-        assert result.data == b'\xDE\xAD'
+        assert data == b'\xDE\xAD'
 
     @pytest.mark.asyncio
     async def test_spi_transaction_through_stack(self):

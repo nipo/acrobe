@@ -9,7 +9,8 @@ method presence drives dispatch. Unattached options are auto-refused.
 import asyncio
 from typing import Any
 
-from .pipe import Pipe
+from ..node import Node
+from .pipe import Pipe, Read, Write
 
 
 # Telnet control bytes (RFC 854)
@@ -53,9 +54,17 @@ class TelnetPipe(Pipe):
     - option_add(opt): register an option handler by its code.
     """
 
-    def __init__(self, transport: Pipe, logger=None):
+    def __init__(self, transport: Pipe, logger=None, name: str = "telnet"):
+        # ``logger`` kept as a kwarg for callers that want a specific
+        # logger object (e.g. the rfc2217 listener tags telnet logs
+        # under its own connection logger). Default falls back to the
+        # Node fqdn-derived logger.
+        super().__init__(name)
         self._transport = transport
-        self.logger = logger or _NullLogger()
+        if logger is not None:
+            self.__logger_override = logger
+        else:
+            self.__logger_override = None
         self._options: dict[int, TelnetOption] = {}
         self._rx_buf = bytearray()       # pending user-data bytes
         self._rx_event = asyncio.Event()  # set when data or EOF available
@@ -64,12 +73,24 @@ class TelnetPipe(Pipe):
         self._write_lock = asyncio.Lock()
         self._closed = False
 
+    @property
+    def logger(self):
+        if self.__logger_override is not None:
+            return self.__logger_override
+        return Node.logger.fget(self)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start(self):
-        """Launch the background reader. Safe to call once."""
+    async def start(self):
+        """Node-lifecycle start. Spins up the background IAC reader."""
+        self._ensure_reader()
+
+    def _ensure_reader(self):
+        """Idempotently launch the background reader task. Must be
+        called from inside a running event loop. Safe to call from
+        ``flush_ops`` and from explicit ``start()``."""
         if self._reader_task is None:
             self._reader_task = asyncio.create_task(self._reader_loop())
 
@@ -87,17 +108,46 @@ class TelnetPipe(Pipe):
         self._options[option.code] = option
 
     # ------------------------------------------------------------------
-    # Pipe interface
+    # Pipe interface (Batcher flush)
     # ------------------------------------------------------------------
 
-    async def write(self, data: bytes) -> None:
-        # Escape every IAC byte in user data
-        escaped = data.replace(bytes([IAC]), bytes([IAC, IAC]))
-        async with self._write_lock:
-            await self._transport.write(escaped)
+    async def flush_ops(self, batch):
+        # Writes are bounded — they hand off to the lower transport
+        # and resolve quickly. Reads can block indefinitely waiting
+        # for incoming data, so they get spawned as background tasks
+        # so concurrent writes (or other reads) aren't held up by the
+        # Batcher's serialization lock.
+        self._ensure_reader()
+        for op, future in batch:
+            if isinstance(op, Write):
+                escaped = op.data.replace(bytes([IAC]), bytes([IAC, IAC]))
+                try:
+                    async with self._write_lock:
+                        await self._transport.write(escaped)
+                except Exception as exc:
+                    if not future.done():
+                        future.set_exception(exc)
+                    continue
+                if not future.done():
+                    future.set_result(None)
+            elif isinstance(op, Read):
+                asyncio.create_task(self._read_task(op.size, future))
+            else:
+                if not future.done():
+                    future.set_exception(TypeError(
+                        f"TelnetPipe: unsupported op {type(op).__name__}"))
 
-    async def read(self, size: int) -> bytes:
-        self.start()
+    async def _read_task(self, size, future):
+        try:
+            data = await self._read_exact(size)
+        except Exception as exc:
+            if not future.done():
+                future.set_exception(exc)
+            return
+        if not future.done():
+            future.set_result(data)
+
+    async def _read_exact(self, size: int) -> bytes:
         out = bytearray()
         while len(out) < size:
             if self._rx_buf:
@@ -252,8 +302,3 @@ class TelnetPipe(Pipe):
         await method(self, payload)
 
 
-class _NullLogger:
-    def debug(self, *a, **k): pass
-    def info(self, *a, **k): pass
-    def warning(self, *a, **k): pass
-    def exception(self, *a, **k): pass

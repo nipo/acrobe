@@ -32,7 +32,7 @@ class ComPortServer(ComPortRole):
         self._tasks: list[asyncio.Task] = []
 
     async def start(self):
-        self._telnet.start()
+        await self._telnet.start()
         await self._opt.start(self._telnet)
         # Hook serial events → notify client
         self._serial.on_signals(self._on_serial_signals)

@@ -1,41 +1,32 @@
-import asyncio
+"""NSL bnoc 9-bit framed FIFO transport.
 
-from ....engine import Batcher
-from ....node import Node
+`Framed` is the concrete implementation of the abstract
+:class:`acrobe.protocol.datagram.Datagram` for transports that carry
+discrete frames as a stream of 9-bit words (8-bit data + a ``LAST``
+marker on the final word of each frame). This is the FPGA-side
+:mod:`nsl_bnoc.framed` AXI-stream protocol.
 
+`JtagFramed` is the leaf implementation that runs the protocol over a
+JTAG-based FIFO transport (:class:`JtagFifo`).
+"""
 
-class FrameSend:
-    def __init__(self, data: bytes):
-        self.data = data
+from __future__ import annotations
 
-    def __repr__(self):
-        return f"<FrameSend {len(self.data)}B>"
-
-
-class FrameRecv:
-    def __init__(self):
-        self.data = None
-
-    def __repr__(self):
-        return "<FrameRecv>"
+from ....protocol.datagram import Datagram, Send, Recv
 
 
-class Framed(Batcher, Node):
-    """Base class for framed communication.
-    Matches RTL nsl_bnoc_framed: data stream with packet boundaries.
+class Framed(Datagram):
+    """Abstract NSL 9-bit-framed channel base.
+
+    Concrete subclasses (`JtagFramed`, `Committed`, `Route`) implement
+    :meth:`flush_ops`. The 9-bit framing helpers below are shared
+    between subclasses that have to encode/decode raw wire words.
     """
 
-    LAST = 0x100  # bit 8 of 9-bit word
+    LAST = 0x100  # bit 8 of the 9-bit word
 
     def __init__(self, name: str):
-        Batcher.__init__(self)
-        Node.__init__(self, name)
-
-    def send(self, data: bytes) -> asyncio.Future:
-        return self.post(FrameSend(data))
-
-    def recv(self) -> asyncio.Future:
-        return self.post(FrameRecv())
+        super().__init__(name)
 
     @staticmethod
     def encode(data: bytes) -> list[int]:
@@ -66,33 +57,30 @@ class Framed(Batcher, Node):
 
 
 class JtagFramed(Framed):
-    """Concrete framed implementation over JTAG FIFO."""
+    """Framed channel over a `JtagFifo` (the FPGA-side
+    :mod:`nsl_bnoc.framed_jtag` peripheral)."""
 
     def __init__(self, fifo, name: str = "framed"):
         super().__init__(name)
         self._fifo = fifo
 
     async def flush_ops(self, batch):
-        sends = [(op, f) for op, f in batch if isinstance(op, FrameSend)]
-        recvs = [(op, f) for op, f in batch if isinstance(op, FrameRecv)]
+        sends = [(op, f) for op, f in batch if isinstance(op, Send)]
+        recvs = [(op, f) for op, f in batch if isinstance(op, Recv)]
 
-        # Encode all sends as 9-bit words
         tx_words = []
         for op, _ in sends:
             tx_words.extend(self.encode(op.data))
 
-        # Exchange: send all, receive expect_frames complete frames
         rx_words = await self._fifo.exchange(
             tx_words, expect_frames=len(recvs))
 
-        # Split rx_words into frames at LAST markers
         frames = self.split_frames(rx_words)
 
-        # Resolve send futures
         for op, future in sends:
-            future.set_result(op)
+            if not future.done():
+                future.set_result(None)
 
-        # Resolve recv futures
         for (op, future), frame_words in zip(recvs, frames):
-            op.data = self.decode(frame_words)
-            future.set_result(op)
+            if not future.done():
+                future.set_result((self.decode(frame_words), None))
