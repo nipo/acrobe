@@ -152,6 +152,17 @@ class JLinkSwdInterface(swd.Interface):
         await self._transport.deassert_reset()
         await self._transport.set_speed_khz(1000)
 
+    # Cap the per-chunk SWD bit-bang size: large batched mem-AP
+    # blob ops otherwise build a single swd_io request the device
+    # firmware can't service. Empirically a Silicon Labs J-Link OB
+    # silently truncates responses above ~4 KiB; 8192 bits
+    # (≈1024 bytes per direction/out, plus a like-sized response)
+    # sits well within that window. Larger batches are split into
+    # multiple swd_io calls at SWD transaction boundaries — never
+    # mid-transaction, so the target sees only inter-transaction
+    # idle cycles between chunks.
+    MAX_CHUNK_BITS = 8192
+
     async def flush_ops(self, batch):
         direction: list[int] = []
         out: list[int] = []
@@ -173,7 +184,34 @@ class JLinkSwdInterface(swd.Interface):
             records.append([None, "rdbuff", offset + _ACK_OFFSET, None])
             pending = None
 
+        async def issue_chunk():
+            """Emit the accumulated direction/out as one swd_io and
+            resolve every future in `records`. Drains pending first
+            so no AP-read straddles a chunk boundary."""
+            nonlocal direction, out, records, pending
+            flush_pending_with_rdbuff()
+            if not direction:
+                return
+            try:
+                in_bytes = await self._transport.swd_io(
+                    _pack_bits(direction), _pack_bits(out),
+                    len(direction))
+            except Exception as exc:
+                for rec in records:
+                    if rec[0] is not None and not rec[0].done():
+                        rec[0].set_exception(exc)
+                raise
+            in_bits = _unpack_bits(in_bytes, len(direction))
+            self.__resolve_records(records, in_bits)
+            direction = []
+            out = []
+            records = []
+
         for op, future in batch:
+            # Cap accumulated bit-bang size between transactions —
+            # `issue_chunk` drains pending + records, clears arrays.
+            if len(direction) >= self.MAX_CHUNK_BITS:
+                await issue_chunk()
             if isinstance(op, swd.Run):
                 for _ in range(op.cycles):
                     direction.append(1)
@@ -239,24 +277,9 @@ class JLinkSwdInterface(swd.Interface):
             future.set_exception(TypeError(
                 f"JLinkSwdInterface can't lower {type(op).__name__}"))
 
-        # Drain any trailing pending AP read with an explicit RDBUFF
-        # read so the caller's future resolves before this batch ends.
-        flush_pending_with_rdbuff()
+        await issue_chunk()
 
-        if not direction:
-            return
-
-        try:
-            in_bytes = await self._transport.swd_io(
-                _pack_bits(direction), _pack_bits(out), len(direction))
-        except Exception as exc:
-            for rec in records:
-                if rec[0] is not None and not rec[0].done():
-                    rec[0].set_exception(exc)
-            raise
-
-        in_bits = _unpack_bits(in_bytes, len(direction))
-
+    def __resolve_records(self, records, in_bits):
         for fut, kind, ack_offset, data_offset in records:
             ack = (in_bits[ack_offset]
                    | (in_bits[ack_offset + 1] << 1)
