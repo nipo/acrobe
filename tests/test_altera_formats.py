@@ -9,15 +9,33 @@ import pytest
 import acrobe.component.altera.formats  # noqa: F401
 from acrobe.util.endian import bitswap8
 from acrobe.vfs import FsRoot
-from acrobe.component.altera.formats import (
-    POF_MAGIC, SOF_MAGIC, RBF_SYNC, RBF_SYNC_SWAPPED,
-    SofSection, Pof, Sof, Rbf, PofPartition, RbfBitstream,
+from acrobe.component.altera.formats.pof import POF_MAGIC, Pof, PofPartition
+from acrobe.component.altera.formats.sof import SOF_MAGIC, Sof, SofSection
+from acrobe.component.altera.formats.rbf_cyclone10 import (
+    RBF_SYNC, RBF_SYNC_SWAPPED, Rbf, RbfBitstream,
 )
 
 
 def _make_section(tag, data, flags=0):
     """Encode one POF/SOF section: tag(1) flags(1) length(4) data."""
     return bytes([tag, flags]) + struct.pack("<I", len(data)) + data
+
+
+def _make_minimal_cmf(descriptor_format=0x20, size_bytes=8192, name=b"CMF\x00"):
+    """Build a minimal valid CMF blob: one CMF section.
+
+    Section header at offset 0; descriptor format byte at +4 selects
+    family/variant (0x20 = Agilex non-VAB). Sub-header at +0x400 carries
+    version, total size, and 4-char tag.
+    """
+    assert size_bytes >= 8192 and size_bytes % 4096 == 0
+    blob = bytearray(size_bytes)
+    struct.pack_into("<I", blob, 0, 0x62294895)
+    struct.pack_into("<I", blob, 4, descriptor_format)
+    struct.pack_into("<I", blob, 0x400 + 4, 1)
+    struct.pack_into("<I", blob, 0x400 + 8, size_bytes)
+    blob[0x400 + 12:0x400 + 16] = name.ljust(4, b"\x00")
+    return bytes(blob)
 
 
 def _make_pof(*, tool="QuartusFakerstu",
@@ -255,8 +273,8 @@ class TestRbf:
     @pytest.mark.asyncio
     async def test_rbf_agilex_sync(self, tmp_path):
         # Agilex/SDM RBF: starts with 0x95482962, no swap needed.
-        from acrobe.component.altera.formats import RBF_SYNC_AGILEX
-        body = RBF_SYNC_AGILEX + b"\x00" * 100
+        from acrobe.component.altera.formats.cmf import RBF_SYNC_AGILEX
+        body = _make_minimal_cmf()
         path = tmp_path / "agilex.rbf"
         path.write_bytes(body)
         root = FsRoot(str(tmp_path))
@@ -269,10 +287,8 @@ class TestRbf:
     async def test_rbf_agilex_sync_swapped(self, tmp_path):
         # Bytes with the bit-swapped Agilex sync — parser detects
         # and swaps on read so the canonical sync surfaces.
-        from acrobe.component.altera.formats import (
-            RBF_SYNC_AGILEX, RBF_SYNC_AGILEX_SWAPPED,
-        )
-        body = RBF_SYNC_AGILEX_SWAPPED + b"\xff" * 100
+        from acrobe.component.altera.formats.cmf import RBF_SYNC_AGILEX
+        body = bitswap8(_make_minimal_cmf())
         path = tmp_path / "agilex-sw.rbf"
         path.write_bytes(body)
         root = FsRoot(str(tmp_path))

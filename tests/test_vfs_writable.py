@@ -113,7 +113,8 @@ class TestNonPassthroughBlocked:
     async def test_pof_partition_not_writable(self, tmp_path):
         # Construct a simple POF file
         import struct
-        from acrobe.component.altera.formats import POF_MAGIC, SofSection
+        from acrobe.component.altera.formats.pof import POF_MAGIC
+        from acrobe.component.altera.formats.sof import SofSection
         config_data = b"\x00" * 12 + b"payload"
         sections = b""
         for tag, body in [

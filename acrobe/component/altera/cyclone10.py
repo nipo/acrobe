@@ -2,7 +2,7 @@ from ...protocol.jtag import Tap, Dr, Instruction
 from ...part_id import PartId
 from ..fpga import JtagSramFpga
 from ...bitstring import BitString
-from .formats import RBF_SYNC, RBF_SYNC_SWAPPED
+from .formats.rbf_cyclone10 import RBF_SYNC, RBF_SYNC_SWAPPED
 
 
 class Cyclone10(Tap, JtagSramFpga):

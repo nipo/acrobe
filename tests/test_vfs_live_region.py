@@ -6,7 +6,8 @@ import pytest
 import acrobe.component.altera.formats  # registers POF parser
 from acrobe.node import Node, Readable, Writable, Addressable
 from acrobe.vfs import populate_format
-from acrobe.component.altera.formats import POF_MAGIC, RBF_SYNC_SWAPPED
+from acrobe.component.altera.formats.pof import POF_MAGIC
+from acrobe.component.altera.formats.rbf_cyclone10 import RBF_SYNC_SWAPPED
 import struct
 
 
@@ -46,7 +47,7 @@ def _make_section(tag, data, flags=0):
 
 def _make_pof_blob():
     """Same shape as test_altera_formats.py."""
-    from acrobe.component.altera.formats import SofSection
+    from acrobe.component.altera.formats.sof import SofSection
     sections = b""
     sections += _make_section(SofSection.TOOL, b"FakeQuartus\x00")
     sections += _make_section(SofSection.DEVICE, b"EPCQ\x00")
@@ -95,5 +96,5 @@ class TestLiveFlashComposition:
         # Sync word at offset 50 in the unswapped view
         from acrobe.util.endian import bitswap8
         # The view is bitswapped from source; check sync appears as RBF_SYNC
-        from acrobe.component.altera.formats import RBF_SYNC
+        from acrobe.component.altera.formats.rbf_cyclone10 import RBF_SYNC
         assert RBF_SYNC in out
