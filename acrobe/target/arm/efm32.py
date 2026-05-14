@@ -1,10 +1,15 @@
 """Silicon Labs (Energy Micro) EFM32 / EFR32 family target.
 
-EFM32 flash programming uses the on-chip MSC peripheral, accessed
-directly through the Mem-AP — same MMIO path as crobe's slow path,
-but always used (no Puppet trampoline in V1). Performance is fine
-on small Series 0 parts; Series 1GG with ~2 MiB of flash will be
-visibly slower than vendor tools until the Puppet substrate lands.
+EFM32 flash programming runs on-target through stub code driven by
+the Puppet substrate (`acrobe.target.puppet.ArmMPuppet`). The
+~70-byte `flash_erase` / `flash_write` stubs in `STUBS` are the
+ones crobe ships in `firmware/flash/stubs/arm/efm32.c`, compiled
+per series with the appropriate MSC base address. Each stub takes
+(addr, size_or_src, page_or_bytes) in r0..r2 and loops on-target,
+keeping per-word MSC pokes off the SWD bus.
+
+Mass-erase still goes through MMIO (one-shot path via
+`MSC_WRITECMD_ERASEMAIN0`/`ERASEMAIN1`).
 
 Detection reads the DI (Device Information) block at 0x0FE081B0 +
 0x4C through the AHB-AP. The family byte selects the MSC layout
@@ -32,9 +37,35 @@ from ...db import NoMatch
 from ..debuggable import Debuggable
 from ..loadable import Loadable
 from ..memory import Memory
+from ..puppet import ArmMPuppet
 from ..region import Flash, Ram
 from ..target import Target
 from .cortex_m import CortexMDebuggable, CortexMTarget
+
+
+# Stub blobs from crobe firmware/flash/stubs/arm/efm32.c, compiled
+# per series. Calling convention (AAPCS, r0..r3 = args, r0 = ret):
+#   void flash_erase(uintptr_t addr, size_t size, size_t page_size);
+#   void flash_write(uintptr_t dst, const void *src, size_t bytes);
+# bytes() is RAM that the host pre-populates via mem_write.
+STUBS = {
+    "series0g": {
+        "flash_erase": b'p\xb5SB\rL\x01D\x18@\xe3i\x13\xf0\x01\x0f\nK\xfa\xd1A\xf6q4\xdcc\x01$\x9c`\x02%\x88B\x07\xd2\x18a\xdc`\x10D\xdd`\xdei\xf6\x07\xfc\xd4\xf5\xe7\x00"\x9a`\xdacp\xbd\x00\x00\x0c@',
+        "flash_write": b'p\xb5\x10L\x92\x08\xe3i\x13\xf0\x01\x0f\rK\xfa\xd1A\xf6q4\xdcc\x01$\x9c`\x01\xeb\x82\x02@\x1a\x08%\x91B\n\xd0F\x18\x1ea\xdc`Q\xf8\x04k\x9ea\xdd`\xdei\xf6\x07\xfc\xd4\xf2\xe7\x00"\x9a`\xdacp\xbd\x00\x00\x0c@',
+    },
+    "series0": {
+        "flash_erase": b'\xf0\xb5\x01%SB\rOA\x18\x18@\xfei\x01$\nK.B\xfa\xd1\nM\xddc\x02%\x9c`\x88B\x07\xd2\x18a\xdc`\x80\x18\xdd`\xdei&B\xfc\xd1\xf5\xe7\x00"\x9a`\xdac\xf0\xbd\xc0F\x00\x00\x0c@q\x1b\x00\x00',
+        "flash_write": b'\xf0\xb5\x01%\x0eO\x92\x08\xfei\x01$\x0cK.B\xfa\xd1\x0cM\x92\x00\xddc\x9c`\x18a\x08 \xdc`\x8a\x18\x91B\x07\xd0\rh\x9da\xd8`\xddi%B\xfc\xd1\x041\xf5\xe7\x00"\x9a`\xdac\xf0\xbd\xc0F\x00\x00\x0c@q\x1b\x00\x00',
+    },
+    "series1": {
+        "flash_erase": b'\xf0\xb5\x01%SB\rOA\x18\x18@\xfei\x01$\nK.B\xfa\xd1\nM\x1dd\x02%\x9c`\x88B\x07\xd2\x18a\xdc`\x80\x18\xdd`\xdei&B\xfc\xd1\xf5\xe7\x00"\x9a`\x1ad\xf0\xbd\xc0F\x00\x00\x0e@q\x1b\x00\x00',
+        "flash_write": b'\xf0\xb5\x01%\x0eO\x92\x08\xfei\x01$\x0cK.B\xfa\xd1\x0cM\x92\x00\x1dd\x9c`\x18a\x08 \xdc`\x8a\x18\x91B\x07\xd0\rh\x9da\xd8`\xddi%B\xfc\xd1\x041\xf5\xe7\x00"\x9a`\x1ad\xf0\xbd\xc0F\x00\x00\x0e@q\x1b\x00\x00',
+    },
+    "series1gg": {
+        "flash_erase": b'\xf0\xb5\x80\'\x01%SBA\x18\xff\x05\x18@\x80#\xfei\x01$\xdb\x05.B\xf9\xd1\tM\x1dd\x02%\x9c`\x88B\x07\xd2\x18a\xdc`\x80\x18\xdd`\xdei&B\xfc\xd1\xf5\xe7\x00"\x9a`\x1ad\xf0\xbd\xc0Fq\x1b\x00\x00',
+        "flash_write": b'\xf0\xb5\x80\'\x01%\x92\x08\xff\x05\x80#\xfei\x01$\xdb\x05.B\xf9\xd1\x0bM\x92\x00\x1dd\x9c`\x18a\x08 \xdc`\x8a\x18\x91B\x07\xd0\rh\x9da\xd8`\xddi%B\xfc\xd1\x041\xf5\xe7\x00"\x9a`\x1ad\xf0\xbd\xc0Fq\x1b\x00\x00',
+    },
+}
 
 
 class Part:
@@ -49,36 +80,32 @@ class Part:
 
 
 class EfmFlash(Flash):
-    """EFM32 flash region driven by the MSC peripheral.
+    """EFM32 flash region driven by on-target stub code (Puppet).
 
     Reads pass through Mem-AP `mem_read` (flash is memory-mapped at
-    the region base). Erase and write drive the MSC registers
-    directly; `MSC_LOCK` is unlocked for the duration of one
-    erase / write call and re-locked on every exit path.
+    the region base). Erase and write call into the per-series
+    `flash_erase` / `flash_write` stubs running on the target CPU;
+    the host only pushes input bytes into RAM and waits for the
+    stub to return. Full-region erase shortcuts through `mass_erase`
+    via MMIO (one-shot ERASEMAIN command).
 
-    Subclasses set `MSC` (the controller base) and `MSC_LOCK`
-    (offset to the lock register within `MSC`) for the chip's
-    series; the rest of the register layout is identical across
-    Series 0 / 1 / 1GG.
+    Subclasses set `MSC` / `MSC_LOCK` (used by `mass_erase`) and
+    `STUBS` (the per-series compiled blob set).
     """
 
     MSC = None
     MSC_LOCK = None
+    STUBS: dict = {}
 
     MSC_LOCK_MAGIC = 0x1B71
     MSC_MASSLOCK_MAGIC = 0x631A
 
     MSC_WRITECTRL = 0x008
     MSC_WRITECMD  = 0x00C
-    MSC_ADDRB     = 0x010
-    MSC_WDATA     = 0x018
     MSC_STATUS    = 0x01C
     MSC_MASSLOCK  = 0x054
 
     MSC_WRITECTRL_WREN      = 1 << 0
-    MSC_WRITECMD_LADDRIM    = 1 << 0
-    MSC_WRITECMD_ERASEPAGE  = 1 << 1
-    MSC_WRITECMD_WRITEONCE  = 1 << 3
     MSC_WRITECMD_ERASEMAIN0 = 1 << 8
     MSC_WRITECMD_ERASEMAIN1 = 1 << 9
 
@@ -86,19 +113,37 @@ class EfmFlash(Flash):
 
     POLL_PERIOD = 0.001
 
+    # Per-call timeout caps. Stubs that lock up don't get unbounded
+    # time — `Puppet.wait` will force-halt the core and raise.
+    STUB_ERASE_TIMEOUT = 30.0
+    STUB_WRITE_TIMEOUT = 5.0
+
+    # Cap each Mem-AP `mem_read` issued during readback / verify.
+    # The Silicon Labs J-Link OB latches an error after ~80 KiB of
+    # continuous AP reads in one engine batch; smaller per-call
+    # reads give the SwDp/Mem-AP pipeline natural break points.
+    READ_CHUNK = 32 * 1024
+
     # Mass-erase fast path via MSC_WRITECMD_ERASEMAIN0/1. Overridden
     # to False on Series 0G — that variant has no ERASEMAIN command
     # and must fall back to per-page erase.
     has_mass_erase = True
 
-    def __init__(self, name, address, size, mem_ap, *, page_size):
+    def __init__(self, name, address, size, mem_ap, puppet, *, page_size):
         super().__init__(name, address, size,
                          write_page_size=page_size,
                          erase_page_sizes=[page_size])
         self.mem_ap = mem_ap
+        self.puppet = puppet
+        self.write_buffer = None
 
     async def read(self, offset, size):
-        return await self.mem_ap.mem_read(self.address + offset, size)
+        out = bytearray()
+        base = self.address + offset
+        for chunk_off in range(0, size, self.READ_CHUNK):
+            n = min(self.READ_CHUNK, size - chunk_off)
+            out += await self.mem_ap.mem_read(base + chunk_off, n)
+        return bytes(out)
 
     async def erase(self, offset, size):
         if offset % self.write_page_size or size % self.write_page_size:
@@ -109,60 +154,45 @@ class EfmFlash(Flash):
         if full_region and self.has_mass_erase:
             await self.mass_erase()
             return
-        await self.unlock()
+        stub = self.puppet.stub(self.STUBS["flash_erase"], name="efm_erase")
         try:
-            await self.mem_ap.write32(self.msc_reg(self.MSC_WRITECTRL),
-                                      self.MSC_WRITECTRL_WREN)
-            n_pages = size // self.write_page_size
-            if n_pages > 1:
-                with self.progress("erase", n_pages, "pages") as bar:
-                    await self.erase_pages(offset, n_pages, bar)
-            else:
-                await self.erase_pages(offset, n_pages, None)
+            with self.progress("erase",
+                               size // self.write_page_size, "pages") as bar:
+                await stub.call(self.address + offset, size,
+                                self.write_page_size,
+                                timeout=self.STUB_ERASE_TIMEOUT)
+                bar.advance(size // self.write_page_size)
         finally:
-            await self.lock()
+            stub.cleanup()
         if full_region:
             self.is_blank = True
-
-    async def erase_pages(self, offset, n_pages, bar):
-        addr = self.address + offset
-        for _ in range(n_pages):
-            await self.mem_ap.write32(self.msc_reg(self.MSC_ADDRB), addr)
-            await self.mem_ap.write32(self.msc_reg(self.MSC_WRITECMD),
-                                      self.MSC_WRITECMD_LADDRIM)
-            await self.mem_ap.write32(self.msc_reg(self.MSC_WRITECMD),
-                                      self.MSC_WRITECMD_ERASEPAGE)
-            await self.wait_idle()
-            addr += self.write_page_size
-            if bar is not None:
-                bar.advance(1)
 
     async def write(self, offset, data):
         if offset % 4 or len(data) % 4:
             raise ValueError("EfmFlash write must be word-aligned")
-        await self.unlock()
+        stub = self.puppet.stub(self.STUBS["flash_write"], name="efm_write")
+        self.write_buffer = self.puppet.allocate(self.write_page_size,
+                                                 align=4)
         try:
-            await self.mem_ap.write32(self.msc_reg(self.MSC_WRITECTRL),
-                                      self.MSC_WRITECTRL_WREN)
-            addr = self.address + offset
-            for word_index in range(0, len(data), 4):
-                word = struct.unpack_from("<I", data, word_index)[0]
-                await self.mem_ap.write32(self.msc_reg(self.MSC_ADDRB),
-                                          addr + word_index)
-                await self.mem_ap.write32(self.msc_reg(self.MSC_WRITECMD),
-                                          self.MSC_WRITECMD_LADDRIM)
-                await self.mem_ap.write32(self.msc_reg(self.MSC_WDATA),
-                                          word)
-                await self.mem_ap.write32(self.msc_reg(self.MSC_WRITECMD),
-                                          self.MSC_WRITECMD_WRITEONCE)
-                await self.wait_idle()
+            page = self.write_page_size
+            for chunk_off in range(0, len(data), page):
+                chunk = data[chunk_off:chunk_off + page]
+                await self.write_buffer.write(chunk)
+                await stub.call(self.address + offset + chunk_off,
+                                self.write_buffer.address,
+                                len(chunk),
+                                timeout=self.STUB_WRITE_TIMEOUT)
         finally:
-            await self.lock()
+            self.puppet.unallocate(self.write_buffer)
+            self.write_buffer = None
+            stub.cleanup()
 
     async def mass_erase(self):
         """Chip-wide flash erase via MSC_WRITECMD_ERASEMAIN0 (+ MAIN1
         on parts with >= 512 KiB).
 
+        Stays on the MMIO path — it's a one-shot transaction, the
+        stub overhead would be larger than the savings.
         Requires both MSC_LOCK and MSC_MASSLOCK to be unlocked.
         Series 0G subclasses this away (no ERASEMAIN command on
         that variant).
@@ -170,14 +200,14 @@ class EfmFlash(Flash):
         await self.unlock()
         await self.mass_unlock()
         try:
-            await self.mem_ap.write32(self.msc_reg(self.MSC_WRITECTRL),
+            await self.mem_ap.write32(self.MSC + self.MSC_WRITECTRL,
                                       self.MSC_WRITECTRL_WREN)
             await self.wait_idle()
-            await self.mem_ap.write32(self.msc_reg(self.MSC_WRITECMD),
+            await self.mem_ap.write32(self.MSC + self.MSC_WRITECMD,
                                       self.MSC_WRITECMD_ERASEMAIN0)
             await self.wait_idle(timeout=20.0)
             if self.size >= (1 << 19):
-                await self.mem_ap.write32(self.msc_reg(self.MSC_WRITECMD),
+                await self.mem_ap.write32(self.MSC + self.MSC_WRITECMD,
                                           self.MSC_WRITECMD_ERASEMAIN1)
                 await self.wait_idle(timeout=20.0)
         finally:
@@ -186,25 +216,25 @@ class EfmFlash(Flash):
         self.is_blank = True
 
     async def unlock(self):
-        await self.mem_ap.write32(self.msc_reg(self.MSC_LOCK),
+        await self.mem_ap.write32(self.MSC + self.MSC_LOCK,
                                   self.MSC_LOCK_MAGIC)
 
     async def lock(self):
-        await self.mem_ap.write32(self.msc_reg(self.MSC_LOCK), 0)
+        await self.mem_ap.write32(self.MSC + self.MSC_LOCK, 0)
 
     async def mass_unlock(self):
-        await self.mem_ap.write32(self.msc_reg(self.MSC_MASSLOCK),
+        await self.mem_ap.write32(self.MSC + self.MSC_MASSLOCK,
                                   self.MSC_MASSLOCK_MAGIC)
 
     async def mass_lock(self):
-        await self.mem_ap.write32(self.msc_reg(self.MSC_MASSLOCK), 0)
+        await self.mem_ap.write32(self.MSC + self.MSC_MASSLOCK, 0)
 
     async def wait_idle(self, timeout: float = 5.0):
         """Poll MSC_STATUS until BUSY clears or `timeout` elapses."""
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         while True:
-            status = await self.mem_ap.read32(self.msc_reg(self.MSC_STATUS))
+            status = await self.mem_ap.read32(self.MSC + self.MSC_STATUS)
             if not (status & self.MSC_STATUS_BUSY):
                 return
             if loop.time() > deadline:
@@ -212,13 +242,11 @@ class EfmFlash(Flash):
                     f"MSC busy after {timeout}s (status={status:#x})")
             await asyncio.sleep(self.POLL_PERIOD)
 
-    def msc_reg(self, offset: int) -> int:
-        return self.MSC + offset
-
 
 class EfmFlashSeries0(EfmFlash):
     MSC = 0x400C0000
     MSC_LOCK = 0x3C
+    STUBS = STUBS["series0"]
 
 
 class EfmFlashSeries0G(EfmFlashSeries0):
@@ -229,16 +257,19 @@ class EfmFlashSeries0G(EfmFlashSeries0):
     """
 
     has_mass_erase = False
+    STUBS = STUBS["series0g"]
 
 
 class EfmFlashSeries1(EfmFlash):
     MSC = 0x400E0000
     MSC_LOCK = 0x40
+    STUBS = STUBS["series1"]
 
 
 class EfmFlashSeries1GG(EfmFlash):
     MSC = 0x40000000
     MSC_LOCK = 0x40
+    STUBS = STUBS["series1gg"]
 
 
 # DEVICE_FAMILY → Part. Family number is the byte at
@@ -430,21 +461,25 @@ async def _build_efm32_target(dp, ap, di):
     debug.memory_map.append(Ram("apb",  0x40000000, 0x100000))
     target.child_add(debug)
 
+    sram = BusRam("sram",  0x20000000, ram_size, ap)
     memory = Memory(ap)
     memory.child_add(BusRam("flash", 0x00000000, flash_size, ap))
-    memory.child_add(BusRam("sram",  0x20000000, ram_size, ap))
+    memory.child_add(sram)
     memory.child_add(BusRam("di",    0x0FE00000, 0x10000, ap))
     memory.child_add(BusRam("apb",   0x40000000, 0x100000, ap))
     memory.child_add(BusRam("ppb",   0xE0000000, 0x100000, ap))
     target.child_add(memory)
 
+    puppet = ArmMPuppet("puppet", debug.cores[0], sram, ap)
+    target.child_add(puppet)
+
     loadable = EfmLoadable("main")
     loadable.child_add(
-        part.flash_class("code", 0x00000000, flash_size, ap,
+        part.flash_class("code", 0x00000000, flash_size, ap, puppet,
                          page_size=page_size))
     if part.bootloader:
         loadable.child_add(
-            part.flash_class("boot", 0x0FE10000, 16 * 1024, ap,
+            part.flash_class("boot", 0x0FE10000, 16 * 1024, ap, puppet,
                              page_size=page_size))
     target.child_add(loadable)
     return target
