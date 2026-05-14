@@ -19,7 +19,7 @@ from .debuggable import (
     Debuggable, Core, Register, RegisterType, CoreState, HaltCause,
 )
 from .puppet import (
-    Puppet, ArmMPuppet, PuppetStub, PagedPuppetWriter, Zone,
+    Puppet, PuppetBase, ArmMPuppet, PuppetStub, PagedPuppetWriter, Zone,
 )
 from .debug_auth import DebugAuth
 
@@ -37,6 +37,7 @@ __all__ = [
     "Region", "Ram", "Flash", "Eeprom", "NotUpdatable",
     "Debuggable", "Core", "Register", "RegisterType",
     "CoreState", "HaltCause",
-    "Puppet", "ArmMPuppet", "PuppetStub", "PagedPuppetWriter", "Zone",
+    "Puppet", "PuppetBase", "ArmMPuppet", "PuppetStub",
+    "PagedPuppetWriter", "Zone",
     "DebugAuth",
 ]

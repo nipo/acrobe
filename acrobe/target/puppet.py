@@ -1,26 +1,26 @@
-"""Puppet — trampoline-based remote code execution on one Core.
+"""Puppet — remote code execution on a target.
 
-A `Puppet` is a Node child of a Target — one Puppet per Core
-willing to host stub code. AMP systems may carry multiple Puppets,
-each bound to a different Core and Ram. Regions that need
-on-target driver code (PuppetFlash) hold a reference to the
-appropriate Puppet at construction time, not back through the
-Target.
+A `Puppet` is the host-side interface to "run arbitrary bytes on
+the target": allocate RAM, write data, call a function at a
+target address with up to four word-sized arguments, read back
+the return value. The interface is a `typing.Protocol` so multiple
+transports can implement it — SWD-driven `ArmMPuppet` for chips
+reached through CoreSight, vendor-bootloader puppets (e.g.
+PICOBOOT on RP2) for chips reached through a USB ROM loader.
 
-The host-target ABI lives in `ArmMPuppet`'s `TRAMPOLINE_CODE`: a
-12-byte block (8 bytes of code + 4 bytes of function pointer)
-loaded into target RAM at puppet construction. `prepare(pc, *args)`
-patches the function pointer, sets PC to the trampoline, SP to the
-top of an allocated stack, and r0..r3 to the call's arguments.
-`run()` resumes the CPU with interrupts masked; the trampoline's
-`blx` jumps into the stub, the stub returns via `bx lr`, control
-falls back into the trampoline's `bkpt #0xbe`, the core halts, and
-`wait()` reads r0 as the return value.
+Concrete impls inherit from `PuppetBase`, which provides the
+shared bookkeeping (a `Node` identity, an `Allocator` over a RAM
+range, a persistent stack zone, and the `allocate`/`unallocate`/
+`stub`/`call` plumbing). They fill in `mem_read`/`mem_write` (how
+this transport touches target memory) and `prepare`/`run`/`wait`
+(how this transport launches code and observes its return).
 
 `PuppetStub` wraps an installed-once / call-many-times pattern:
 allocate a Zone in RAM, copy the stub bytes there at install time,
-re-arm the trampoline pointer per call. Stubs cleanup their zone
-on `cleanup()`.
+arm the puppet's trampoline per call. Stubs cleanup their zone on
+`cleanup()`.
+
+For the ARM Cortex-M trampoline ABI, see `ArmMPuppet`.
 
 This module deliberately does not concern itself with stub source
 or build pipeline — those live alongside the target (e.g. EFM32
@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import struct
+from typing import Protocol, runtime_checkable
 
 from ..allocator import Allocator
 from ..node import Node
@@ -217,38 +218,50 @@ class PagedPuppetWriter:
         self.free_buf, self.busy_buf = self.busy_buf, self.free_buf
 
 
-class Puppet(Node):
-    """Remote-code-exec capability bound to one Core and one Ram.
+@runtime_checkable
+class Puppet(Protocol):
+    """Host-side surface that `PuppetStub`, `PagedPuppetWriter`, and
+    `Zone` consume.
 
-    Concrete subclasses (`ArmMPuppet`) fill in `TRAMPOLINE_CODE`
-    and the register-name conventions. The base class holds the
-    Core / Ram references and the allocator.
+    Any transport that can (a) allocate target RAM, (b) read and
+    write target memory, and (c) call a function at a target
+    address with up to four word-sized arguments and read back its
+    return value, can satisfy this protocol.
     """
 
-    TRAMPOLINE_CODE: bytes = b""
+    def allocate(self, size: int, align: int = 1) -> Zone: ...
+    def unallocate(self, zone: Zone) -> None: ...
+    def stub(self, code: bytes, *, name: str = "stub") -> PuppetStub: ...
 
-    pc_reg: str = "pc"
-    sp_reg: str = "sp"
-    arg_regs: tuple[str, ...] = ()
+    async def mem_read(self, addr: int, size: int) -> bytes: ...
+    async def mem_write(self, addr: int, data: bytes) -> None: ...
 
-    # Bytes appended to TRAMPOLINE_CODE per prepare() to encode the
-    # function-pointer literal the trampoline loads.
-    PC_SLOT_SIZE = 4
+    async def prepare(self, pc: int, *args: int) -> None: ...
+    async def run(self) -> None: ...
+    async def wait(self, timeout: float = 1.0) -> int: ...
+    async def call(self, pc: int, *args: int,
+                   timeout: float = 1.0) -> int: ...
 
-    # Bytes of stack to allocate at construction.
+
+class PuppetBase(Node):
+    """Shared base for concrete `Puppet` implementations.
+
+    Owns the `Allocator` over the target's RAM region and the
+    persistent stack zone. Provides the `allocate`/`unallocate`/
+    `stub`/`call` plumbing. Concrete subclasses fill in
+    `mem_read`/`mem_write` (memory-access transport) and
+    `prepare`/`run`/`wait` (code-launch transport).
+    """
+
+    # Bytes of stack to allocate at construction. Subclasses may
+    # raise this for stubs with deeper call chains.
     STACK_SIZE = 256
 
-    def __init__(self, name, core, ram, mem_ap):
+    def __init__(self, name, ram):
         super().__init__(name)
-        self.core = core
         self.ram = ram
-        self.mem_ap = mem_ap
         self.allocator = Allocator(ram.address, ram.size)
-        # Persistent zones: stack + trampoline. Allocated once at
-        # construction; freed when the Puppet is dropped.
         self.stack = self.allocate(self.STACK_SIZE, align=8)
-        self.trampoline = self.allocate(
-            len(self.TRAMPOLINE_CODE) + self.PC_SLOT_SIZE, align=4)
 
     def allocate(self, size, align=1) -> Zone:
         return Zone(self, self.allocator.allocate(size, align))
@@ -256,14 +269,14 @@ class Puppet(Node):
     def unallocate(self, zone: Zone):
         self.allocator.free(zone.range)
 
-    async def mem_read(self, addr, size):
-        return await self.mem_ap.mem_read(addr, size)
-
-    async def mem_write(self, addr, data):
-        await self.mem_ap.mem_write(addr, data)
-
     def stub(self, code: bytes, *, name: str = "stub") -> PuppetStub:
         return PuppetStub(self, code, name=name)
+
+    async def mem_read(self, addr, size):
+        raise NotImplementedError
+
+    async def mem_write(self, addr, data):
+        raise NotImplementedError
 
     async def prepare(self, pc: int, *args):
         raise NotImplementedError
@@ -280,7 +293,7 @@ class Puppet(Node):
         return await self.wait(timeout=timeout)
 
 
-class ArmMPuppet(Puppet):
+class ArmMPuppet(PuppetBase):
     """Cortex-M puppet.
 
     Trampoline layout (Thumb, 12 bytes):
@@ -301,6 +314,12 @@ class ArmMPuppet(Puppet):
 
     TRAMPOLINE_CODE = b'\x01\x4c\xa0\x47\xbe\xbe\xbe\xbe'
 
+    # Bytes appended to TRAMPOLINE_CODE per prepare() to encode the
+    # function-pointer literal the trampoline loads.
+    PC_SLOT_SIZE = 4
+
+    pc_reg = "pc"
+    sp_reg = "sp"
     arg_regs = ("r0", "r1", "r2", "r3")
 
     POLL_PERIOD = 0.001
@@ -309,6 +328,19 @@ class ArmMPuppet(Puppet):
     # prepare() to guarantee the trampoline executes in Thumb mode
     # regardless of whatever state the CPU was halted in.
     XPSR_THUMB = 0x01000000
+
+    def __init__(self, name, core, ram, mem_ap):
+        super().__init__(name, ram)
+        self.core = core
+        self.mem_ap = mem_ap
+        self.trampoline = self.allocate(
+            len(self.TRAMPOLINE_CODE) + self.PC_SLOT_SIZE, align=4)
+
+    async def mem_read(self, addr, size):
+        return await self.mem_ap.mem_read(addr, size)
+
+    async def mem_write(self, addr, data):
+        await self.mem_ap.mem_write(addr, data)
 
     async def prepare(self, pc: int, *args):
         if len(args) > len(self.arg_regs):
