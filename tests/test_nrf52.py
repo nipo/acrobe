@@ -152,12 +152,26 @@ class MockZone:
 
 
 class MockPuppetStub:
+    """Mock that records stub calls and applies their side effects
+    against `MockPuppet.ap.flash`. Supports both the synchronous
+    `call()` shape and the prepare/run/wait split that
+    `PagedPuppetWriter` uses for pipelining."""
+
     def __init__(self, puppet, code, name):
         self.puppet = puppet
         self.code = code
         self.name = name
+        self.__pending = None
 
-    async def call(self, *args, timeout=None):
+    async def prepare(self, *args):
+        self.__pending = args
+
+    async def run(self):
+        # Side effects fire when the (fake) stub "starts" running so
+        # that subsequent uploads to the (then-free) buffer don't
+        # clobber the bytes this call wants to read.
+        args = self.__pending
+        self.__pending = None
         self.puppet.stub_calls.append((self.name, args))
         if self.code is NRF_STUBS["flash_erase"]:
             addr, size, page_size = args
@@ -173,6 +187,14 @@ class MockPuppetStub:
             self.puppet.ap.mem_writes.append((dst, data))
         else:
             raise AssertionError(f"unknown stub {self.name!r}")
+
+    async def wait(self, timeout=None):
+        return 0
+
+    async def call(self, *args, timeout=None):
+        await self.prepare(*args)
+        await self.run()
+        return await self.wait(timeout=timeout)
 
     def cleanup(self):
         pass
@@ -263,12 +285,19 @@ class TestNvmcFlash:
         async def boom(*args, **kwargs):
             raise RuntimeError("stub failure")
 
-        # Patch the install path so the stub call raises.
-        puppet.stub = lambda code, *, name="stub": type(
-            "BoomStub", (), {"call": boom, "cleanup": lambda self: None})()
+        # Replace the stub factory with one that raises on call(); the
+        # writer should still unallocate the RAM buffers it owns.
+        def stub_factory(code, *, name="stub"):
+            return type(
+                "BoomStub", (),
+                {"puppet": puppet, "call": boom, "prepare": boom,
+                 "run": boom, "wait": boom,
+                 "cleanup": lambda self: None},
+            )()
+        puppet.stub = stub_factory
         with pytest.raises(RuntimeError):
             await f.write(0x100, b"\xaa\xbb\xcc\xdd")
-        # Buffer was released back to the allocator (next alloc fits).
+        # Buffers were released back to the allocator (next alloc fits).
         z = puppet.allocate(0x1000, align=4)
         assert z.size == 0x1000
 
@@ -674,6 +703,46 @@ class TestApprotect:
 
 
 class TestEndToEnd:
+    @pytest.mark.asyncio
+    async def test_multi_page_pipelined_write(self):
+        """Multi-page write through plan_update uses
+        PagedPuppetWriter — stubs fire in page order, all bytes land
+        in flash."""
+        from acrobe.memory_map import MemoryMap
+
+        ap = MockAp(part=0x52840, flash_size=0x10000, page_size=0x1000)
+        puppet = MockPuppet(ap)
+        loadable = Nrf52Loadable("main", ctrl_ap=None)
+        target = Target("nRF52840")
+        target.child_add(loadable)
+        flash = NvmcFlash("code", 0, 0x10000, ap, puppet, page_size=0x1000)
+        loadable.child_add(flash)
+        # Pre-erase so plan_update skips the erase phase and we get a
+        # clean ordering of write stub calls.
+        flash.is_blank = True
+
+        # 4 distinct full pages — pattern lets us spot ordering bugs.
+        pages = [bytes([0xa0 + i] * 0x1000) for i in range(4)]
+        m = MemoryMap()
+        for i, p in enumerate(pages):
+            m.append(i * 0x1000, p)
+        await loadable.write(m, do_erase=False, assume_clean=True)
+
+        # Four write stubs, one per page, in order.
+        write_calls = [c for c in puppet.stub_calls
+                       if c[0] == "nvmc_write"]
+        assert len(write_calls) == 4
+        assert [c[1][0] for c in write_calls] == [0, 0x1000, 0x2000, 0x3000]
+        # The pipelined writer allocates two RAM buffers and rotates;
+        # the src_buf address on consecutive calls must alternate.
+        bufs = [c[1][1] for c in write_calls]
+        assert bufs[0] != bufs[1]
+        assert bufs[0] == bufs[2]
+        assert bufs[1] == bufs[3]
+        # All bytes landed.
+        for i, p in enumerate(pages):
+            assert bytes(ap.flash[i * 0x1000:(i + 1) * 0x1000]) == p
+
     @pytest.mark.asyncio
     async def test_loadable_write_through_to_flash(self):
         """Loadable.write → plan_update → NvmcFlash.erase + .write.

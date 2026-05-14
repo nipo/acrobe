@@ -18,7 +18,9 @@ from .region import Region, Ram, Flash, Eeprom, NotUpdatable
 from .debuggable import (
     Debuggable, Core, Register, RegisterType, CoreState, HaltCause,
 )
-from .puppet import Puppet, ArmMPuppet, PuppetStub, Zone
+from .puppet import (
+    Puppet, ArmMPuppet, PuppetStub, PagedPuppetWriter, Zone,
+)
 from .debug_auth import DebugAuth
 
 from . import fpga  # noqa: F401,E402  — triggers @Target.register
@@ -35,6 +37,6 @@ __all__ = [
     "Region", "Ram", "Flash", "Eeprom", "NotUpdatable",
     "Debuggable", "Core", "Register", "RegisterType",
     "CoreState", "HaltCause",
-    "Puppet", "ArmMPuppet", "PuppetStub", "Zone",
+    "Puppet", "ArmMPuppet", "PuppetStub", "PagedPuppetWriter", "Zone",
     "DebugAuth",
 ]

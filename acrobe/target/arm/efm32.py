@@ -37,7 +37,7 @@ from ...db import NoMatch
 from ..debuggable import Debuggable
 from ..loadable import Loadable
 from ..memory import Memory
-from ..puppet import ArmMPuppet
+from ..puppet import ArmMPuppet, PagedPuppetWriter
 from ..region import Flash, Ram
 from ..target import Target
 from .cortex_m import CortexMDebuggable, CortexMTarget
@@ -135,7 +135,12 @@ class EfmFlash(Flash):
                          erase_page_sizes=[page_size])
         self.mem_ap = mem_ap
         self.puppet = puppet
-        self.write_buffer = None
+        # Pipelined writer is set up by `plan_update` for the duration
+        # of one region update; per-page `write()` calls thread their
+        # chunks into it so the host's upload of page N+1 overlaps
+        # with the target's flash burn of page N. None means standalone
+        # write — `write()` builds a one-shot writer on demand.
+        self.__writer: PagedPuppetWriter | None = None
 
     async def read(self, offset, size):
         out = bytearray()
@@ -167,24 +172,49 @@ class EfmFlash(Flash):
         if full_region:
             self.is_blank = True
 
+    async def plan_update(self, region_map):
+        """Same chunk schedule as `Flash.plan_update`, but with a
+        long-lived `PagedPuppetWriter` set up around the yield loop
+        so per-page `write()` calls pipeline across iterations."""
+        if not self.is_blank:
+            await self._Flash__erase_for(region_map)
+        paged = region_map.paged(self.write_page_size,
+                                 fill=bytes([self.erased_value]))
+        page = self.write_page_size
+        stub = self.puppet.stub(self.STUBS["flash_write"], name="efm_write")
+        try:
+            async with PagedPuppetWriter(
+                    stub, page,
+                    timeout=self.STUB_WRITE_TIMEOUT) as writer:
+                self.__writer = writer
+                try:
+                    for addr, data in paged:
+                        offset = addr - self.address
+                        for o in range(0, len(data), page):
+                            yield offset + o, data[o:o + page]
+                finally:
+                    self.__writer = None
+        finally:
+            stub.cleanup()
+
     async def write(self, offset, data):
         if offset % 4 or len(data) % 4:
             raise ValueError("EfmFlash write must be word-aligned")
+        if self.__writer is not None:
+            await self.__writer.write(self.address + offset, data)
+            return
+        # Standalone call (not driven by `plan_update`) — set up a
+        # one-shot writer for just this call.
         stub = self.puppet.stub(self.STUBS["flash_write"], name="efm_write")
-        self.write_buffer = self.puppet.allocate(self.write_page_size,
-                                                 align=4)
         try:
             page = self.write_page_size
-            for chunk_off in range(0, len(data), page):
-                chunk = data[chunk_off:chunk_off + page]
-                await self.write_buffer.write(chunk)
-                await stub.call(self.address + offset + chunk_off,
-                                self.write_buffer.address,
-                                len(chunk),
-                                timeout=self.STUB_WRITE_TIMEOUT)
+            async with PagedPuppetWriter(
+                    stub, page,
+                    timeout=self.STUB_WRITE_TIMEOUT) as w:
+                for chunk_off in range(0, len(data), page):
+                    chunk = data[chunk_off:chunk_off + page]
+                    await w.write(self.address + offset + chunk_off, chunk)
         finally:
-            self.puppet.unallocate(self.write_buffer)
-            self.write_buffer = None
             stub.cleanup()
 
     async def mass_erase(self):

@@ -125,6 +125,98 @@ class PuppetStub:
         self.installed = False
 
 
+class PagedPuppetWriter:
+    """Two-buffer pipelined driver for stubs of shape
+    ``(dst, src_buf, byte_count)``.
+
+    Allocates two RAM buffers (one if the puppet's allocator can't
+    fit a second) and overlaps the host-to-target upload of page N+1
+    with the on-target flash burn of page N. The pipeline relies on
+    the implicit parallelism between the host's SWD wire (busy
+    uploading the next page) and the target's flash controller
+    (busy burning the previous page) — no concurrent SWD polling, so
+    the bit-bang adapter never sees a mixed read/write stream.
+
+    On chips too tight for two buffers (`Allocator.allocate` raises
+    `ValueError` on the second `puppet.allocate`), falls back to the
+    synchronous one-buffer pattern — same correctness, no speedup.
+    """
+
+    def __init__(self, stub: "PuppetStub", page_size: int, *,
+                 timeout: float = 1.0):
+        self.stub = stub
+        self.puppet = stub.puppet
+        self.page_size = page_size
+        self.timeout = timeout
+        # `free_buf` is the buffer the host writes into next; once a
+        # stub starts on it, it becomes `busy_buf` and the previous
+        # busy buffer becomes free.
+        self.free_buf: Zone | None = None
+        self.busy_buf: Zone | None = None
+        # True between a successful `stub.run()` and the matching
+        # `stub.wait()`. Lets us defer the wait until the start of
+        # the next `write()` so the upload runs *before* the wait,
+        # giving the target time to burn during the upload.
+        self.has_pending = False
+
+    async def __aenter__(self):
+        self.free_buf = self.puppet.allocate(self.page_size, align=4)
+        try:
+            self.busy_buf = self.puppet.allocate(self.page_size, align=4)
+        except ValueError:
+            self.busy_buf = None
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            if self.has_pending:
+                if exc_type is None:
+                    await self.stub.wait(timeout=self.timeout)
+                self.has_pending = False
+        finally:
+            if self.free_buf is not None:
+                self.puppet.unallocate(self.free_buf)
+                self.free_buf = None
+            if self.busy_buf is not None:
+                self.puppet.unallocate(self.busy_buf)
+                self.busy_buf = None
+
+    async def write(self, dst: int, data: bytes):
+        """Pipeline one chunk to ``dst``. Returns once the chunk's
+        stub is started on the target; the wait happens at the top
+        of the next ``write()`` (after that call's upload, so the
+        burn and upload truly overlap on the wire) or in
+        ``__aexit__``."""
+        if self.busy_buf is None:
+            # Single-buffer fallback — no pipelining possible.
+            await self.free_buf.write(data)
+            await self.stub.call(dst, self.free_buf.address, len(data),
+                                 timeout=self.timeout)
+            return
+
+        # Upload first: SWD is busy with this transfer (~50 ms for a
+        # 2 KiB page at 1 MHz), and during that window the target
+        # CPU is finishing the previous page's flash burn. No SWD
+        # polling races the upload because we save the wait for
+        # afterwards.
+        await self.free_buf.write(data)
+
+        # Drain the previous stub. By now the burn is almost
+        # certainly complete (upload was longer than the burn for
+        # every chip we've shipped); this is a quick S_HALT check.
+        if self.has_pending:
+            await self.stub.wait(timeout=self.timeout)
+            self.has_pending = False
+
+        # Launch the next stub on the just-uploaded buffer, then
+        # swap so the now-idle buffer is what the next call uploads
+        # into.
+        await self.stub.prepare(dst, self.free_buf.address, len(data))
+        await self.stub.run()
+        self.has_pending = True
+        self.free_buf, self.busy_buf = self.busy_buf, self.free_buf
+
+
 class Puppet(Node):
     """Remote-code-exec capability bound to one Core and one Ram.
 
