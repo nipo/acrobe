@@ -62,11 +62,12 @@ from __future__ import annotations
 
 import asyncio
 import struct
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from ...target.puppet import PuppetBase
 
 
+@runtime_checkable
 class PicobootTransport(Protocol):
     """USB-level surface a `PicobootPuppet` consumes.
 
