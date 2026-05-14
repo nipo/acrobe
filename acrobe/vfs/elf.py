@@ -171,8 +171,23 @@ class ElfSegment(Node, Readable, Addressable):
         }
 
 
-class ElfSection(Node, Readable, Addressable):
-    """An ELF section."""
+class ElfSection(Node, Readable):
+    """An ELF section.
+
+    Readable but not `Addressable`. Section headers only carry the
+    runtime address (VMA) in `sh_addr` — there is no LMA field on a
+    section header, so a section's load address can only be derived
+    by finding which PT_LOAD segment contains it. To avoid wrong-
+    LMA chunks polluting `MemoryMap.from_node` (e.g. `.contextdata`
+    advertises `sh_addr=0` while its loaded copy lives in a PT_LOAD
+    segment at flash 0x1d228), sections never claim to be loadable.
+
+    Loading uses program segments (`ElfSegment`) exclusively, which
+    do carry both VMA and LMA. `addresses` / `metadata` on sections
+    still expose `sh_addr` under `vma` / `lma` for inspection
+    (`acrobe loadable info`); those are descriptive fields, not load
+    claims.
+    """
 
     def __init__(self, name, source, file_offset, size, vaddr,
                  lma, flags, sh_type):
@@ -201,10 +216,6 @@ class ElfSection(Node, Readable, Addressable):
         if self._sh_type == SHT_NOBITS:
             return b"\x00" * n
         return await self._source.read(self._file_offset + offset, n)
-
-    @property
-    def load_address(self) -> int:
-        return self._lma
 
     @property
     def addresses(self) -> dict:
