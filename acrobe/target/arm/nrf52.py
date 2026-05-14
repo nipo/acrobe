@@ -1,17 +1,20 @@
 """Nordic Semiconductor nRF52 family target.
 
-nRF52 flash programming uses the on-chip NVMC peripheral, accessed
-directly through the Mem-AP — no on-target stub code required.
-This keeps the V1 implementation Puppet-free.
+nRF52 flash programming runs on-target through the NVMC stubs from
+crobe's `firmware/flash/stubs/arm/nrf51.c` — the NVMC peripheral
+layout is identical between nRF51 and nRF52, and Cortex-M0 Thumb
+code runs on the M4 unchanged. Each stub takes
+`(addr, size_or_src, page_or_bytes)` in r0..r2 and loops on-target,
+keeping per-word NVMC pokes off the SWD bus.
+
+Mass-erase via CTRL-AP stays on its dedicated AP path (one-shot,
+faster + works through APPROTECT). UICR erase keeps the direct
+NVMC.ERASEUICR write (also one-shot).
 
 Detection runs against the AHB-AP under each DP: read
 FICR.INFO.PART (0x10000100) and match against the known
 part-number table. Unknown parts decline so the generic
 Cortex-M target picks them up.
-
-CTRL-AP ERASEALL (the path that works through APPROTECT lock) is
-out of S2b scope — for now, ERASEALL falls back to per-page
-erases through NVMC, which requires debug access.
 """
 
 from __future__ import annotations
@@ -28,9 +31,21 @@ from ...db import NoMatch
 from ..debuggable import Debuggable
 from ..loadable import Loadable
 from ..memory import Memory
+from ..puppet import ArmMPuppet
 from ..region import Flash, Ram
 from ..target import Target
 from .cortex_m import CortexMDebuggable, CortexMTarget
+
+
+# Stub blobs from crobe firmware/flash/stubs/arm/nrf51.c. Calling
+# convention (AAPCS, r0..r2 = args):
+#   void flash_erase(uintptr_t addr, size_t size, size_t page_size);
+#   void flash_write(uintptr_t dst, const void *src, size_t bytes);
+# Drives NVMC at 0x4001E000 — identical on nRF51 and nRF52.
+NRF_STUBS = {
+    "flash_erase": b'\xf7\xb5\x02%S\x1eA\x18\x0fL\x18@\x0fK\x80&\xe5P\xa1%\xed\x00\x01\'\xacF\x01\x93\xf6\x00\x80%\xed\x00\x88B\x07\xd2\xa5Y=B\xfc\xd0cF\x06M\xe8P\x80\x18\xf3\xe7\x01"aY\x11B\xfc\xd0\x00!\x01J\x01\x9b\xd1P\xf7\xbd\x00\xe0\x01@\x04\x05\x00\x00',
+    "flash_write": b'\xf0\xb5\x01%\x80\'\rK\rL\x92\x08\x92\x00\x1dQ\x12\x18\xff\x00\t\x1a\x80&\xf6\x00\x90B\x05\xd0\xdeY.B\xfc\xd0\x0eX@\xc0\xf5\xe7\x01"\x99Y\x11B\xfc\xd0\x00"\x01K\x1aQ\xf0\xbd\xc0F\x00\xe0\x01@\x04\x05\x00\x00',
+}
 
 
 # NVMC controller registers.
@@ -77,74 +92,94 @@ NRF52_PARTS = {
 
 
 class NvmcFlash(Flash):
-    """nRF52 flash region driven by the NVMC peripheral.
+    """nRF52 flash region driven by on-target stub code (Puppet).
 
     Reads pass through Mem-AP `mem_read` (flash is memory-mapped at
-    the region's base). Erase and write toggle NVMC.CONFIG and poll
-    NVMC.READY between transactions. CONFIG is restored to REN on
-    every exit path so a failed erase doesn't leave the device in
-    write/erase mode."""
+    the region's base). Erase and write call into the `flash_erase`
+    / `flash_write` stubs running on the target Cortex-M; the host
+    only pushes input bytes into RAM and waits for the stub to
+    return. The stub manages NVMC.CONFIG / NVMC.READY entirely
+    target-side, keeping per-word pokes off the SWD bus."""
 
     POLL_PERIOD = 0.001
 
-    def __init__(self, name, address, size, mem_ap, *,
+    # Per-call timeout caps. Stubs that lock up don't get unbounded
+    # time — `Puppet.wait` will force-halt the core and raise.
+    STUB_ERASE_TIMEOUT = 30.0
+    STUB_WRITE_TIMEOUT = 5.0
+
+    # Cap each Mem-AP `mem_read` issued during readback / verify so
+    # the J-Link OB doesn't latch a sticky error after ~80 KiB of
+    # continuous AP reads in one batch. Real J-Link firmware
+    # doesn't need this but it costs nothing to keep on either.
+    READ_CHUNK = 32 * 1024
+
+    def __init__(self, name, address, size, mem_ap, puppet, *,
                  page_size: int):
         super().__init__(name, address, size,
                          write_page_size=page_size,
                          erase_page_sizes=[page_size])
         self.mem_ap = mem_ap
+        self.puppet = puppet
+        self.write_buffer = None
 
     async def read(self, offset, size):
-        return await self.mem_ap.mem_read(self.address + offset, size)
+        out = bytearray()
+        base = self.address + offset
+        for chunk_off in range(0, size, self.READ_CHUNK):
+            n = min(self.READ_CHUNK, size - chunk_off)
+            out += await self.mem_ap.mem_read(base + chunk_off, n)
+        return bytes(out)
 
     async def erase(self, offset, size):
         if offset % self.write_page_size or size % self.write_page_size:
             raise ValueError(
                 f"NvmcFlash erase must be page-aligned "
                 f"(page={self.write_page_size:#x})")
-        n_pages = size // self.write_page_size
-        await self.set_config(NVMC_CONFIG_EEN)
+        stub = self.puppet.stub(NRF_STUBS["flash_erase"], name="nvmc_erase")
         try:
+            n_pages = size // self.write_page_size
             # Single-page erases come from Loadable.write → plan_update
             # and run inside the per-region "program" bar; no point
             # opening a 1/1 bar of our own. Multi-page erases come
-            # from Loadable.erase_all (~22s for 1 MiB) — show a bar
-            # so the operator knows we're alive.
-            if n_pages > 1:
-                with self.progress("erase", n_pages, "pages") as bar:
-                    await self.__erase_pages(offset, n_pages, bar)
-            else:
-                await self.__erase_pages(offset, n_pages, None)
+            # from Loadable.erase_all — show a bar so the operator
+            # knows we're alive.
+            with self.progress("erase", n_pages, "pages") as bar:
+                await stub.call(self.address + offset, size,
+                                self.write_page_size,
+                                timeout=self.STUB_ERASE_TIMEOUT)
+                bar.advance(n_pages)
         finally:
-            await self.set_config(NVMC_CONFIG_REN)
+            stub.cleanup()
         if offset == 0 and size == self.size:
             self.is_blank = True
-
-    async def __erase_pages(self, offset, n_pages, bar):
-        addr = self.address + offset
-        for _ in range(n_pages):
-            await self.mem_ap.write32(NVMC_ERASEPAGE, addr)
-            await self.wait_ready()
-            addr += self.write_page_size
-            if bar is not None:
-                bar.advance(1)
 
     async def write(self, offset, data):
         if offset % 4 or len(data) % 4:
             raise ValueError("NvmcFlash write must be word-aligned")
-        await self.set_config(NVMC_CONFIG_WEN)
+        stub = self.puppet.stub(NRF_STUBS["flash_write"], name="nvmc_write")
+        self.write_buffer = self.puppet.allocate(self.write_page_size,
+                                                 align=4)
         try:
-            await self.mem_ap.mem_write(self.address + offset, data)
-            await self.wait_ready()
+            page = self.write_page_size
+            for chunk_off in range(0, len(data), page):
+                chunk = data[chunk_off:chunk_off + page]
+                await self.write_buffer.write(chunk)
+                await stub.call(self.address + offset + chunk_off,
+                                self.write_buffer.address,
+                                len(chunk),
+                                timeout=self.STUB_WRITE_TIMEOUT)
         finally:
-            await self.set_config(NVMC_CONFIG_REN)
+            self.puppet.unallocate(self.write_buffer)
+            self.write_buffer = None
+            stub.cleanup()
 
     async def set_config(self, value: int):
         """Write NVMC.CONFIG and wait for the controller to settle.
 
-        Public so subclasses (`UicrFlash`) and Loadables that batch
-        operations can manage CONFIG state at a higher level than
-        a single erase/write call."""
+        Kept for callers (UicrFlash, future provisioning flows) that
+        manage NVMC state at a higher level than the per-call stubs.
+        """
         await self.mem_ap.write32(NVMC_CONFIG, value)
         await self.wait_ready()
 
@@ -165,9 +200,10 @@ class NvmcFlash(Flash):
 class UicrFlash(NvmcFlash):
     """UICR (User Information Configuration Registers) region.
 
-    Same NVMC for writes; erase is all-or-nothing via NVMC.ERASEUICR
-    rather than per-page ERASEPAGE. Partial erase is unsupported —
-    any erase call must cover the whole region."""
+    Writes go through the same flash_write stub as main flash. Erase
+    is all-or-nothing via NVMC.ERASEUICR — kept on the MMIO path
+    because it's a single one-shot register poke (stub overhead
+    would dwarf it). Partial erase is unsupported."""
 
     async def erase(self, offset, size):
         if offset != 0 or size != self.size:
@@ -368,19 +404,25 @@ async def _build_nrf52_target(dp, ap, part, ctrl_ap):
     # Memory view — same ranges, but as functional BusRam children
     # backed by the AHB-AP. Anchor for memory-aware clients (RTT
     # under sram, future peripheral drivers under apb / ahb).
+    sram = BusRam("sram", 0x20000000, ram_kb * 1024, ap)
     memory = Memory(ap)
     memory.child_add(BusRam("flash", 0x00000000, flash_size, ap))
     memory.child_add(BusRam("ficr",  0x10000000, 0x1000, ap))
-    memory.child_add(BusRam("sram",  0x20000000, ram_kb * 1024, ap))
+    memory.child_add(sram)
     memory.child_add(BusRam("apb",   0x40000000, 0x80000, ap))
     memory.child_add(BusRam("ahb",   0x50000000, 0x80000, ap))
     memory.child_add(BusRam("ppb",   0xE0000000, 0x100000, ap))
     target.child_add(memory)
 
+    puppet = ArmMPuppet("puppet", debug.cores[0], sram, ap)
+    target.child_add(puppet)
+
     loadable = Nrf52Loadable("main", ctrl_ap=ctrl_ap)
     loadable.child_add(
-        NvmcFlash("code", 0x00000000, flash_size, ap, page_size=page_size))
+        NvmcFlash("code", 0x00000000, flash_size, ap, puppet,
+                  page_size=page_size))
     loadable.child_add(
-        UicrFlash("uicr", UICR_BASE, page_size, ap, page_size=page_size))
+        UicrFlash("uicr", UICR_BASE, page_size, ap, puppet,
+                  page_size=page_size))
     target.child_add(loadable)
     return target

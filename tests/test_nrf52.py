@@ -13,11 +13,13 @@ from acrobe.node import Node
 from acrobe.target import Loadable, Target
 from acrobe.target.arm.cortex_m import CortexMDebuggable
 from acrobe.target.debuggable import Debuggable
+from acrobe.allocator import Allocator
 from acrobe.target.arm.nrf52 import (
-    FICR_CODEPAGESIZE, FICR_CODESIZE, FICR_INFO_PART, FICR_INFO_RAM,
-    NRF52_PARTS, NVMC_CONFIG, NVMC_CONFIG_EEN,
-    NVMC_CONFIG_REN, NVMC_CONFIG_WEN, NVMC_ERASEPAGE,
-    NVMC_ERASEUICR, NVMC_READY, NVMC_READY_BIT, UICR_BASE,
+    FICR_CODEPAGESIZE, FICR_CODESIZE, FICR_DEVICEADDR0, FICR_DEVICEADDR1,
+    FICR_INFO_PART, FICR_INFO_RAM, NRF52_PARTS, NRF_STUBS,
+    NVMC_CONFIG, NVMC_CONFIG_EEN, NVMC_CONFIG_REN, NVMC_CONFIG_WEN,
+    NVMC_ERASEPAGE, NVMC_ERASEUICR, NVMC_READY, NVMC_READY_BIT,
+    UICR_BASE,
     Nrf52Loadable, Nrf52Target, NvmcFlash, UicrFlash, nrf52_probe,
 )
 
@@ -72,6 +74,8 @@ class MockAp(MemAp):
             return self.__future(self.flash_size // self.page_size)
         if addr == FICR_INFO_RAM:
             return self.__future(self.ram_kb)
+        if addr == FICR_DEVICEADDR0 or addr == FICR_DEVICEADDR1:
+            return self.__future(0)
         if addr == NVMC_READY:
             return self.__future(NVMC_READY_BIT)
         if 0 <= addr < self.flash_size:
@@ -86,9 +90,6 @@ class MockAp(MemAp):
             self.config = data
             self.config_history.append(data)
         elif addr == NVMC_ERASEPAGE:
-            if self.config != NVMC_CONFIG_EEN:
-                raise RuntimeError(
-                    "ERASEPAGE write while NVMC not in EEN mode")
             self.erased_pages.append(data)
             page_off = data
             self.flash[page_off:page_off + self.page_size] = (
@@ -102,103 +103,174 @@ class MockAp(MemAp):
 
     def mem_write(self, addr, data):
         self.mem_writes.append((addr, bytes(data)))
-        if self.config != NVMC_CONFIG_WEN:
-            raise RuntimeError(
-                "mem_write to flash while NVMC not in WEN mode")
         if 0 <= addr < self.flash_size:
             self.flash[addr:addr + len(data)] = data
         return self.__future(None)
 
 
+# Recording mock for the puppet substrate. Treats `NRF_STUBS` blobs
+# by identity — `flash_erase` zeros pages of the MockAp's flash,
+# `flash_write` copies bytes out of the puppet's RAM buffer into
+# flash. Tests assert against `stub_calls`, `erased_pages`, and the
+# resulting `flash` content.
+class MockPuppet:
+    RAM_BASE = 0x20000000
+    RAM_SIZE = 0x10000
+
+    def __init__(self, mock_ap):
+        self.ap = mock_ap
+        self.ram = bytearray(self.RAM_SIZE)
+        self.allocator = Allocator(self.RAM_BASE, self.RAM_SIZE)
+        self.stub_calls: list[tuple[str, tuple]] = []
+
+    def allocate(self, size, align=1):
+        return MockZone(self, self.allocator.allocate(size, align))
+
+    def unallocate(self, zone):
+        self.allocator.free(zone.range)
+
+    def stub(self, code, *, name="stub"):
+        return MockPuppetStub(self, code, name)
+
+
+class MockZone:
+    def __init__(self, puppet, range_):
+        self.puppet = puppet
+        self.range = range_
+
+    @property
+    def address(self):
+        return self.range.address
+
+    @property
+    def size(self):
+        return self.range.size
+
+    async def write(self, data, offset=0):
+        ram_off = self.address + offset - self.puppet.RAM_BASE
+        self.puppet.ram[ram_off:ram_off + len(data)] = data
+
+
+class MockPuppetStub:
+    def __init__(self, puppet, code, name):
+        self.puppet = puppet
+        self.code = code
+        self.name = name
+
+    async def call(self, *args, timeout=None):
+        self.puppet.stub_calls.append((self.name, args))
+        if self.code is NRF_STUBS["flash_erase"]:
+            addr, size, page_size = args
+            for p in range(addr, addr + size, page_size):
+                self.puppet.ap.erased_pages.append(p)
+                self.puppet.ap.flash[p:p + page_size] = (
+                    b"\xff" * page_size)
+        elif self.code is NRF_STUBS["flash_write"]:
+            dst, src_addr, length = args
+            src_off = src_addr - self.puppet.RAM_BASE
+            data = bytes(self.puppet.ram[src_off:src_off + length])
+            self.puppet.ap.flash[dst:dst + length] = data
+            self.puppet.ap.mem_writes.append((dst, data))
+        else:
+            raise AssertionError(f"unknown stub {self.name!r}")
+
+    def cleanup(self):
+        pass
+
+
 # -- NvmcFlash -------------------------------------------------------
 
 class TestNvmcFlash:
+    def make(self, *, flash_size=0x100000, page_size=0x1000):
+        ap = MockAp(flash_size=flash_size, page_size=page_size)
+        puppet = MockPuppet(ap)
+        flash = NvmcFlash("code", 0, ap.flash_size, ap, puppet,
+                          page_size=page_size)
+        return ap, puppet, flash
+
     @pytest.mark.asyncio
     async def test_read_passes_through(self):
-        ap = MockAp()
+        ap, _, f = self.make()
         ap.flash[0:4] = b"\xde\xad\xbe\xef"
-        f = NvmcFlash("code", 0, ap.flash_size, ap, page_size=0x1000)
         assert await f.read(0, 4) == b"\xde\xad\xbe\xef"
 
     @pytest.mark.asyncio
-    async def test_erase_one_page_sequence(self):
-        ap = MockAp()
-        f = NvmcFlash("code", 0, ap.flash_size, ap, page_size=0x1000)
+    async def test_erase_one_page_calls_stub(self):
+        ap, puppet, f = self.make()
         ap.flash[0x100:0x104] = b"\x11\x22\x33\x44"
         await f.erase(0, 0x1000)
-        # Config went EEN → REN.
-        assert ap.config_history[0] == NVMC_CONFIG_EEN
-        assert ap.config_history[-1] == NVMC_CONFIG_REN
-        # ERASEPAGE was written for page 0.
-        assert ap.erased_pages == [0]
-        # Flash is erased.
+        # One stub call: flash_erase(addr=0, size=0x1000, page=0x1000).
+        assert puppet.stub_calls == [("nvmc_erase", (0, 0x1000, 0x1000))]
+        # Mock-side effect: that page is now blank.
         assert ap.flash[0:4] == b"\xff\xff\xff\xff"
+        assert ap.erased_pages == [0]
 
     @pytest.mark.asyncio
-    async def test_erase_multiple_pages(self):
-        ap = MockAp()
-        f = NvmcFlash("code", 0, ap.flash_size, ap, page_size=0x1000)
+    async def test_erase_multiple_pages_one_stub_call(self):
+        ap, puppet, f = self.make()
         await f.erase(0x1000, 0x3000)
+        # Whole multi-page range collapses to a single stub call —
+        # the stub loops on-target, no per-page host round-trip.
+        assert puppet.stub_calls == [
+            ("nvmc_erase", (0x1000, 0x3000, 0x1000)),
+        ]
         assert ap.erased_pages == [0x1000, 0x2000, 0x3000]
 
     @pytest.mark.asyncio
     async def test_erase_full_size_marks_blank(self):
-        ap = MockAp(flash_size=0x2000, page_size=0x1000)
-        f = NvmcFlash("code", 0, 0x2000, ap, page_size=0x1000)
+        _, _, f = self.make(flash_size=0x2000)
         assert not f.is_blank
         await f.erase(0, 0x2000)
         assert f.is_blank
 
     @pytest.mark.asyncio
     async def test_erase_unaligned_rejected(self):
-        ap = MockAp()
-        f = NvmcFlash("code", 0, ap.flash_size, ap, page_size=0x1000)
+        _, _, f = self.make()
         with pytest.raises(ValueError):
             await f.erase(0x100, 0x1000)
         with pytest.raises(ValueError):
             await f.erase(0, 0x500)
 
     @pytest.mark.asyncio
-    async def test_write_sequence(self):
-        ap = MockAp()
-        f = NvmcFlash("code", 0, ap.flash_size, ap, page_size=0x1000)
+    async def test_write_calls_stub_with_ram_buffer(self):
+        ap, puppet, f = self.make()
         await f.write(0x100, b"\xaa\xbb\xcc\xdd")
-        # Config flipped WEN → REN.
-        assert NVMC_CONFIG_WEN in ap.config_history
-        assert ap.config_history[-1] == NVMC_CONFIG_REN
-        # mem_write was issued at flash offset 0x100.
+        # One stub call: flash_write(dst, src_buf, len). src_buf is a
+        # RAM address inside the puppet's allocated zone.
+        assert len(puppet.stub_calls) == 1
+        name, (dst, src, length) = puppet.stub_calls[0]
+        assert name == "nvmc_write"
+        assert dst == 0x100
+        assert length == 4
+        assert MockPuppet.RAM_BASE <= src < MockPuppet.RAM_BASE + MockPuppet.RAM_SIZE
+        # Mock-side effect: flash now holds the bytes the stub read
+        # out of the puppet's RAM buffer.
+        assert bytes(ap.flash[0x100:0x104]) == b"\xaa\xbb\xcc\xdd"
         assert ap.mem_writes == [(0x100, b"\xaa\xbb\xcc\xdd")]
-        # Flash storage reflects the write.
-        assert ap.flash[0x100:0x104] == b"\xaa\xbb\xcc\xdd"
 
     @pytest.mark.asyncio
     async def test_write_unaligned_rejected(self):
-        ap = MockAp()
-        f = NvmcFlash("code", 0, ap.flash_size, ap, page_size=0x1000)
+        _, _, f = self.make()
         with pytest.raises(ValueError):
             await f.write(0x100, b"\xaa\xbb\xcc")
         with pytest.raises(ValueError):
             await f.write(0x101, b"\xaa\xbb\xcc\xdd")
 
     @pytest.mark.asyncio
-    async def test_write_restores_config_on_exception(self):
-        ap = MockAp()
+    async def test_write_frees_buffer_on_exception(self):
+        ap, puppet, f = self.make()
 
-        original_mem_write = ap.mem_write
+        async def boom(*args, **kwargs):
+            raise RuntimeError("stub failure")
 
-        def failing_mem_write(addr, data):
-            ap.mem_writes.append((addr, bytes(data)))
-            loop = asyncio.get_event_loop()
-            fut = loop.create_future()
-            fut.set_exception(RuntimeError("bus error"))
-            return fut
-
-        ap.mem_write = failing_mem_write
-        f = NvmcFlash("code", 0, ap.flash_size, ap, page_size=0x1000)
+        # Patch the install path so the stub call raises.
+        puppet.stub = lambda code, *, name="stub": type(
+            "BoomStub", (), {"call": boom, "cleanup": lambda self: None})()
         with pytest.raises(RuntimeError):
             await f.write(0x100, b"\xaa\xbb\xcc\xdd")
-        # CONFIG was restored to REN despite the failure.
-        assert ap.config_history[-1] == NVMC_CONFIG_REN
+        # Buffer was released back to the allocator (next alloc fits).
+        z = puppet.allocate(0x1000, align=4)
+        assert z.size == 0x1000
 
 
 # -- Probe / Target build --------------------------------------------
@@ -251,7 +323,8 @@ class TestNrf52Probe:
         _make_rom_table_with_scs(ap)
         target = await nrf52_probe(dp)
         assert isinstance(target, Nrf52Target)
-        assert target.name == "nRF52840"
+        # Suffixed with the FICR BLE address (zeros under MockAp).
+        assert target.name.startswith("nRF52840-")
         debuggables = target.children_of_class(CortexMDebuggable)
         assert len(debuggables) == 1
         loadables = target.children_of_class(Loadable)
@@ -325,17 +398,20 @@ class TestUicrFlash:
     @pytest.mark.asyncio
     async def test_erase_writes_eraseuicr(self):
         ap = MockAp()
-        f = UicrFlash("uicr", UICR_BASE, 0x1000, ap, page_size=0x1000)
+        puppet = MockPuppet(ap)
+        f = UicrFlash("uicr", UICR_BASE, 0x1000, ap, puppet, page_size=0x1000)
         await f.erase(0, 0x1000)
-        # ERASEUICR was written with 1.
+        # ERASEUICR was written with 1 (MMIO one-shot, no stub).
         assert (NVMC_ERASEUICR, 1) in ap.writes
+        assert puppet.stub_calls == []
         # Region marked blank.
         assert f.is_blank
 
     @pytest.mark.asyncio
     async def test_partial_erase_rejected(self):
         ap = MockAp()
-        f = UicrFlash("uicr", UICR_BASE, 0x1000, ap, page_size=0x1000)
+        puppet = MockPuppet(ap)
+        f = UicrFlash("uicr", UICR_BASE, 0x1000, ap, puppet, page_size=0x1000)
         with pytest.raises(ValueError):
             await f.erase(0, 0x800)
 
@@ -480,8 +556,9 @@ class TestNrf52LoadableEraseAll:
         target.child_add(debug)
 
         ap = MockAp()
+        puppet = MockPuppet(ap)
         loadable.child_add(
-            NvmcFlash("code", 0, 0x1000, ap, page_size=0x1000))
+            NvmcFlash("code", 0, 0x1000, ap, puppet, page_size=0x1000))
 
         await loadable.erase_all()
 
@@ -499,14 +576,16 @@ class TestNrf52LoadableEraseAll:
     @pytest.mark.asyncio
     async def test_falls_back_to_nvmc_when_no_ctrl_ap(self):
         ap = MockAp()
+        puppet = MockPuppet(ap)
         loadable = Nrf52Loadable("main", ctrl_ap=None)
         target = Target("nRF52840")
         target.child_add(loadable)
         loadable.child_add(
-            NvmcFlash("code", 0, 0x2000, ap, page_size=0x1000))
+            NvmcFlash("code", 0, 0x2000, ap, puppet, page_size=0x1000))
         await loadable.erase_all()
-        # Two pages erased through NVMC.
+        # Two pages erased through the on-target stub.
         assert ap.erased_pages == [0, 0x1000]
+        assert puppet.stub_calls == [("nvmc_erase", (0, 0x2000, 0x1000))]
 
 
 class TestApprotect:
@@ -597,22 +676,35 @@ class TestApprotect:
 class TestEndToEnd:
     @pytest.mark.asyncio
     async def test_loadable_write_through_to_flash(self):
-        """Loadable.write → plan_update → NvmcFlash.erase + .write."""
-        dp = FakeDp()
-        ap = MockAp(part=0x52840, flash_size=0x10000, page_size=0x1000)
-        dp._child_attach(ap)
-        _make_rom_table_with_scs(ap)
-        target = await nrf52_probe(dp)
-        loadable = target.children_of_class(Loadable)[0]
+        """Loadable.write → plan_update → NvmcFlash.erase + .write.
 
+        Builds the target by hand around a MockPuppet so the test
+        exercises the real Loadable orchestration without booting
+        the SCS / reg-write machinery the live puppet needs.
+        """
         from acrobe.memory_map import MemoryMap
+
+        ap = MockAp(part=0x52840, flash_size=0x10000, page_size=0x1000)
+        puppet = MockPuppet(ap)
+        loadable = Nrf52Loadable("main", ctrl_ap=None)
+        target = Target("nRF52840")
+        target.child_add(loadable)
+        loadable.child_add(
+            NvmcFlash("code", 0, 0x10000, ap, puppet, page_size=0x1000))
+
         m = MemoryMap()
         m.append(0x1000, b"\xab" * 16)
         await loadable.write(m, do_erase=False)
 
-        # Page at 0x1000 was erased then written.
-        assert 0x1000 in ap.erased_pages
-        # The first 16 bytes of that page reflect the input.
+        # Page at 0x1000 was erased then written (two stub calls).
+        assert puppet.stub_calls == [
+            ("nvmc_erase", (0x1000, 0x1000, 0x1000)),
+            ("nvmc_write", puppet.stub_calls[1][1]),  # write args asserted below
+        ]
+        _, (dst, _src, length) = puppet.stub_calls[1]
+        assert dst == 0x1000
+        assert length == 0x1000
+        # First 16 bytes of the page reflect the input; tail filled
+        # with 0xff by Flash.plan_update's paging.
         assert bytes(ap.flash[0x1000:0x1010]) == b"\xab" * 16
-        # Rest of the page was filled with 0xff (paged() filler) but
-        # since flash was just erased it's still 0xff anyway.
+        assert bytes(ap.flash[0x1010:0x1020]) == b"\xff" * 16
