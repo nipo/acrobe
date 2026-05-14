@@ -1,4 +1,4 @@
-from acrobe.endian import bitswap8, swib_u16, swib_u32, _BITSWAP8_LUT
+from acrobe.util.endian import bitswap8, swib_u16, swib_u32, bitswap8_lut
 
 
 class TestBitswap8:
@@ -28,7 +28,7 @@ class TestBitswap8:
     def test_lut_self_consistent(self):
         for i in range(256):
             rev = int(f'{i:08b}'[::-1], 2)
-            assert _BITSWAP8_LUT[i] == rev
+            assert bitswap8_lut[i] == rev
 
 
 class TestSwibU16:

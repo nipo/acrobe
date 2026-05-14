@@ -3,7 +3,7 @@ import asyncio
 from ...protocol.jtag import Tap, Dr, Instruction
 from ...part_id import PartId
 from ..fpga import JtagSramFpga
-from ...endian import bitswap8
+from ...util.endian import bitswap8
 from ...bitfield import Bitfield, BooleanField
 
 parts = {

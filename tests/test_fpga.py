@@ -19,7 +19,7 @@ from acrobe.protocol.jtag import (
 )
 from acrobe.bitstring import BitString
 from acrobe.node import Node, Readable
-from acrobe.endian import swib_u16, swib_u32
+from acrobe.util.endian import swib_u16, swib_u32
 
 
 class _Bitstream(Node, Readable):

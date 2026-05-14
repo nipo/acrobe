@@ -2,7 +2,7 @@ import struct
 
 from ...protocol.jtag import Tap, Dr, Instruction
 from ..fpga import JtagSramFpga
-from ...endian import swib_u16
+from ...util.endian import swib_u16
 from .config_access_port import ConfigAccessPort
 
 
