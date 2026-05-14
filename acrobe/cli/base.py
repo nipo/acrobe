@@ -87,6 +87,25 @@ async def cli(ctx, verbose, quiet, timestamp, no_color,
     if ctx.obj is None:
         ctx.obj = CliContext()
 
+    # Drain anything registered with acrobe.lifecycle after the CLI
+    # command finishes. Registered via ctx.call_on_close (not
+    # cli.result_callback) so it runs on exception paths too — without
+    # this, USB contexts leak past interpreter shutdown and ausb's
+    # daemon event thread can be torn down mid-libusb-call, triggering
+    # a pthread_mutex_destroy assertion from libusb.
+    #
+    # When chaining (`a & b ; c`), the dispatcher in :mod:`.chain`
+    # pre-injects a shared :class:`CliContext` flagged ``_chained`` and
+    # drains itself once at the end — this hook then steps aside so
+    # resources opened in segment N stay alive for segment N+1.
+    cli_ctx_obj = ctx.obj
+    async def _drain_lifecycle():
+        if getattr(cli_ctx_obj, "_chained", False):
+            return
+        from .. import lifecycle
+        await lifecycle.shutdown()
+    ctx.call_on_close(_drain_lifecycle)
+
     base_index = log.LEVELS.index(logging.ERROR)
     target = min(max(0, base_index + verbose - quiet), len(log.LEVELS) - 1)
     level = log.LEVELS[target]
@@ -106,23 +125,6 @@ async def cli(ctx, verbose, quiet, timestamp, no_color,
         only_re=only_re,
         progress=progress,
     )
-
-
-@cli.result_callback()
-@click.pass_context
-async def _drain_lifecycle(ctx, result, **kwargs):
-    """Drain anything still registered with acrobe.lifecycle after a
-    CLI command finishes. Library users call `acrobe.shutdown()`
-    themselves; for the CLI, this hook makes it automatic.
-
-    When chaining (`a & b ; c`), the dispatcher in :mod:`.chain`
-    pre-injects a shared :class:`CliContext` flagged ``_chained`` and
-    drains itself once at the end — this hook then steps aside so
-    resources opened in segment N stay alive for segment N+1."""
-    if getattr(ctx.obj, "_chained", False):
-        return
-    from .. import lifecycle
-    await lifecycle.shutdown()
 
 
 # --- Custom param types ---

@@ -584,19 +584,23 @@ class Node:
         fut = loop.create_future()
         self._summon_inflight[name] = fut
         try:
-            child = self.child_lookup(name)
-            if child is None:
-                child = await self._child_spawn_mro(name)
-                if child._parent is None:
-                    self._child_attach(child)
-            fut.set_result(child)
-            return child
-        except BaseException as exc:
-            if not fut.done():
-                fut.set_exception(exc)
-            raise
+            try:
+                child = self.child_lookup(name)
+                if child is None:
+                    child = await self._child_spawn_mro(name)
+                    if child._parent is None:
+                        self._child_attach(child)
+                fut.set_result(child)
+            except BaseException as exc:
+                if not fut.done():
+                    fut.set_exception(exc)
         finally:
             self._summon_inflight.pop(name, None)
+        # Always consume `fut` — concurrent callers `await fut` and
+        # retrieve its exception/result; this path is the producer's
+        # own retrieval, without which asyncio logs "Future exception
+        # was never retrieved" whenever no concurrent caller raced us.
+        return await fut
 
     async def _ensure_started(self):
         """Idempotent, concurrency-safe start. Multiple awaits race
