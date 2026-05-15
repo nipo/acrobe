@@ -104,6 +104,13 @@ class Picoboot(Node):
     async def exec(self, pc: int) -> None:
         await self.transport.exec(pc)
 
+    async def child_spawn(self, name):
+        if name == "spi":
+            from .spi import PicobootSpiInterface
+            return PicobootSpiInterface(self, name="spi")
+        from ...db import NoMatch
+        raise NoMatch("child", name)
+
 
 class PicobootPuppet(PuppetBase):
     """`Puppet` implementation over PICOBOOT.
