@@ -69,11 +69,9 @@ class PicobootAdapter(Adapter):
         return cls(name, info, device, transport)
 
     async def child_spawn(self, name):
-        # The target-side puppet and the RP2040 Target probe land in
-        # a follow-up; for now child resolution is the entry point
-        # that future work plugs into. Surfacing the adapter in
-        # `info adapters` is decoupled from this — it only needs the
-        # adapter_db registration.
+        if name == "picoboot":
+            from ...component.raspberry.picoboot import Picoboot
+            return Picoboot(self._transport, name="picoboot")
         raise NoMatch("interface", name)
 
     async def close(self):

@@ -64,6 +64,7 @@ import asyncio
 import struct
 from typing import Protocol, runtime_checkable
 
+from ...node import Node
 from ...target.puppet import PuppetBase
 
 
@@ -78,6 +79,30 @@ class PicobootTransport(Protocol):
     async def read(self, addr: int, size: int) -> bytes: ...
     async def write(self, addr: int, data: bytes) -> None: ...
     async def exec(self, pc: int) -> None: ...
+
+
+class Picoboot(Node):
+    """RP2040 PICOBOOT bootloader as a component Node.
+
+    Holds the USB transport and delegates the `PicobootTransport`
+    surface to it. Sits under `PicobootAdapter` in the tree;
+    discovered by the future RP2040 Target probe via
+    `children_of_class(Picoboot)` and wrapped in a
+    `PicobootPuppet`.
+    """
+
+    def __init__(self, transport: PicobootTransport, name: str = "picoboot"):
+        super().__init__(name)
+        self.transport = transport
+
+    async def read(self, addr: int, size: int) -> bytes:
+        return await self.transport.read(addr, size)
+
+    async def write(self, addr: int, data: bytes) -> None:
+        await self.transport.write(addr, data)
+
+    async def exec(self, pc: int) -> None:
+        await self.transport.exec(pc)
 
 
 class PicobootPuppet(PuppetBase):
