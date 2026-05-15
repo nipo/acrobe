@@ -29,6 +29,7 @@ from . import rtt as _rtt  # noqa: F401,E402  — triggers @Ram.db.register
 from .arm import cortex_m as _cortex_m  # noqa: F401,E402
 from .arm import nrf52 as _nrf52  # noqa: F401,E402
 from .arm import efm32 as _efm32  # noqa: F401,E402
+from .arm import rp2040 as _rp2040  # noqa: F401,E402
 
 __all__ = [
     "Target", "Explorer", "TargetDiscovery",

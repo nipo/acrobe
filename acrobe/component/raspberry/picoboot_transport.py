@@ -328,7 +328,8 @@ class PicobootUsbTransport:
             await self.reset_interface()
         except Exception:
             pass
-        raise PicobootError(status, last_cmd, str(original))
+        detail = f"{type(original).__name__}: {original}"
+        raise PicobootError(status, last_cmd, detail) from original
 
     # -- PicobootTransport surface (Protocol-conforming) --------------
 
