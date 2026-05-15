@@ -291,6 +291,20 @@ class TestErrorSurfacing:
         assert len(reset_calls) >= 1
 
 
+class TestClose:
+    @pytest.mark.asyncio
+    async def test_close_issues_reset_interface(self):
+        """Defensive cleanup: close() resets the interface so the
+        next session doesn't inherit a wedged bootrom state."""
+        t, device, _, _ = make_transport()
+        # releaseInterface call would fail on the mock device — that's
+        # expected and swallowed; we only assert the reset path ran.
+        await t.close()
+        reset_calls = [c for c in device.control_calls
+                       if c[2] == CTRL_RESET_INTERFACE]
+        assert len(reset_calls) >= 1
+
+
 class TestTokenIncrements:
     @pytest.mark.asyncio
     async def test_tokens_are_sequential(self):

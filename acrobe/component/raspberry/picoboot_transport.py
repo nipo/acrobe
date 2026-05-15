@@ -395,6 +395,15 @@ class PicobootUsbTransport:
             pass
 
     async def close(self) -> None:
+        # Defensive RESET_INTERFACE before release: if the session
+        # is being torn down with a command in flight (Ctrl-C during
+        # a long flash erase, an unhandled exception in the
+        # caller…), the bootrom may be left in a state that wedges
+        # the next session — picotool included. Reset clears that.
+        try:
+            await self.reset_interface()
+        except Exception:
+            pass
         try:
             self._device.handle.releaseInterface(self._interface)
         except Exception:
