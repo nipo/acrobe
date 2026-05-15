@@ -266,4 +266,5 @@ from . import tar  # noqa: F401, E402  registers tar parser
 from . import elf  # noqa: F401, E402  registers ELF parser
 from . import bin as _bin  # noqa: F401, E402  registers Bin parser
 from . import ihex  # noqa: F401, E402  registers Ihex parser
+from . import uf2 as _uf2  # noqa: F401, E402  registers Uf2 parser
 from . import literals  # noqa: F401, E402  registers literals
