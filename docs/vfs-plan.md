@@ -359,7 +359,7 @@ byte-identical to before.
 ### Step 13 — CLI integration
 
 **Scope.** Wire VFS path resolution into the CLI and add the new
-`acrobe resource` command group.
+`acrobe loadable` command group.
 
 **Existing commands updated.**
 - `ProgramParamType.convert` → walks via VFS, returns a Node.
@@ -369,21 +369,21 @@ byte-identical to before.
   and file paths (they share the Node tree, so today's
   hardware `child_summon` works for both).
 
-**New command group: `acrobe resource`** (`acrobe/cli/resource.py`).
+**New command group: `acrobe loadable`** (`acrobe/cli/loadable.py`).
 
-- `acrobe resource ls <path> [-r] [-l] [--depth N]` — list
+- `acrobe loadable ls <path> [-r] [-l] [--depth N]` — list
   pre-populated children. `-l` shows mixin tags (R/W/A), size,
   `load_address`. On-demand children (`as`, ELF symbols) NOT
   listed.
-- `acrobe resource info <path>` — class, mixins, size,
+- `acrobe loadable info <path>` — class, mixins, size,
   addresses, metadata dict, child count + names.
-- `acrobe resource cp <src> [<dst>] [--offset N] [--size N]`
+- `acrobe loadable cp <src> [<dst>] [--offset N] [--size N]`
   — `<dst>` defaults to `-` (stdout via Click). Errors cleanly
   if `<src>` is non-`Readable`.
-- `acrobe resource hexdump <path> [--offset N] [--size N]` —
+- `acrobe loadable hexdump <path> [--offset N] [--size N]` —
   formatted hex with addresses honouring `load_address` if
   `Addressable`.
-- `acrobe resource tree <path> [--depth N]` — recursive `ls`
+- `acrobe loadable tree <path> [--depth N]` — recursive `ls`
   with box-drawing.
 
 **Conversion commands deliberately deferred** — pinned in open
@@ -453,7 +453,7 @@ Every step ends with:
   `program a.bin b.bin`-style invocations. *Leaning Group
   Node* (uniform "subtree of addressable children" contract).
 - Step 13: shape of conversion commands.
-  - Option A: `acrobe resource cp <src> <dst> --format=ihex` —
+  - Option A: `acrobe loadable cp <src> <dst> --format=ihex` —
     extra flag on `cp`.
   - Option B: `acrobe format convert <src> <dst> --to=ihex` —
     separate command group dedicated to format conversion.

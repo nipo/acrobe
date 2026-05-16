@@ -254,7 +254,7 @@ class Node:
     @property
     def metadata(self) -> dict[str, Any]:
         """Format-specific metadata for inspection. Populated
-        during start(). Used by `acrobe resource info`.
+        during start(). Used by `acrobe loadable info`.
 
         Format subclasses additionally expose typed attributes
         (e.g. ElfSection.flags, Pof.tool, Pof.design) — those
@@ -298,7 +298,7 @@ subtree by walking its `Addressable + Readable` descendants.
 Every Node has both:
 
 - **Pre-populated children** — created during `start()`, listed
-  in `node.children`, visible to `acrobe resource ls`. These
+  in `node.children`, visible to `acrobe loadable ls`. These
   represent the format's "natural decomposition" — the children
   a user would expect to see when browsing.
 - **On-demand children** — *not* in `node.children`, *not*
@@ -467,7 +467,7 @@ indirection point at which a different parser takes over reading
 the parent's bytes.
 
 `as` is a reserved child name and is **always on-demand** —
-never pre-populated, never visible to `acrobe resource ls`.
+never pre-populated, never visible to `acrobe loadable ls`.
 Format discovery happens through documentation or
 `acrobe format list` (TBD), not by browsing.
 
@@ -616,15 +616,15 @@ indirection on every read.
 
 ## CLI commands
 
-A new top-level group, `acrobe resource`, mirrors filesystem
+A new top-level group, `acrobe loadable`, mirrors filesystem
 ergonomics over the Node tree:
 
 ```
-acrobe resource ls   <path> [-r] [-l] [--depth N]
-acrobe resource info <path>
-acrobe resource cp   <src> [<dst>] [--offset N] [--size N]
-acrobe resource hexdump <path> [--offset N] [--size N]
-acrobe resource tree <path> [--depth N]
+acrobe loadable ls   <path> [-r] [-l] [--depth N]
+acrobe loadable info <path>
+acrobe loadable cp   <src> [<dst>] [--offset N] [--size N]
+acrobe loadable hexdump <path> [--offset N] [--size N]
+acrobe loadable tree <path> [--depth N]
 ```
 
 - **`ls`** lists pre-populated children; `-r` recurses; `-l`

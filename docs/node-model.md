@@ -27,7 +27,7 @@ derived path properties:
 per-tree filtering.
 
 `node.metadata` is a free-form dict for introspection (consumed
-by `acrobe resource info`). Subclasses with typed attributes
+by `acrobe loadable info`). Subclasses with typed attributes
 usually mirror them into this dict during `start()`.
 
 ## Parenting
@@ -122,7 +122,7 @@ Every Node has both:
 
 * **Pre-populated children** — created in `start()` (or attached
   via `child_add`), live in `self._children`, visible via
-  `node.children` and listed by `acrobe resource ls`.
+  `node.children` and listed by `acrobe loadable ls`.
 * **On-demand children** — not in `_children`, not listed by
   `ls`, but reachable via `child_spawn` / `child_summon`. Used
   for namespaces that would explode if pre-enumerated (`as`,
