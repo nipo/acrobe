@@ -8,11 +8,19 @@ those commands directly for `chip program` / `chip verify` /
 `chip read`; no on-target stub is required for basic flash
 programming.
 
-The Target also hosts a `PicobootPuppet` so future code can run
-arbitrary on-target stubs through the same transport — same surface
-as `ArmMPuppet` on the SWD-driven path. Reserving puppet RAM at the
-top of SRAM steers clear of the bootrom's workspace at the very
-end (USB DPRAM mirror, etc.).
+The Target owns the chip's single `PicobootPuppet` and is the only
+place a puppet is constructed — the adapter / component layer is
+intentionally puppet-free so all stub-running code paths (SPI
+passthrough, SFDP probe, future helpers) share one SRAM allocator.
+The reserved 4 KiB at the top of SRAM stays clear of the bootrom's
+USB DPRAM mirror workspace.
+
+At probe time we spawn `spi/cs0/flash` under the Target to drive
+the SPI passthrough stub, ask the SpiFlash component to read
+JEDEC ID + SFDP for size and sector geometry, capture the
+results, and tear the subtree back down. The user can later
+respawn `spi/cs0/flash` on demand (path resolution will call
+back into `child_spawn`).
 
 Discovery runs against a `Picoboot` Node — produced by
 `PicobootAdapter.child_spawn("picoboot")`. Having a `Picoboot`
@@ -26,6 +34,7 @@ once the bring-up is needed.
 from __future__ import annotations
 
 from ...component.raspberry.picoboot import Picoboot, PicobootPuppet
+from ...db import NoMatch
 from ..loadable import Loadable
 from ..region import Flash, Ram
 from ..target import Target
@@ -39,25 +48,36 @@ SRAM_SIZE        = 0x42000          # 264 KiB
 # Reserve the last 4 KiB of SRAM for the bootrom's own use.
 PUPPET_RAM_SIZE  = SRAM_SIZE - 0x1000
 
-# QSPI flash page / sector sizes assumed for the bootrom commands.
-FLASH_PAGE_SIZE   = 256
-FLASH_SECTOR_SIZE = 4096
-
-# Default flash size — matches the most common Pico boards
-# (W25Q16, 2 MiB). The PICOBOOT command set has no way to query
-# the flash size at runtime; reading SFDP via an SSI driver stub
-# is a follow-up. Setting this too small means we'll refuse to
-# program a binary that fits the actual chip; too large means
-# erase / verify will run past the end and the bootrom will reject
-# the address. 2 MiB is the safe-conservative default for Pico-
-# family boards.
-DEFAULT_FLASH_SIZE = 2 * 1024 * 1024
+# Fallback geometry when SFDP detection fails — covers the most
+# common Pico boards (W25Q16, 2 MiB) and the conservative
+# subset of erase / page sizes every standard SPI NOR supports.
+DEFAULT_FLASH_SIZE        = 2 * 1024 * 1024
+DEFAULT_FLASH_PAGE_SIZE   = 256
+DEFAULT_FLASH_SECTOR_SIZE = 4096
 
 
 class Rp2040Target(CortexMTarget):
     """RP2040 — dual Cortex-M0+, QSPI flash with XIP. Accessed here
     through PICOBOOT; the SWD-driven path will land as a sibling
-    Target file once it's needed."""
+    Target file once it's needed.
+
+    Owns the chip's `PicobootPuppet` and serves as the parent for
+    on-demand `spi` subtrees (`spi/cs0/flash` etc.). The Target
+    is the single owner of the SRAM allocator: every stub-running
+    path goes through this Target's puppet."""
+
+    def __init__(self, name: str, picoboot: Picoboot,
+                 puppet: PicobootPuppet):
+        super().__init__(name)
+        self.picoboot = picoboot
+        self.puppet = puppet
+
+    async def child_spawn(self, name):
+        if name == "spi":
+            from ...component.raspberry.spi import PicobootSpiInterface
+            return PicobootSpiInterface(
+                self.picoboot, self.puppet, name="spi")
+        return await super().child_spawn(name)
 
 
 class PicobootXipFlash(Flash):
@@ -67,14 +87,17 @@ class PicobootXipFlash(Flash):
     SSI register choreography for us — no on-target stub needed.
     Reads of XIP-range addresses transparently re-enter XIP first;
     writes auto-route into the page-program path; erase aligns to
-    4 KiB sectors.
+    the chip's smallest sector.
     """
 
-    def __init__(self, name, address, size, picoboot: Picoboot):
+    def __init__(self, name, address, size, picoboot: Picoboot, *,
+                 write_page_size: int = DEFAULT_FLASH_PAGE_SIZE,
+                 erase_page_sizes=None):
         super().__init__(
             name, address, size,
-            write_page_size=FLASH_PAGE_SIZE,
-            erase_page_sizes=[FLASH_SECTOR_SIZE])
+            write_page_size=write_page_size,
+            erase_page_sizes=erase_page_sizes
+                or [DEFAULT_FLASH_SECTOR_SIZE])
         self.picoboot = picoboot
 
     async def read(self, offset, size):
@@ -116,7 +139,44 @@ class PicobootLoadable(Loadable):
         if do_start and success:
             # Reboot into the application: pc=0 / sp=0 with a 100 ms
             # delay lets the bootrom relaunch the flash boot path.
-            await self.picoboot.transport.reboot(pc=0, sp=0, delay_ms=100)
+            await self.picoboot.transport.reboot(
+                pc=0, sp=0, delay_ms=100)
+
+
+async def _detect_flash_geometry(target: Rp2040Target):
+    """Spawn `spi/cs0/flash` under `target`, harvest the SpiFlash
+    component's identification + SFDP results, then tear the
+    subtree back down so the user-visible Target stays clean.
+    A user that wants raw SPI access later can re-summon
+    `spi/cs0/flash` on demand — the path resolves through
+    `Rp2040Target.child_spawn("spi")`.
+
+    Returns ``(total_size, write_page_size, erase_page_sizes)`` on
+    success, or ``None`` if detection failed. Errors are logged
+    at TRACE; the probe falls back to defaults rather than
+    declining the chip.
+    """
+    info = None
+    try:
+        flash = await target.child_summon("spi", "cs0", "flash")
+        info = (flash.total_size, flash.page_size,
+                sorted(s for s, _cmd in flash.sector_info))
+        target.logger.note(
+            "SFDP detect: %d KiB, page=%d, sectors=%s",
+            info[0] // 1024, info[1], info[2])
+    except Exception as e:
+        target.logger.trace("SFDP detect failed: %s", e)
+    finally:
+        # Always release the SPI subtree — even on partial spawn,
+        # so the user's `info target` doesn't show scaffolding.
+        spi = target.child_lookup("spi")
+        if spi is not None:
+            try:
+                await target.child_remove(spi)
+            except Exception as e:
+                target.logger.trace(
+                    "SPI teardown after SFDP failed: %s", e)
+    return info
 
 
 @Target.register(Picoboot, precedence=500)
@@ -128,22 +188,36 @@ async def rp2040_picoboot_probe(picoboot: Picoboot):
     wire here is RP2040. Future RP2350 support belongs in a sibling
     probe (different SRAM size, dual M33, different bootrom).
     """
-    # Picoboot sits under PicobootAdapter, whose name already carries
-    # the chip's USB serial (e.g. rp2040-bootsel-e0c9125b0d9b). Reuse
-    # that so multiple boards parent at distinct Target paths.
     adapter = picoboot._parent
     suffix = (adapter.name.removeprefix("rp2040-bootsel-")
               if adapter is not None else "")
-    target = Rp2040Target(f"rp2040-{suffix}" if suffix else "rp2040")
-    target.claim(picoboot)
-
-    loadable = PicobootLoadable("main", picoboot)
-    loadable.child_add(PicobootXipFlash(
-        "flash", XIP_BASE, DEFAULT_FLASH_SIZE, picoboot))
-    target.child_add(loadable)
+    name = f"rp2040-{suffix}" if suffix else "rp2040"
 
     sram = Ram("sram", SRAM_BASE, PUPPET_RAM_SIZE)
     puppet = PicobootPuppet("puppet", sram, picoboot)
+    target = Rp2040Target(name, picoboot, puppet)
+    target.claim(picoboot)
     target.child_add(puppet)
+
+    geometry = await _detect_flash_geometry(target)
+    if geometry is not None:
+        flash_size, page_size, sector_sizes = geometry
+    else:
+        target.logger.warning(
+            "Flash geometry detection failed; assuming "
+            "%d KiB / page=%d / sector=%d",
+            DEFAULT_FLASH_SIZE // 1024,
+            DEFAULT_FLASH_PAGE_SIZE,
+            DEFAULT_FLASH_SECTOR_SIZE)
+        flash_size = DEFAULT_FLASH_SIZE
+        page_size = DEFAULT_FLASH_PAGE_SIZE
+        sector_sizes = [DEFAULT_FLASH_SECTOR_SIZE]
+
+    loadable = PicobootLoadable("main", picoboot)
+    loadable.child_add(PicobootXipFlash(
+        "flash", XIP_BASE, flash_size, picoboot,
+        write_page_size=page_size,
+        erase_page_sizes=sector_sizes))
+    target.child_add(loadable)
 
     return target

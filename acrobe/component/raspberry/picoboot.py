@@ -93,9 +93,12 @@ class Picoboot(Node):
 
     Holds the USB transport and delegates the `PicobootTransport`
     surface to it. Sits under `PicobootAdapter` in the tree;
-    discovered by the future RP2040 Target probe via
+    discovered by the RP2040 Target probe via
     `children_of_class(Picoboot)` and wrapped in a
-    `PicobootPuppet`.
+    `PicobootPuppet` *owned by the Target*, not by Picoboot — the
+    puppet lives in the target framework layer so all stub-running
+    paths (SPI passthrough, SFDP probe, future helpers) share one
+    SRAM allocator.
     """
 
     def __init__(self, transport: PicobootTransport, name: str = "picoboot"):
@@ -110,13 +113,6 @@ class Picoboot(Node):
 
     async def exec(self, pc: int) -> None:
         await self.transport.exec(pc)
-
-    async def child_spawn(self, name):
-        if name == "spi":
-            from .spi import PicobootSpiInterface
-            return PicobootSpiInterface(self, name="spi")
-        from ...db import NoMatch
-        raise NoMatch("child", name)
 
 
 class PicobootPuppet(PuppetBase):

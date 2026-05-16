@@ -33,7 +33,6 @@ import struct
 
 from ...db import NoMatch
 from ...protocol import spi
-from ...target.region import Ram
 from .picoboot import Picoboot, PicobootPuppet
 
 
@@ -62,11 +61,16 @@ class PicobootSpiInterface(spi.Interface):
     """RP2040 QSPI flash pins as an `spi.Interface`, driven by a
     stub on the chip.
 
-    Built on top of a `Picoboot` Node; constructs its own
-    `PicobootPuppet` over the RP2040 SRAM (leaving the top 4 KiB
-    untouched for the bootrom's USB DPRAM mirror). Adds a single
-    `spi.Target` child named ``cs0`` since RP2040's QSPI block has
-    one CSn pin.
+    Constructed by `Rp2040Target.child_spawn("spi")` with the
+    Target's puppet — there is exactly one puppet per chip
+    lifetime, owned by the Target, and every code path that needs
+    to run on-target stubs (SPI passthrough, future SFDP probe,
+    Loadable-side helpers) shares that allocator. Constructing
+    multiple puppets against the same SRAM would race their
+    allocators.
+
+    Adds a single `spi.Target` child named ``cs0`` since RP2040's
+    QSPI block has one CSn pin.
 
     Multi-Shift CS-held transactions become a single stub call:
     Cs(0) + N×Shift + Cs(None) → one packed command array, one
@@ -74,18 +78,13 @@ class PicobootSpiInterface(spi.Interface):
     transaction instead of one per shift.
     """
 
-    SRAM_BASE = 0x20000000
-    SRAM_SIZE = 0x42000
-    BOOTROM_SCRATCH = 0x1000
-
     EXEC_TIMEOUT_S = 30.0
 
-    def __init__(self, picoboot: Picoboot, name: str = "spi"):
+    def __init__(self, picoboot: Picoboot, puppet: PicobootPuppet,
+                 name: str = "spi"):
         super().__init__(adapter=None, name=name)
         self.picoboot = picoboot
-        ram = Ram("sram", self.SRAM_BASE,
-                  self.SRAM_SIZE - self.BOOTROM_SCRATCH)
-        self.puppet = PicobootPuppet("spi-puppet", ram, picoboot)
+        self.puppet = puppet
         self._marker_offset = SPI_TRANSACT_STUB.index(
             PLACEHOLDER.to_bytes(4, "little"))
         self._stub_zone = None
@@ -114,6 +113,14 @@ class PicobootSpiInterface(spi.Interface):
         self.logger.protocol(
             "SPI stub installed at 0x%08x (%d bytes)",
             self._stub_zone.address, len(SPI_TRANSACT_STUB))
+
+    async def stop(self):
+        # Return the stub zone to the shared puppet allocator so a
+        # later spawn (or other code using the same puppet) can
+        # reuse the space.
+        if self._stub_zone is not None:
+            self.puppet.unallocate(self._stub_zone)
+            self._stub_zone = None
 
     async def flush_ops(self, batch):
         await self.__ensure_stub()

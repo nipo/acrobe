@@ -22,6 +22,7 @@ from acrobe.component.raspberry.spi import (
 )
 from acrobe.protocol import spi
 from acrobe.target.region import Ram
+from acrobe.target.region import Ram
 
 
 class MockPicobootTransport:
@@ -102,7 +103,9 @@ class MockPicobootTransport:
 def make_iface():
     transport = MockPicobootTransport()
     picoboot = Picoboot(transport)
-    iface = PicobootSpiInterface(picoboot)
+    ram = Ram("sram", 0x20000000, 0x42000 - 0x1000)
+    puppet = PicobootPuppet("puppet", ram, picoboot)
+    iface = PicobootSpiInterface(picoboot, puppet)
     return iface, transport
 
 

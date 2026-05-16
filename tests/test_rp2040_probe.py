@@ -58,6 +58,9 @@ class MockPicobootTransport:
     async def reboot(self, pc=0, sp=0, delay_ms=100):
         self.reboots.append((pc, sp, delay_ms))
 
+    async def exit_xip(self):
+        pass
+
 
 async def build_target():
     """Drive the probe directly with a synthetic Picoboot Node."""
@@ -103,6 +106,24 @@ class TestProbeShape:
         assert puppets[0].ram.address == 0x20000000
         # Top 4 KiB reserved for bootrom workspace.
         assert puppets[0].ram.size == 0x42000 - 0x1000
+
+    @pytest.mark.asyncio
+    async def test_spi_subtree_torn_down_after_detection(self):
+        """SFDP probe-time scaffolding doesn't leak: the `spi`
+        child must be absent from the final target tree even
+        though detection ran (and failed against this mock)."""
+        target, _, _ = await build_target()
+        assert target.child_lookup("spi") is None
+
+    @pytest.mark.asyncio
+    async def test_spi_respawnable_on_demand(self):
+        """User-on-demand: `target.child_summon('spi')` recreates the
+        SPI subtree using the Target's puppet."""
+        target, _, _ = await build_target()
+        from acrobe.component.raspberry.spi import PicobootSpiInterface
+        spi = await target.child_summon("spi")
+        assert isinstance(spi, PicobootSpiInterface)
+        assert spi.puppet is target.puppet
 
     @pytest.mark.asyncio
     async def test_target_name_includes_serial(self):
