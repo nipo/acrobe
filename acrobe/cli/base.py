@@ -72,7 +72,7 @@ class CliContext:
 
 @click.group(cls=AcrobeGroup)
 @click.option('-v', '--verbose', count=True, help="More verbosity")
-@click.option('-q', '--quiet', count=True, help="Less verbosity")
+@click.option('-q', '--quiet', count=True, help="Less verbosity (hide progress bars)")
 @click.option('-t', '--timestamp', is_flag=True, help="Add timestamps to log")
 @click.option('-b', '--no-color', is_flag=True, help="Don't color log")
 @click.option('--silent', multiple=True, type=str,
