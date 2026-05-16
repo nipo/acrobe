@@ -6,9 +6,12 @@ based MCU in acrobe — STM32, NXP, SiLabs, TI, Microchip, etc. By
 flash programming, and the glue that ties them into the GDB binding
 and the CLI.
 
-The example you'll see most often is `acrobe/target/arm/nrf52.py`
-and its sibling `acrobe/component/nordic/ctrl_ap.py` — they cover
-every pattern this document discusses.
+The reference targets to read are `acrobe/target/arm/nrf52.py`
+(plus `acrobe/component/nordic/ctrl_ap.py` for the vendor-AP and
+locked-chip patterns) and `acrobe/target/arm/efm32.py`. Between
+them they cover every pattern this document discusses, including
+the on-target stub (Puppet) framework that both use for flash
+programming.
 
 ## What the target framework gives you for free
 
@@ -140,7 +143,12 @@ pieces:
    `erase_all` (see "Pitfalls" below).
 3. **The probe function** above.
 
-Skeleton, modeled after nRF52:
+Skeleton — an MMIO-only flash. The shipped nRF52 and EFM32 targets
+no longer look like this; both use the Puppet framework (see
+"On-target stubs: the Puppet framework" below). Use this shape
+when the flash controller really is one register poke per word
+and per-word SWD traffic is acceptable. Otherwise jump straight
+to the Puppet pattern.
 
 ```python
 # acrobe/target/arm/mychip.py
@@ -313,11 +321,13 @@ erase + write themselves. Subclass when you need:
 
 - **CPU halt around flash ops.** Most MCUs need this — a running
   CPU contending with flash bus access produces unreliable
-  programming. Override `pre_program` / `post_program`:
+  programming. Override `pre_program` / `post_program` and expose
+  a small `find_core()` helper (the shipped EFM32 / nRF52
+  Loadables both do exactly this):
 
   ```python
   async def pre_program(self, *, do_erase, assume_clean):
-      core = self.__core()
+      core = self.find_core()
       if core is not None:
           await core.halt()
       await super().pre_program(do_erase=do_erase,
@@ -325,9 +335,11 @@ erase + write themselves. Subclass when you need:
 
   async def post_program(self, *, success, do_start):
       if do_start and success:
-          await self.__core().reset(stop=False)
+          core = self.find_core()
+          if core is not None:
+              await core.reset(stop=False)
 
-  def __core(self):
+  def find_core(self):
       from acrobe.target.debuggable import Debuggable
       target = self._parent
       if target is None:
@@ -350,32 +362,220 @@ erase + write themselves. Subclass when you need:
 Don't subclass to handle multi-page programming — that's `Region`'s
 job.
 
-## When you actually need a Puppet
+## On-target stubs: the Puppet framework
 
-A Puppet is on-target code that the host runs in trampoline mode
-to drive flash hardware faster than MMIO-from-host could.
+For flash programming, a `Puppet` lets the host run small ARM
+stubs on the target instead of poking the flash controller register
+by register over SWD. Both shipped Cortex-M targets (`nrf52`,
+`efm32`) use this path. Even for chips with a trivial NVMC the
+savings are significant — per-word SWD pokes are the bottleneck,
+not the on-die flash.
 
-You **don't** need a Puppet when:
+Use the puppet path whenever the flash-controller interaction is
+a *loop* — per-word writes, per-page erases polling a busy bit,
+QSPI-flash-behind-an-IP-block, anything where the inner step is
+register-level. Keep one-shot transactions (mass-erase via
+`MSC_WRITECMD_ERASEMAIN`, single-register lock bit pokes, device
+ID reads) on the MMIO path — stub setup overhead would dwarf the
+saving.
 
-- The flash controller is memory-mapped (nRF52 NVMC, RP2040 boot
-  ROM via the watchdog, …).
-- Programming throughput is acceptable through the Mem-AP. nRF52
-  at ~25s for 1 MiB is "acceptable" for most use cases.
+### The pieces (`acrobe/target/puppet.py`)
 
-You **do** need a Puppet when:
+* **`Puppet` (`typing.Protocol`)** — the host-side surface every
+  transport must satisfy: `allocate` / `unallocate` / `stub` for
+  RAM management, `mem_read` / `mem_write` for target memory, and
+  `prepare` / `run` / `wait` / `call` to launch a function pointer
+  with up to four word-sized arguments and read back its return
+  value.
+* **`PuppetBase(Node)`** — shared bookkeeping. Owns an `Allocator`
+  over a RAM region you pass in, allocates a persistent stack
+  `Zone` at construction, implements the `allocate` / `unallocate`
+  / `stub` / `call` plumbing on top of subclass-provided
+  `mem_read` / `mem_write` / `prepare` / `run` / `wait`.
+* **`Zone`** — bookkeeping for a slice of target RAM. `write` /
+  `read` route through the parent puppet's `mem_write` /
+  `mem_read`.
+* **`PuppetStub`** — installed-once / call-many. Owns a Zone for
+  the code blob, copies it on first `call`, arms the trampoline
+  per call. `cleanup()` returns the Zone to the allocator.
+* **`PagedPuppetWriter`** — async context manager wrapping a
+  `PuppetStub` of shape `(dst, src_buf, byte_count)`. Allocates
+  two RAM buffers and overlaps host→target upload of page N+1
+  with the target's flash burn of page N. Falls back to one
+  buffer when the allocator can't fit a second (same correctness,
+  no speedup).
 
-- The flash interface is a complex protocol that's prohibitively
-  slow to drive one register at a time over SWD (STM32 H7 octo-SPI,
-  any QSPI-flash-behind-an-IP-block, smart-card-style commands).
-- The chip's flash requires precise timing the host can't
-  guarantee.
+### Concrete transports
 
-Puppet support is still scaffolded — `acrobe/target/puppet.py` is
-the interface skeleton; concrete `ArmMPuppet` / `AutoPuppet` /
-`PuppetStub` haven't landed in V1. When you need them, follow
-crobe's `target/soc/arm_based/puppet_code.py` pattern: small
-hand-rolled ARM stubs compiled to bytes, loaded into target RAM
-at runtime, called via the Cortex-M debug registers.
+* **`ArmMPuppet`** — SWD / Mem-AP path. 12-byte Thumb trampoline:
+
+      ldr  r4, [pc, #4]    ; load function pointer
+      blx  r4              ; call the stub
+      bkpt #0xbe           ; halt on return
+      .word <fnptr>        ; written by prepare()
+
+  `prepare()` writes the trampoline blob + the regs (r0..r3 =
+  args, sp = top-of-stack − 8, pc = trampoline, xPSR.T = 1) in a
+  single batched Mem-AP flush. `run()` issues a resume; `wait()`
+  polls `core.state()` until `S_HALT` and reads r0 back. On
+  timeout `wait()` force-halts the core and raises.
+* **`PicobootPuppet`** — RP2040 BOOTSEL path
+  (`acrobe/component/raspberry/picoboot.py`). Same `Puppet`
+  protocol, USB transport instead of SWD. The RP2040 Target
+  attaches it so flash routines have a Puppet available before
+  any normal debug interface is up.
+
+### Stubs
+
+Stubs are tiny ARM blobs that loop on the target so the host
+pays one round-trip per *region operation* instead of one per
+register poke. They live alongside the target module as `bytes`
+literals — see `STUBS = {...}` at the top of `efm32.py`. The
+shipped convention is AAPCS:
+`flash_write(dst, src_buf, byte_count)` → bytes burned;
+`flash_erase(addr, size, page_size)` → none. Source for the
+EFM32 stubs is crobe's `firmware/flash/stubs/arm/efm32.c`;
+compile per-series and copy the bytes over.
+
+### Wiring a Puppet into a Target probe
+
+Real pattern from `efm32.py` (the nRF52 build is identical in
+shape):
+
+```python
+sram = BusRam("sram", 0x20000000, ram_size, ap)
+memory = Memory(ap)
+memory.child_add(BusRam("flash", 0x00000000, flash_size, ap))
+memory.child_add(sram)
+target.child_add(memory)
+
+puppet = ArmMPuppet("puppet", debug.cores[0], sram, ap)
+target.child_add(puppet)
+
+loadable = EfmLoadable("main")
+loadable.child_add(
+    EfmFlash("code", 0x00000000, flash_size, ap, puppet,
+             page_size=page_size))
+target.child_add(loadable)
+```
+
+Notes:
+
+- Puppet sits at `target/puppet` (canonical name `"puppet"`).
+- Each Flash region holds a direct reference to the puppet; no
+  service discovery, no late binding.
+- `BusRam("sram", …)` is the underlying RAM range the puppet's
+  `Allocator` carves up. Reserve the whole SRAM; the allocator
+  internally manages stack + trampoline + per-stub zones.
+- `Memory` + `BusRam` are component nodes
+  (`acrobe.component.arm.memory`) — they're what gives `info
+  target -v` an addressable view of target memory.
+
+### Flash with pipelined writes
+
+The pattern shared by `EfmFlash` and `NvmcFlash`:
+
+```python
+from acrobe.target.puppet import PagedPuppetWriter
+
+class MyFlash(Flash):
+    STUBS: dict = {}  # filled by subclass with compiled blobs
+
+    STUB_ERASE_TIMEOUT = 30.0
+    STUB_WRITE_TIMEOUT = 5.0
+
+    def __init__(self, name, address, size, mem_ap, puppet, *,
+                 page_size):
+        super().__init__(name, address, size,
+                         write_page_size=page_size,
+                         erase_page_sizes=[page_size])
+        self.mem_ap = mem_ap
+        self.puppet = puppet
+        self.__writer: PagedPuppetWriter | None = None
+
+    async def erase(self, offset, size):
+        stub = self.puppet.stub(self.STUBS["flash_erase"],
+                                name="erase")
+        try:
+            await stub.call(self.address + offset, size,
+                            self.write_page_size,
+                            timeout=self.STUB_ERASE_TIMEOUT)
+        finally:
+            stub.cleanup()
+
+    async def plan_update(self, region_map):
+        if not self.is_blank:
+            await self._Flash__erase_for(region_map)
+        paged = region_map.paged(self.write_page_size,
+                                 fill=bytes([self.erased_value]))
+        page = self.write_page_size
+        stub = self.puppet.stub(self.STUBS["flash_write"],
+                                name="write")
+        try:
+            async with PagedPuppetWriter(
+                    stub, page,
+                    timeout=self.STUB_WRITE_TIMEOUT) as writer:
+                self.__writer = writer
+                try:
+                    for addr, data in paged:
+                        offset = addr - self.address
+                        for o in range(0, len(data), page):
+                            yield offset + o, data[o:o + page]
+                finally:
+                    self.__writer = None
+        finally:
+            stub.cleanup()
+
+    async def write(self, offset, data):
+        if self.__writer is not None:
+            await self.__writer.write(self.address + offset, data)
+            return
+        # Stand-alone call (not driven by plan_update). Build a
+        # one-shot writer for just this transfer.
+        stub = self.puppet.stub(self.STUBS["flash_write"],
+                                name="write")
+        try:
+            page = self.write_page_size
+            async with PagedPuppetWriter(
+                    stub, page,
+                    timeout=self.STUB_WRITE_TIMEOUT) as w:
+                for o in range(0, len(data), page):
+                    chunk = data[o:o + page]
+                    await w.write(self.address + offset + o, chunk)
+        finally:
+            stub.cleanup()
+```
+
+Key invariants:
+
+- **Install once per region update.** `plan_update` creates one
+  `PuppetStub` and wraps it in one `PagedPuppetWriter`; per-page
+  `write()` calls thread chunks through the writer. Don't
+  recreate the stub on every page — the first `stub.call`
+  installs the code, subsequent ones reuse it.
+- **`stub.cleanup()` in `finally`.** An exception mid-update
+  must not leak the stub's Zone or its buffers.
+- **`PagedPuppetWriter` handles the wait scheduling.** Per-page
+  `wait()` is deferred until *after* the next page's upload, so
+  the burn and upload overlap on the wire. The exit of the
+  context manager drains the last pending wait.
+- **Per-call `timeout=`** on `stub.call` / `PagedPuppetWriter`.
+  A stub that locks up gets force-halted by `Puppet.wait`
+  instead of hanging the CLI.
+
+### When the MMIO path still wins
+
+One-shot operations stay on MMIO. Both shipped targets keep
+mass-erase off the puppet:
+
+- EFM32 `mass_erase` writes `MSC_WRITECMD_ERASEMAIN0` (+ MAIN1
+  for ≥ 512 KiB parts) via the Mem-AP and polls `MSC_STATUS`.
+  One write, one poll loop, done.
+- nRF52 `Nrf52Loadable.erase_all` punches the CTRL-AP
+  `ERASEALL` register and polls.
+
+Use the same rule for any vendor-AP shortcut: if it's a single
+register transaction, skip the puppet.
 
 ## Pitfalls
 
