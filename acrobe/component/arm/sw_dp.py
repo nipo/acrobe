@@ -4,7 +4,12 @@ Translates DP/AP operations into :mod:`acrobe.protocol.swd` ops
 posted to a parent :class:`swd.Interface`. Owns the SELECT cache;
 the wire-level AP-read pipeline is handled inside the Interface so
 ``ApRead`` futures resolve to real data without callers needing to
-chase the trailing read."""
+chase the trailing read.
+
+Wire bring-up (line reset, JTAG-to-SWD switch, DPIDR read) lives in
+:meth:`swd.Interface.start` — by the time this class is instantiated
+the DPIDR value is already known and is fed in via the ``dpidr``
+constructor kwarg."""
 
 from __future__ import annotations
 
@@ -14,8 +19,13 @@ from . import dp as dpmod
 from ...protocol import swd
 
 
+@swd.Interface.db.register_default
 class SwDp(dpmod.Dp):
-    """ARM Debug Port over SWD."""
+    """ARM Debug Port over SWD.
+
+    Registered as the default factory on :data:`swd.Interface.db`: any
+    DPIDR that doesn't match a vendor-specific subclass produces a plain
+    :class:`SwDp`."""
 
     SELECT_REG = 0x08
     ABORT_REG  = 0x00  # write to DP addr 0 = ABORT (read at 0 = DPIDR)
@@ -25,28 +35,14 @@ class SwDp(dpmod.Dp):
     # following access. 32 is conservative; OpenOCD uses 8 by default.
     AP_IDLE_CYCLES = 32
 
-    def __init__(self, swd_interface: swd.Interface, name: str = "dap"):
-        super().__init__(name=name)
+    def __init__(self, swd_interface: swd.Interface, *,
+                 dpidr: int | None = None, name: str = "dp"):
+        super().__init__(name=name, dpidr=dpidr)
         self._swd = swd_interface
-        # The wakeup sequence we issue in start() leaves the DP's
-        # SELECT register at 0; pre-seed accordingly so the first
-        # DPIDR read doesn't emit a redundant SELECT write.
+        # swd.Interface.start() leaves the DP's SELECT register at 0
+        # (line reset clears it); pre-seed accordingly so the first
+        # access doesn't emit a redundant SELECT write.
         self._select: int = 0
-
-    async def start(self):
-        # Canonical SWD line wake-up: line reset → JTAG-to-SWD switch
-        # → line reset → idle → DPIDR read. Posted back-to-back so the
-        # whole sequence flushes in a single batch — the spec requires
-        # the first transaction after the switch to be a DPIDR read,
-        # and we don't want anything (e.g. a future Dp.start() change)
-        # slipping in between. Dp.start() will read DPIDR again on its
-        # own; that's redundant but harmless.
-        self._swd.post(swd.LineReset())
-        self._swd.post(swd.JtagToSwd())
-        self._swd.post(swd.LineReset())
-        self._swd.post(swd.Run(cycles=8))
-        await self._swd.post(swd.Read(ap=False, addr=dpmod.Dp.DPIDR))
-        await super().start()
 
     def _select_for(self, op) -> int:
         """Compute the SELECT value needed to access ``op``'s register.
@@ -124,7 +120,3 @@ class SwDp(dpmod.Dp):
                 user_fut.set_result(result)
 
 
-@swd.Interface.db.register("dap")
-def _spawn_dap(interface: swd.Interface) -> SwDp:
-    """Factory invoked by ``swd.Interface.child_spawn('dap')``."""
-    return SwDp(interface)

@@ -142,7 +142,10 @@ class Interface(Batcher, FreqCapper, Node):
     Concrete subclasses (e.g. :class:`acrobe.adapter.jlink.swd.JLinkSwdInterface`,
     :class:`acrobe.adapter.cmsisdap.swd.CmsisDapSwdInterface`) implement
     :meth:`flush_ops` to translate batched swd ops into adapter-specific
-    USB transactions.
+    USB transactions. Subclasses that need adapter-side setup (mode
+    select, default clock, …) override :meth:`start` and call
+    ``await super().start()`` at the end so the base wire init runs
+    once the adapter is ready.
 
     Mixes in :class:`FreqCapper` so the wire frequency is always the
     minimum of named constraints (hardware ceiling, user ``fmax``,
@@ -150,11 +153,23 @@ class Interface(Batcher, FreqCapper, Node):
     :meth:`FreqCapper.freq_update` to apply the resulting freq to
     hardware.
 
-    The canonical child is a :class:`SwDp` registered under ``"dap"`` in
-    :data:`db`; spawning happens via the standard ``child_summon``
-    machinery (``adapter/swd/dap``)."""
+    :meth:`start` brings the SWD wire up — line reset, JTAG-to-SWD
+    switch, DPIDR read — then dispatches through :data:`db` (keyed on
+    DPIDR with the upper REVISION nibble masked) to spawn a typed
+    :class:`acrobe.component.arm.dp.Dp` subclass attached as the ``"dp"``
+    child. The canonical SWD path is therefore ``adapter/swd``, with
+    the DP reached as ``adapter/swd/dp``.
 
-    db: Db = Db("SWD interface handler")
+    Bare SWD interface use (no DP) is intentionally unsupported: a
+    failure to identify a DP raises out of :meth:`start`."""
+
+    # Keyed on raw 32-bit DPIDR; REVISION (bits 31:28) is masked so
+    # one registration covers every silicon roll of a DP design.
+    @staticmethod
+    def _dpidr_eq(key, lookup):
+        return (key & 0x0fffffff) == (lookup & 0x0fffffff)
+
+    db: Db = Db("SWD DP DPIDR", eq_func=_dpidr_eq)
 
     def __init__(self, name="swd"):
         Batcher.__init__(self)
@@ -165,5 +180,24 @@ class Interface(Batcher, FreqCapper, Node):
         raise NotImplementedError(
             f"{type(self).__name__} must implement flush_ops")
 
-    async def child_spawn(self, name):
-        return await self.db.acall(name, self)
+    async def start(self):
+        """Wake the wire and parent the typed DP.
+
+        Posts LineReset → JtagToSwd → LineReset → 8 idle cycles
+        back-to-back so the spec-mandated "first transaction after
+        the switch is a DPIDR read" property holds in a single batch,
+        reads DPIDR, then looks the value up in :data:`db` to build
+        the right :class:`Dp` subclass."""
+        self.post(LineReset())
+        self.post(JtagToSwd())
+        self.post(LineReset())
+        self.post(Run(cycles=8))
+        dpidr = await self.post(Read(ap=False, addr=0x00))
+        self.logger.info("DPIDR 0x%08x", dpidr)
+        # Lazy import: protocol layer must not pull in component-tree
+        # modules at load time. The acrobe.component.arm package is
+        # imported by every adapter that wants SWD, so by the time we
+        # get here registrations have fired.
+        from ..component.arm.dp import Dp  # noqa: F401  (forces module load)
+        dp = await self.db.acall(dpidr, self, dpidr=dpidr)
+        self._child_attach(dp)

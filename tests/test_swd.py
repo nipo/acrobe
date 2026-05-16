@@ -80,21 +80,22 @@ class TestInterfaceAbstract:
             asyncio.run(iface.flush_ops([]))
 
     def test_db_present(self):
-        # `swd.Interface.db` is the registry adapter-specific
-        # interfaces don't use directly, but the standard SwDp
-        # factory registers under "dap".
+        # `swd.Interface.db` is the DPIDR-keyed registry consulted in
+        # Interface.start() to spawn the typed DP child.
         assert isinstance(swd.Interface.db, type(swd.Interface.db))
 
-    def test_dap_factory_registered(self):
-        # Importing the arm package wires SwDp into the registry.
+    def test_default_swdp_factory(self):
+        # Importing the arm package fires SwDp's default registration.
         import acrobe.component.arm  # noqa: F401
-        # Spawning "dap" should yield a SwDp.
         from acrobe.component.arm.sw_dp import SwDp
         iface = swd.Interface(name="t")
-        # db.acall("dap", iface) returns the SwDp from the factory.
+        # Any DPIDR resolves to SwDp via the default handler.
         import asyncio
-        result = asyncio.run(swd.Interface.db.acall("dap", iface))
+        result = asyncio.run(
+            swd.Interface.db.acall(0x2BA01477, iface, dpidr=0x2BA01477))
         assert isinstance(result, SwDp)
+        assert result.dpidr == 0x2BA01477
+        assert result.name == "dp"
 
 
 class TestErrors:

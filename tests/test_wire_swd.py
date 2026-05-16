@@ -43,6 +43,10 @@ class _LoopbackSwd(Interface):
         self._fault_addr = fault_addr
         self._wait_addr = wait_addr
 
+    async def start(self):
+        """Bypass the base wire init + DP spawn — this test only
+        exercises wire transport of explicitly-posted ops."""
+
     async def flush_ops(self, batch):
         for op, future in batch:
             self.ops.append(op)

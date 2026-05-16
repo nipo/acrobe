@@ -224,10 +224,10 @@ class Dp(Batcher, Node):
     ABORT_ALL    = (DAPABORT | STKCMPCLR | STKERRCLR
                     | WDERRCLR | ORUNERRCLR)
 
-    def __init__(self, name: str = "dap"):
+    def __init__(self, name: str = "dap", *, dpidr: int | None = None):
         Batcher.__init__(self)
         Node.__init__(self, name)
-        self.dpidr: int | None = None
+        self.dpidr: int | None = dpidr
         self.dpidr1: int | None = None
         self.dp_version: int | None = None  # DPVER (0=DPv0, 1=DPv1, 2=DPv2, 3=DPv3=ADIv6)
         self.adi_version: int | None = None  # 5 or 6
@@ -237,8 +237,10 @@ class Dp(Batcher, Node):
                                              # (DPIDR1.ASIZE; None on ADIv5)
 
     async def start(self):
-        """Read DPIDR, clear sticky flags, power up debug+system domains."""
-        self.dpidr = await self.post(DpRead(self.DPIDR))
+        """Read DPIDR (if not already known), clear sticky flags,
+        power up debug+system domains."""
+        if self.dpidr is None:
+            self.dpidr = await self.post(DpRead(self.DPIDR))
         self.dp_version = (self.dpidr >> 12) & 0xf
         self.adi_version = 6 if self.dp_version >= 3 else 5
         self.logger.info(

@@ -91,6 +91,7 @@ class CmsisDapSwdInterface(swd.Interface):
             wait_retry=_DEFAULT_WAIT_RETRY,
             match_retry=_DEFAULT_MATCH_RETRY)
         self._connected = True
+        await super().start()
 
     async def flush_ops(self, batch):
         # Two pass: first drain SWJ-style ops in order, accumulating

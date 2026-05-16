@@ -143,14 +143,15 @@ class JLinkSwdInterface(swd.Interface):
     async def start(self):
         """Switch the J-Link to SWD mode and bring the line up.
 
-        We deassert nRST eagerly (some adapters power up with reset
-        asserted, masking the target's SWDIO driver) and set a
-        sensible default speed. The chip-side wakeup (line reset +
-        JTAG-to-SWD switch + idle) is the SwDp's job — it posts
-        :class:`swd.JtagToSwd` from its own ``start()``."""
+        Deasserts nRST eagerly (some adapters power up with reset
+        asserted, masking the target's SWDIO driver) and sets a
+        sensible default speed, then defers to
+        :meth:`swd.Interface.start` for the chip-side wakeup (line
+        reset + JTAG-to-SWD switch + DPIDR read + DP spawn)."""
         await self._transport.select_interface(protocol.TIF_SWD)
         await self._transport.deassert_reset()
         await self._transport.set_speed_khz(1000)
+        await super().start()
 
     # Cap the per-chunk SWD bit-bang size: large batched mem-AP
     # blob ops otherwise build a single swd_io request the device
