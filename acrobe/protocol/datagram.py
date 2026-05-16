@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..db import Db
 from ..engine import Batcher
 from ..node import Node
 
@@ -66,7 +67,14 @@ class Datagram(Batcher, Node):
     bulk pair with short-packet framing, …) implement
     :meth:`flush_ops` to translate batched `Send` / `Recv` ops into
     transport-level operations.
+
+    Like :class:`acrobe.protocol.pipe.Pipe`, a `Datagram` is a bridge
+    point: handlers registered against :attr:`db` are spawned via
+    ``child_summon(name)`` with the datagram as their parent
+    transport (routed wrappers, protocol decoders, …).
     """
+
+    db = Db("Datagram handler")
 
     def __init__(self, name: str = "datagram"):
         Batcher.__init__(self)
@@ -84,3 +92,6 @@ class Datagram(Batcher, Node):
     async def flush_ops(self, batch):
         raise NotImplementedError(
             f"{type(self).__name__} must implement flush_ops")
+
+    async def child_spawn(self, name):
+        return await self.db.acall(name, self)

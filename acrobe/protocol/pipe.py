@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..db import Db
 from ..engine import Batcher
 from ..node import Node
 
@@ -48,7 +49,15 @@ class Pipe(Batcher, Node):
     Concrete subclasses (USB bulk, TCP, telnet, in-memory loopback)
     implement :meth:`flush_ops` to translate batched `Read` /
     `Write` ops into transport-level operations.
+
+    A `Pipe` is also a bridge point: handlers registered against
+    :attr:`db` are spawned via ``child_summon(name)`` and receive the
+    pipe as their parent transport (e.g. a JOP / NSL session, a
+    Telnet wrapper). This mirrors crobe's ``Pipe.child_spawn`` →
+    ``db.call(name, self)`` dispatch.
     """
+
+    db = Db("Pipe handler")
 
     def __init__(self, name: str = "pipe"):
         Batcher.__init__(self)
@@ -65,3 +74,6 @@ class Pipe(Batcher, Node):
     async def flush_ops(self, batch):
         raise NotImplementedError(
             f"{type(self).__name__} must implement flush_ops")
+
+    async def child_spawn(self, name):
+        return await self.db.acall(name, self)
