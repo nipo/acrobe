@@ -35,6 +35,8 @@ operation layer) and links the rest:
 
 * @docs/acrobe-structure.md — overall shape, layer boundaries,
   unified Node tree, where things live.
+* @docs/node-model.md — Node lifecycle, parenting, start/stop,
+  child lookup/spawn/summon, options, tree navigation.
 * @docs/adding-an-adapter.md — bringing up a new physical
   adapter (USB / network / FPGA-backed).
 * @docs/adding-a-target.md — bringing up a new chip target,

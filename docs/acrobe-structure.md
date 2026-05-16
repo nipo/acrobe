@@ -65,6 +65,9 @@ A small set of mixins on top of `Node` (`Readable`, `Writable`,
 operation layers all subclass `Node`, so the same `info
 enumerate` walk dumps everything in one go.
 
+For the full Node contract — lifecycle, parenting, start/stop,
+options, tree navigation — see `docs/node-model.md`.
+
 A second cross-cutting primitive is `acrobe.engine.Batcher`. Most
 Nodes that issue wire traffic mix it in: `post(op)` enqueues an
 op synchronously and returns a Future, `flush_ops(batch)` runs
@@ -446,6 +449,7 @@ acrobe/
 
 ## Where to read next
 
+* The Node contract itself: `docs/node-model.md`.
 * Building a new adapter: `docs/adding-an-adapter.md`.
 * Bringing up a new chip: `docs/adding-a-target.md`.
 * File formats and the `as(type=...)` syntax:

@@ -44,6 +44,18 @@ When adding a new chip, adapter, or format, register against the
 relevant `Db`. Do not wire an `if/elif` chain in a parent class —
 plugin registration must work without source edits.
 
+## Node-tree contract
+
+Anything in the live tree subclasses `acrobe.node.Node`. The base
+class defines parenting, async `start()` / `stop()` with
+top-down `start_tree` / `stop_tree` walks, idempotent
+single-flight startup, pre-populated vs on-demand children,
+`child_lookup` / `child_spawn` / `child_summon`, `option_set`,
+and the `children_of_class` / `parent_of_class` navigators. See
+`docs/node-model.md` for the full reference; subclasses follow
+that contract verbatim — do not re-invent lifecycle, do not add
+parallel parenting attributes.
+
 ## Lifecycle hooks for non-Node resources
 
 Anything holding a background context (sockets, USB handles,

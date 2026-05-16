@@ -55,7 +55,10 @@ one async IO contract.
 ### D1. One tree class: `Node`. Code organised by vendor / generic.
 
 Rename `Component` → `Node`. The base class moves from
-`acrobe/component/__init__.py` to `acrobe/node.py`.
+`acrobe/component/__init__.py` to `acrobe/node.py`. The full Node
+contract (lifecycle, parenting, lookup/spawn/summon, options,
+navigation) is documented separately in `docs/node-model.md`;
+this section only covers the VFS-relevant additions.
 
 All current `Component` subclasses and all new file-format classes
 inherit from `Node`. No `HardwareNode`/`FileNode` split: the API
