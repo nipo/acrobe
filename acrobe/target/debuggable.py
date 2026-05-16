@@ -157,7 +157,10 @@ class Debuggable(Node):
         return siblings[0] if siblings else None
 
     async def attach(self):
-        raise NotImplementedError
+        from .debug_auth import DebugAuth
+        auths = self._parent.children_of_class(DebugAuth) if self._parent else []
+        for auth in auths:
+            await auth.authorize(self)
 
     async def detach(self):
         raise NotImplementedError

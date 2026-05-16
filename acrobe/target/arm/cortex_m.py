@@ -337,6 +337,7 @@ class CortexMDebuggable(Debuggable):
         the first `info reg` shows zeros and GDB then trips itself
         up trying to unwind from PC=0.
         """
+        await super().attach()
         for core in self.cores:
             await core.scs.enable_debug()
         for core in self.cores:
