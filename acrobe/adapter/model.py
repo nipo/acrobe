@@ -262,6 +262,10 @@ def make_hw_root():
         root.add_enumerator(WireEnumerator())
     except ImportError:
         pass
+    from .tcp import TcpEnumerator
+    root.add_enumerator(TcpEnumerator())
+    from .udp import UdpEnumerator
+    root.add_enumerator(UdpEnumerator())
     return root
 
 
