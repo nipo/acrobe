@@ -1,7 +1,39 @@
 import logging
+import runpy
+
 import asyncclick as click
 
 from .. import log
+
+
+_LOADED_EXTENSIONS: set[str] = set()
+
+
+def _load_extension(path: str) -> None:
+    """Execute *path* once per process.
+
+    Used by the root group's ``-x`` option to register classes (Db
+    handlers, target probes, …) defined in an ad-hoc script before
+    the CLI walks any path. ``run_name`` is set to ``acrobe_ext`` so
+    a ported crobe-style ``if __name__ == "__main__":`` block in the
+    script stays dormant.
+    """
+    import os
+    abs_path = os.path.abspath(path)
+    if abs_path in _LOADED_EXTENSIONS:
+        return
+    _LOADED_EXTENSIONS.add(abs_path)
+    runpy.run_path(abs_path, run_name="acrobe_ext")
+
+
+def _exec_callback(ctx, param, value):
+    # ``value`` is a tuple of paths (multiple=True). Eager: this
+    # fires before the rest of the root-group options resolve, so
+    # registrations land before subcommand dispatch and target
+    # discovery.
+    for path in value or ():
+        _load_extension(path)
+    return value
 
 
 class AcrobeGroup(click.Group):
@@ -71,6 +103,16 @@ class CliContext:
 
 
 @click.group(cls=AcrobeGroup)
+@click.option('-x', '--exec', 'exec_paths',
+              multiple=True,
+              type=click.Path(exists=True, dir_okay=False),
+              is_eager=True, expose_value=False,
+              callback=_exec_callback,
+              help=("Load a Python file before running the command. "
+                    "Useful to register one-off Db handlers (SwDp / Ap / "
+                    "Datagram / Pipe subclasses) without packaging an "
+                    "acrobe_plugin entry point. May be passed multiple "
+                    "times; each path is loaded at most once."))
 @click.option('-v', '--verbose', count=True, help="More verbosity")
 @click.option('-q', '--quiet', count=True, help="Less verbosity (hide progress bars)")
 @click.option('-t', '--timestamp', is_flag=True, help="Add timestamps to log")
