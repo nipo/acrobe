@@ -10,3 +10,4 @@ from . import stapl  # noqa: F401
 from . import repl  # noqa: F401
 from . import run  # noqa: F401
 from . import wire  # noqa: F401
+from . import pico  # noqa: F401
