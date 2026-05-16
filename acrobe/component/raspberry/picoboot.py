@@ -27,8 +27,8 @@ Trampoline ABI
 Hand-assembled ARMv6-M Thumb code (verified against arm-none-eabi-as
 for cortex-m0plus):
 
-    0:  4f04        ldr  r7, [pc, #16]   ; r7 = &data area
-    2:  b500        push {lr}            ; save bootrom return
+    0:  b590        push {r4, r7, lr}    ; save callee-save regs
+    2:  4f04        ldr  r7, [pc, #16]   ; r7 = &data area
     4:  683c        ldr  r4, [r7, #0]    ; r4 = fn_pc
     6:  6878        ldr  r0, [r7, #4]    ; args[0]
     8:  68b9        ldr  r1, [r7, #8]    ; args[1]
@@ -36,8 +36,15 @@ for cortex-m0plus):
     c:  693b        ldr  r3, [r7, #16]   ; args[3]
     e:  47a0        blx  r4              ; call
    10:  6178        str  r0, [r7, #20]   ; result = r0
-   12:  bd00        pop  {pc}            ; return to bootrom
+   12:  bd90        pop  {r4, r7, pc}    ; restore + return
    14:  <data_addr>                      ; literal (patched at install)
+
+r4 and r7 are callee-saved per AAPCS — both are clobbered by
+this trampoline (r4 holds the function pointer through blx, r7
+holds the data-area base) so they must be saved/restored. Skip
+this and the bootrom returns from EXEC with stale r4/r7 in
+registers it expected preserved, and faults a few instructions
+later.
 
 The thunk returns normally rather than spinning: PICOBOOT EXEC
 runs in USB IRQ context and the bootrom holds the bulk-IN status
@@ -122,16 +129,16 @@ class PicobootPuppet(PuppetBase):
     """
 
     THUNK_CODE = bytes.fromhex(
+        "90b5"  # push {r4, r7, lr}
         "044f"  # ldr r7, [pc, #16]
-        "00b5"  # push {lr}
         "3c68"  # ldr r4, [r7, #0]
-        "6878"  # ldr r0, [r7, #4]
+        "7868"  # ldr r0, [r7, #4]
         "b968"  # ldr r1, [r7, #8]
         "fa68"  # ldr r2, [r7, #12]
         "3b69"  # ldr r3, [r7, #16]
         "a047"  # blx r4
         "7861"  # str r0, [r7, #20]
-        "00bd"  # pop {pc}
+        "90bd"  # pop {r4, r7, pc}
     )
 
     LITERAL_SIZE = 4
