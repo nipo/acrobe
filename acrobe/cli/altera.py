@@ -35,4 +35,5 @@ async def jop_server(ctx, root_path, tcp_port, host, mgmt_support):
     listener = JopListener(leaf, host=host, port=tcp_port,
                            mgmt_support=mgmt_support)
     click.echo(f"JoP server on {host}:{tcp_port} for {leaf.fqdn}")
+    click.echo(f"Add with jtagconfig --add JTAG-over-protocol sti://localhost:0/intel/remote-debug/{host}:{tcp_port}/0")
     await listener.serve_forever()
