@@ -41,7 +41,7 @@ vendor-specific Access Ports.
 
 ```
 HwRoot
-├── adapter-foo / swd / dap          ← component tree (adapters + APs + APs' children)
+├── adapter-foo / swd / dp           ← component tree (adapters + APs + APs' children)
 └── MyMcu                            ← Target (flat under root)
     ├── debug                        ← Debuggable (single per Target)
     │   └── cores

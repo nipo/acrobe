@@ -135,11 +135,27 @@ CoreSight bus under an ARM DP).
 
 ### SWD side
 
-Same shape, simpler: the SWD interface spawns an ARM `SwDp`,
-the DP enumerates its APs by walking APSEL space and matching
-each AP IDR against `Ap.db`, and each AP discovers what's at
-its base — typically a ROM table whose entries spawn more
-components (SCS, DWT, FPB, ITM, …).
+Same shape, simpler — and the SWD interface itself drives the
+bring-up. `swd.Interface.start()` posts the wire wake-up (line
+reset → JTAG-to-SWD switch → line reset → idle → DPIDR read) and
+then dispatches through `swd.Interface.db` (keyed on DPIDR with
+the REVISION nibble masked) to spawn the typed `Dp` subclass as
+its `"dp"` child. `SwDp` is the default; vendor variants can
+register specific DPIDR values. The DP then enumerates its APs
+by walking APSEL space (DPv0–v2) or the BASEPTR0 ROM table
+(ADIv6), each AP IDR matched against `Ap.db`, and each AP
+discovers what's at its base — typically a ROM table whose
+entries spawn more components (SCS, DWT, FPB, ITM, …).
+
+Canonical SWD path: `adapter/swd` for the wire, `adapter/swd/dp`
+for the Debug Port. Bare-wire SWD use without a DP isn't
+supported — a failure to identify a DP raises out of
+`Interface.start()`.
+
+Multidrop (multiple DPs sharing a wire, selected by TARGETSEL)
+is not in `Interface.start()` — the enumeration is expensive
+(scan every known TARGETSEL value), so it slots in as an
+on-demand `swd/multidrop` child when it lands.
 
 ### Other protocols
 

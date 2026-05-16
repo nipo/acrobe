@@ -185,6 +185,13 @@ The interface base classes are:
   pipelining (data lands on the *next* packet) is the
   interface's responsibility; callers post a `Read(ap=True)`
   and the resolved future already carries the real data.
+  `Interface.start()` itself drives wire bring-up (line reset,
+  JTAG-to-SWD switch, DPIDR read) and parents a typed `Dp`
+  child at `"dp"` via `Interface.db` (keyed on DPIDR, REVISION
+  masked). Adapter subclasses that need their own pre-bring-up
+  setup (mode select on the firmware side, default clock, …)
+  override `start` and call `await super().start()` at the end
+  so the wire init runs once the adapter is ready.
 * `acrobe.protocol.spi.Interface`, `acrobe.protocol.i2c.Interface`,
   `acrobe.protocol.serial.Interface` — same shape for the
   byte-stream protocols.
