@@ -115,8 +115,9 @@ class PicobootXipFlash(Flash):
 
 class PicobootLoadable(Loadable):
     """Loadable that takes/releases exclusive access around flash
-    operations and, when `do_start` is set, reboots the chip out
-    of BOOTSEL into the freshly-programmed firmware."""
+    operations, dispatches whole-chip erase to the SPI chip-erase
+    fast path, and (on `do_start`) reboots the chip out of BOOTSEL
+    into the freshly-programmed firmware."""
 
     def __init__(self, name: str, picoboot: Picoboot):
         super().__init__(name)
@@ -126,6 +127,49 @@ class PicobootLoadable(Loadable):
         # Exclusive-access mode 1 = exclusive (kicks out the USB MSC
         # interface so its auto-mount can't probe flash mid-program).
         await self.picoboot.transport.exclusive_access(1)
+        # Delegate to the base class so do_erase / assume_clean
+        # actually take effect — our override only adds the
+        # exclusive-access bracket.
+        await super().pre_program(
+            do_erase=do_erase, assume_clean=assume_clean)
+
+    async def erase_all(self):
+        """Whole-chip erase via the SPI passthrough's chip-erase
+        command (single 0xC7) — for an 8 MiB GD25Q64 that's one
+        SPI transaction vs ~2k per-sector FLASH_ERASE commands
+        through the bootrom (each one taking 30–50 ms on the wire).
+
+        Falls back to the default per-region erase loop if the SPI
+        path is unavailable for any reason.
+        """
+        target = self._parent
+        spi_ok = False
+        try:
+            flash = await target.child_summon("spi", "cs0", "flash")
+            self.logger.note(
+                "Mass-erase via SPI chip-erase (JEDEC 0x%06x)",
+                flash.jedec_id)
+            await flash.erase_chip()
+            spi_ok = True
+        except Exception as e:
+            self.logger.warning(
+                "SPI chip-erase failed (%s); falling back to "
+                "per-sector erase via bootrom", e)
+        finally:
+            # Tear the SPI subtree down whether erase succeeded or
+            # not — keeps `info target` clean and returns the stub
+            # zone to the puppet's allocator.
+            spi = target.child_lookup("spi")
+            if spi is not None:
+                try:
+                    await target.child_remove(spi)
+                except Exception:
+                    pass
+        if spi_ok:
+            for f in self.children_of_class(Flash):
+                f.is_blank = True
+        else:
+            await super().erase_all()
 
     async def post_program(self, *, success, do_start):
         # Release exclusive access before optionally rebooting —

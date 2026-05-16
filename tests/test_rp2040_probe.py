@@ -28,6 +28,7 @@ class MockPicobootTransport:
         self.erase_log: list[tuple[int, int]] = []
         self.exclusive_log: list[int] = []
         self.reboots: list[tuple[int, int, int]] = []
+        self.exec_log: list[int] = []
 
     def __offset(self, addr):
         return addr - XIP_BASE
@@ -50,7 +51,13 @@ class MockPicobootTransport:
             self.flash[p] = 0xFF
 
     async def exec(self, pc):
-        raise AssertionError("XIP flash path should never call exec")
+        # The SPI passthrough (SFDP probe, chip-erase fast path) will
+        # call exec; we just record it. The mock doesn't simulate
+        # the on-target stub, so downstream code that depends on
+        # the stub's effects (JEDEC ID read, chip-erase completion)
+        # will hit RuntimeError / TimeoutError — which is what we
+        # want to exercise the fallback paths.
+        self.exec_log.append(pc)
 
     async def exclusive_access(self, mode):
         self.exclusive_log.append(mode)
@@ -141,7 +148,28 @@ class TestProbeShape:
 
 class TestProgrammingRoute:
     @pytest.mark.asyncio
-    async def test_program_erases_then_writes(self):
+    async def test_program_default_does_per_sector_erase(self):
+        """Without --erase, plan_update erases only the sectors
+        that overlap the data being written."""
+        target, _, transport = await build_target()
+        from acrobe.target import Loadable
+        from acrobe.memory_map import MemoryMap
+        loadable = target.children_of_class(Loadable)[0]
+
+        m = MemoryMap()
+        m.append(XIP_BASE, b"\x55" * 256)
+        await loadable.write(m)
+
+        assert transport.exclusive_log == [1, 0]
+        # 256 bytes spans one 4 KiB sector.
+        assert transport.erase_log == [(XIP_BASE, 4096)]
+        assert (XIP_BASE, b"\x55" * 256) in transport.write_log
+
+    @pytest.mark.asyncio
+    async def test_program_erase_falls_back_to_full_region_erase(self):
+        """With --erase, erase_all runs first. SPI chip-erase fails
+        against this mock (no on-target stub simulation) so we
+        fall back to whole-region erase via the bootrom."""
         target, _, transport = await build_target()
         from acrobe.target import Loadable
         from acrobe.memory_map import MemoryMap
@@ -151,12 +179,14 @@ class TestProgrammingRoute:
         m.append(XIP_BASE, b"\x55" * 256)
         await loadable.write(m, do_erase=True)
 
-        # Exclusive access taken, then released.
-        assert transport.exclusive_log == [1, 0]
-        # Erase covered the one 4K sector that contains the written
-        # range, and a single 256-byte page write landed at the start.
-        assert transport.erase_log == [(XIP_BASE, 4096)]
-        # First write at the data start.
+        # SPI chip-erase was attempted (exec_log populated).
+        assert len(transport.exec_log) > 0
+        # Whole-region erase happened via bootrom fallback. After
+        # full erase, is_blank=True, so plan_update skips per-page
+        # erase.
+        assert (XIP_BASE, target.children_of_class(Loadable)[0]
+                .children_of_class(PicobootXipFlash)[0].size
+                ) in transport.erase_log
         assert (XIP_BASE, b"\x55" * 256) in transport.write_log
 
     @pytest.mark.asyncio
