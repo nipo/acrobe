@@ -4,6 +4,7 @@ from . import base
 from ..adapter.model import make_adapter_name
 from ..node import Node
 from ..protocol.jtag import Chain, Tap
+from ..util.pretty import base2
 
 
 def _tap_annotation(tap):
@@ -127,7 +128,7 @@ def _dump_view(view):
         regions = sorted(view.children_of_class(Region),
                          key=lambda r: r.address)
         for r in regions:
-            span = f"0x{r.address:08x}-0x{r.end:08x}  ({r.size:#x} bytes)"
+            span = f"0x{r.address:08x}-0x{r.end:08x}  ({base2(r.size, 'B')})"
             click.echo(f"    {type(r).__name__:<10} {r.name:<8} {span}")
         return
 
@@ -138,11 +139,11 @@ def _dump_view(view):
             click.echo(f"    (no regions)")
         for r in regions:
             kind = type(r).__name__
-            span = f"0x{r.address:08x}-0x{r.end:08x}  ({r.size:#x} bytes)"
+            span = f"0x{r.address:08x}-0x{r.end:08x}  ({base2(r.size, 'B')})"
             extras = []
             if isinstance(r, Flash):
-                extras.append(f"write_page={r.write_page_size:#x}")
-                extras.append(f"erase_pages={[hex(p) for p in r.erase_page_sizes]}")
+                extras.append(f"write_page={base2(r.write_page_size, 'B')}")
+                extras.append(f"erase_pages={'/'.join(base2(p, 'B') for p in r.erase_page_sizes)}")
                 extras.append(f"blank={r.is_blank}")
             tail = ("  " + "  ".join(extras)) if extras else ""
             click.echo(f"    {kind:<14} {r.name:<10} {span}{tail}")
