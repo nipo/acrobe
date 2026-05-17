@@ -37,40 +37,40 @@ class XvcClient(jtag.JtagInterface):
     def __init__(self, name: str, *, host: str, port: int = DEFAULT_PORT
                  ) -> None:
         super().__init__(name=name)
-        self._host = host
-        self._port = port
-        self._reader: asyncio.StreamReader | None = None
-        self._writer: asyncio.StreamWriter | None = None
-        self._encoder = JtagOpEncoder()
-        self._server_version: str = ""
+        self.__host = host
+        self.__port = port
+        self.__reader: asyncio.StreamReader | None = None
+        self.__writer: asyncio.StreamWriter | None = None
+        self.__encoder = JtagOpEncoder()
+        self.__server_version: str = ""
         # Server-advertised max payload bytes per shift: command. Capped
         # by the client to a sane lower bound if the server advertises
         # something unrealistic.
-        self._max_shift_bytes: int = 1024
+        self.__max_shift_bytes: int = 1024
         # Serialise concurrent flushes — the wire is a single TCP
         # stream, request/response is interleaved, can't be reordered.
-        self._wire_lock = asyncio.Lock()
+        self.__wire_lock = asyncio.Lock()
 
     # --- Lifecycle ---
 
     async def start(self) -> None:
-        self._reader, self._writer = await asyncio.open_connection(
-            self._host, self._port)
-        _logger.info("connected to xvc://%s:%d", self._host, self._port)
-        await self._handshake()
+        self.__reader, self.__writer = await asyncio.open_connection(
+            self.__host, self.__port)
+        _logger.info("connected to xvc://%s:%d", self.__host, self.__port)
+        await self.__handshake()
         # If a freq cap was registered before we were connected (children
         # added to the tree before start_tree() reached us), push it now.
         if self.freq is not None:
-            await self._do_settck(max(1, int(round(1e9 / self.freq))))
+            await self.__do_settck(max(1, int(round(1e9 / self.freq))))
         from ...lifecycle import on_shutdown
         on_shutdown(self.stop)
 
     async def stop(self) -> None:
         from ...lifecycle import cancel_shutdown
         cancel_shutdown(self.stop)
-        writer = self._writer
-        self._writer = None
-        self._reader = None
+        writer = self.__writer
+        self.__writer = None
+        self.__reader = None
         if writer is None:
             return
         try:
@@ -79,17 +79,17 @@ class XvcClient(jtag.JtagInterface):
         except Exception:
             pass
 
-    async def _handshake(self) -> None:
+    async def __handshake(self) -> None:
         """Send getinfo: and parse the server's version banner.
 
         The reply is ``xvcServer_v<MAJOR>.<MINOR>:<MAX_SHIFT_BYTES>\\n``.
         Anything else is fatal — the server is unusable.
         """
-        assert self._writer is not None and self._reader is not None
-        self._writer.write(wire.CMD_GETINFO)
-        await self._writer.drain()
+        assert self.__writer is not None and self.__reader is not None
+        self.__writer.write(wire.CMD_GETINFO)
+        await self.__writer.drain()
         # The banner is short and \n-terminated — readline is enough.
-        line = await self._reader.readline()
+        line = await self.__reader.readline()
         if not line:
             raise XvcProtocolError("server closed before getinfo: reply")
         text = line.rstrip(b"\r\n").decode("ascii", errors="replace")
@@ -97,7 +97,7 @@ class XvcClient(jtag.JtagInterface):
         if not m:
             raise XvcProtocolError(
                 f"unexpected getinfo: reply {text!r}")
-        self._server_version = m.group(1)
+        self.__server_version = m.group(1)
         advertised = int(m.group(2))
         if advertised < 16:
             # Clearly bogus — keep the conservative default. Spec
@@ -105,11 +105,11 @@ class XvcClient(jtag.JtagInterface):
             # than a few bytes makes the protocol useless.
             _logger.warning("server advertises max_shift_bytes=%d (too "
                             "small); keeping client default of %d",
-                            advertised, self._max_shift_bytes)
+                            advertised, self.__max_shift_bytes)
         else:
-            self._max_shift_bytes = advertised
+            self.__max_shift_bytes = advertised
         _logger.info("xvc server %s, max_shift_bytes=%d",
-                     self._server_version, self._max_shift_bytes)
+                     self.__server_version, self.__max_shift_bytes)
 
     # --- Frequency control ---
 
@@ -124,13 +124,13 @@ class XvcClient(jtag.JtagInterface):
         """
         if freq is None or freq <= 0:
             return None
-        if self._writer is None:
+        if self.__writer is None:
             # Not connected yet; remember the request and apply on start.
             return freq
         # We have to push the new TCK before any subsequent shift:,
         # so do it synchronously by spawning a serialised task.
         period_ns = max(1, int(round(1e9 / freq)))
-        task = asyncio.create_task(self._do_settck(period_ns))
+        task = asyncio.create_task(self.__do_settck(period_ns))
         # We don't await here — the caller is FreqCapper.__recalculate,
         # which is sync. The settck round-trip serialises behind the
         # wire_lock with any pending shift:.
@@ -140,14 +140,14 @@ class XvcClient(jtag.JtagInterface):
         task.add_done_callback(_log_settck_result)
         return freq
 
-    async def _do_settck(self, period_ns: int) -> int:
+    async def __do_settck(self, period_ns: int) -> int:
         """Send settck: and return the achieved period (ns)."""
-        async with self._wire_lock:
-            assert self._writer is not None and self._reader is not None
-            self._writer.write(wire.CMD_SETTCK
+        async with self.__wire_lock:
+            assert self.__writer is not None and self.__reader is not None
+            self.__writer.write(wire.CMD_SETTCK
                                 + struct.pack("<L", period_ns))
-            await self._writer.drain()
-            reply = await self._reader.readexactly(4)
+            await self.__writer.drain()
+            reply = await self.__reader.readexactly(4)
             achieved_ns, = struct.unpack("<L", reply)
             _logger.debug("settck: requested %d ns, server replied %d ns",
                           period_ns, achieved_ns)
@@ -158,13 +158,13 @@ class XvcClient(jtag.JtagInterface):
     async def flush_ops(self, batch: list) -> None:
         """Lower a batch of ops into TMS/TDI, run them through the
         server, distribute TDO back into Shift ops."""
-        if self._writer is None:
+        if self.__writer is None:
             raise RuntimeError(
                 f"XvcClient {self.name!r} not connected")
 
         ops = [op for op, _f in batch]
         try:
-            tms, tdi, slots = self._encoder.encode(ops)
+            tms, tdi, slots = self.__encoder.encode(ops)
         except Exception as exc:
             for _, future in batch:
                 if not future.done():
@@ -172,7 +172,7 @@ class XvcClient(jtag.JtagInterface):
             return
 
         try:
-            tdo = await self._wire_shift(tms, tdi)
+            tdo = await self.__wire_shift(tms, tdi)
         except Exception as exc:
             for _, future in batch:
                 if not future.done():
@@ -191,7 +191,7 @@ class XvcClient(jtag.JtagInterface):
                 continue
             future.set_result(captured.get(id(op)))
 
-    async def _wire_shift(self, tms: BitString, tdi: BitString
+    async def __wire_shift(self, tms: BitString, tdi: BitString
                            ) -> BitString:
         """Send one or more ``shift:`` commands covering the whole
         (tms, tdi) and concatenate TDO replies."""
@@ -202,10 +202,10 @@ class XvcClient(jtag.JtagInterface):
         if total_bits == 0:
             return BitString()
 
-        bits_per_chunk = self._max_shift_bytes * 8
+        bits_per_chunk = self.__max_shift_bytes * 8
         result = BitString()
-        async with self._wire_lock:
-            assert self._writer is not None and self._reader is not None
+        async with self.__wire_lock:
+            assert self.__writer is not None and self.__reader is not None
             for start in range(0, total_bits, bits_per_chunk):
                 end = min(start + bits_per_chunk, total_bits)
                 chunk_bits = end - start
@@ -217,17 +217,17 @@ class XvcClient(jtag.JtagInterface):
                 # protocol expects.
                 tms_data = tms_slice.data.ljust(chunk_bytes, b"\0")
                 tdi_data = tdi_slice.data.ljust(chunk_bytes, b"\0")
-                self._writer.write(wire.CMD_SHIFT
+                self.__writer.write(wire.CMD_SHIFT
                                     + struct.pack("<L", chunk_bits)
                                     + tms_data + tdi_data)
-                await self._writer.drain()
-                tdo_bytes = await self._reader.readexactly(chunk_bytes)
+                await self.__writer.drain()
+                tdo_bytes = await self.__reader.readexactly(chunk_bytes)
                 result.append(tdo_bytes, chunk_bits)
         return result
 
     def __repr__(self) -> str:
-        return (f"<XvcClient {self._name} {self._host}:{self._port} "
-                f"server={self._server_version!r}>")
+        return (f"<XvcClient {self._name} {self.__host}:{self.__port} "
+                f"server={self.__server_version!r}>")
 
 
 def _log_settck_result(task: asyncio.Task) -> None:
