@@ -85,9 +85,9 @@ class PicobootSpiInterface(spi.Interface):
         super().__init__(adapter=None, name=name)
         self.picoboot = picoboot
         self.puppet = puppet
-        self._marker_offset = SPI_TRANSACT_STUB.index(
+        self.__marker_offset = SPI_TRANSACT_STUB.index(
             PLACEHOLDER.to_bytes(4, "little"))
-        self._stub_zone = None
+        self.__stub_zone = None
 
         self.child_add(spi.Target(self, cs=0, mode=0, name="cs0"))
 
@@ -105,22 +105,22 @@ class PicobootSpiInterface(spi.Interface):
         await self.picoboot.transport.exit_xip()
 
     async def __ensure_stub(self):
-        if self._stub_zone is not None:
+        if self.__stub_zone is not None:
             return
-        self._stub_zone = self.puppet.allocate(
+        self.__stub_zone = self.puppet.allocate(
             len(SPI_TRANSACT_STUB), align=4)
-        await self._stub_zone.write(SPI_TRANSACT_STUB)
+        await self.__stub_zone.write(SPI_TRANSACT_STUB)
         self.logger.protocol(
             "SPI stub installed at 0x%08x (%d bytes)",
-            self._stub_zone.address, len(SPI_TRANSACT_STUB))
+            self.__stub_zone.address, len(SPI_TRANSACT_STUB))
 
     async def stop(self):
         # Return the stub zone to the shared puppet allocator so a
         # later spawn (or other code using the same puppet) can
         # reuse the space.
-        if self._stub_zone is not None:
-            self.puppet.unallocate(self._stub_zone)
-            self._stub_zone = None
+        if self.__stub_zone is not None:
+            self.puppet.unallocate(self.__stub_zone)
+            self.__stub_zone = None
 
     async def flush_ops(self, batch):
         await self.__ensure_stub()
@@ -167,10 +167,10 @@ class PicobootSpiInterface(spi.Interface):
             # Patch the stub's placeholder with the cmd-array
             # address. One 4-byte mem_write at a known offset.
             await self.puppet.transport.write(
-                self._stub_zone.address + self._marker_offset,
+                self.__stub_zone.address + self.__marker_offset,
                 cmd_buf_addr.to_bytes(4, "little"))
 
-            await self.puppet.prepare(self._stub_zone.address | 1)
+            await self.puppet.prepare(self.__stub_zone.address | 1)
             await self.puppet.run()
             await self.puppet.wait(timeout=self.EXEC_TIMEOUT_S)
 

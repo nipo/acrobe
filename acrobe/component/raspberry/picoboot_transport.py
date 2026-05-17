@@ -163,14 +163,14 @@ class PicobootUsbTransport:
     def __init__(self, device, interface_index: int,
                  ep_out: BulkOutEndpoint, ep_in: BulkInEndpoint,
                  mps: int, logger: logging.Logger):
-        self._device = device
-        self._interface = interface_index
-        self._ep_out = ep_out
-        self._ep_in = ep_in
-        self._mps = mps
-        self._lock = asyncio.Lock()
-        self._logger = logger
-        self._token = 0
+        self.__device = device
+        self.__interface = interface_index
+        self.__ep_out = ep_out
+        self.__ep_in = ep_in
+        self.__mps = mps
+        self.__lock = asyncio.Lock()
+        self.__logger = logger
+        self.__token = 0
 
     @classmethod
     async def from_device(cls, device, *,
@@ -179,7 +179,7 @@ class PicobootUsbTransport:
         if logger is None:
             logger = logging.getLogger("picoboot.transport")
 
-        iface, ep_out_addr, ep_in_addr, mps = cls._find_interface(device)
+        iface, ep_out_addr, ep_in_addr, mps = cls.__find_interface(device)
 
         try:
             device.handle.detachKernelDriver(iface)
@@ -201,7 +201,7 @@ class PicobootUsbTransport:
         return transport
 
     @staticmethod
-    def _find_interface(device):
+    def __find_interface(device):
         """Locate the PICOBOOT interface — first vendor-class interface
         (class 0xFF, subclass 0, protocol 0) with a bulk OUT and bulk
         IN endpoint. Returns
@@ -234,39 +234,39 @@ class PicobootUsbTransport:
     async def reset_interface(self):
         """``RESET_INTERFACE`` (control OUT 0x41). Aborts any pending
         command in the bootrom. Idempotent."""
-        await self._device.control(
+        await self.__device.control(
             RequestTypeType.Vendor, RequestTypeRecipient.Interface,
-            CTRL_RESET_INTERFACE, 0, self._interface, b"")
-        self._logger.debug("PICOBOOT reset_interface")
+            CTRL_RESET_INTERFACE, 0, self.__interface, b"")
+        self.__logger.debug("PICOBOOT reset_interface")
 
     async def read_command_status(self) -> tuple[int, int, int, int]:
         """``GET_COMMAND_STATUS`` (control IN 0x42). Returns
         ``(token, status_code, cmd_id, in_progress)``."""
-        blob = await self._device.control(
+        blob = await self.__device.control(
             RequestTypeType.Vendor, RequestTypeRecipient.Interface,
-            CTRL_GET_COMMAND_STATUS, 0, self._interface, 16)
+            CTRL_GET_COMMAND_STATUS, 0, self.__interface, 16)
         return parse_status(blob)
 
-    def _next_token(self):
-        self._token = (self._token + 1) & 0xFFFFFFFF
-        return self._token
+    def __next_token(self):
+        self.__token = (self.__token + 1) & 0xFFFFFFFF
+        return self.__token
 
-    async def _bulk_in_until(self, size: int) -> bytes:
+    async def __bulk_in_until(self, size: int) -> bytes:
         """Read up to ``size`` bytes from the bulk-IN endpoint. Stop
         early on a short packet (the bootrom's end-of-frame marker)."""
         if size == 0:
             # ZLP ack — request MPS but accept whatever lands (0..MPS).
-            chunk = await self._ep_in.read(self._mps)
+            chunk = await self.__ep_in.read(self.__mps)
             return bytes(chunk)
         buf = bytearray()
         while len(buf) < size:
-            chunk = await self._ep_in.read(self._mps)
+            chunk = await self.__ep_in.read(self.__mps)
             buf.extend(chunk)
-            if len(chunk) < self._mps:
+            if len(chunk) < self.__mps:
                 break
         return bytes(buf[:size])
 
-    async def _execute(self, cmd_id: int, args: bytes, *,
+    async def __execute(self, cmd_id: int, args: bytes, *,
                        in_size: int = 0,
                        out_data: bytes | None = None,
                        timeout: float = DEFAULT_TIMEOUT_S) -> bytes:
@@ -285,11 +285,11 @@ class PicobootUsbTransport:
         transfer_length = (
             in_size if in_size > 0
             else (len(out_data) if out_data else 0))
-        token = self._next_token()
+        token = self.__next_token()
         header = build_command(token, cmd_id, transfer_length, args)
 
-        async with self._lock:
-            self._logger.protocol(
+        async with self.__lock:
+            self.__logger.protocol(
                 "PICOBOOT cmd 0x%02x token=%d transfer=%d",
                 cmd_id, token, transfer_length)
             try:
@@ -303,18 +303,18 @@ class PicobootUsbTransport:
                 raise  # __surface_error always raises, but keep typed
 
     async def __execute_locked(self, cmd_id, header, in_size, out_data):
-        await self._ep_out.write(header)
+        await self.__ep_out.write(header)
         if cmd_id & 0x80:
             # IN direction: read data, then send ZLP ack.
-            data = await self._bulk_in_until(in_size)
-            await self._ep_out.write(b"")
+            data = await self.__bulk_in_until(in_size)
+            await self.__ep_out.write(b"")
             return data
         # OUT direction: send data (if any), then read ZLP ack. The
         # bootrom holds this IN packet until the command completes
         # (including the EXEC'd function returning).
         if out_data:
-            await self._ep_out.write(out_data)
-        await self._bulk_in_until(0)
+            await self.__ep_out.write(out_data)
+        await self.__bulk_in_until(0)
         return b""
 
     async def __surface_error(self, cmd_id, original):
@@ -337,19 +337,19 @@ class PicobootUsbTransport:
         if size == 0:
             return b""
         args = struct.pack("<II", addr, size)
-        return await self._execute(CMD_READ, args, in_size=size)
+        return await self.__execute(CMD_READ, args, in_size=size)
 
     async def write(self, addr: int, data: bytes) -> None:
         if not data:
             return
         args = struct.pack("<II", addr, len(data))
-        await self._execute(CMD_WRITE, args, out_data=bytes(data))
+        await self.__execute(CMD_WRITE, args, out_data=bytes(data))
 
     async def exec(self, pc: int) -> None:
         # Address must have the Thumb bit set on Cortex-M0+. The
         # puppet does this already; OR-in here defensively too.
         args = struct.pack("<I", pc | 1)
-        await self._execute(CMD_EXEC, args, timeout=self.EXEC_TIMEOUT_S)
+        await self.__execute(CMD_EXEC, args, timeout=self.EXEC_TIMEOUT_S)
 
     # -- Other PICOBOOT operations ------------------------------------
 
@@ -357,16 +357,16 @@ class PicobootUsbTransport:
         """Take/release exclusive access. 0=shared, 1=exclusive,
         2=exclusive-eject (kicks USB MSC out of the way)."""
         args = struct.pack("<B", exclusive & 0xFF)
-        await self._execute(CMD_EXCLUSIVE_ACCESS, args)
+        await self.__execute(CMD_EXCLUSIVE_ACCESS, args)
 
     async def exit_xip(self) -> None:
         """Take the QSPI flash out of XIP mode so direct register
         access works. Required before driving SSI by hand."""
-        await self._execute(CMD_EXIT_XIP, b"")
+        await self.__execute(CMD_EXIT_XIP, b"")
 
     async def enter_cmd_xip(self) -> None:
         """Re-enter XIP mode using the bootrom's default sequence."""
-        await self._execute(CMD_ENTER_CMD_XIP, b"")
+        await self.__execute(CMD_ENTER_CMD_XIP, b"")
 
     async def flash_erase(self, addr: int, size: int) -> None:
         if addr & 0xFFF or size & 0xFFF:
@@ -374,13 +374,13 @@ class PicobootUsbTransport:
                 f"flash_erase must be 4 KiB aligned: "
                 f"addr=0x{addr:08x} size=0x{size:08x}")
         args = struct.pack("<II", addr, size)
-        await self._execute(CMD_FLASH_ERASE, args,
+        await self.__execute(CMD_FLASH_ERASE, args,
                             timeout=self.EXEC_TIMEOUT_S)
 
     async def vectorize_flash(self, addr: int) -> None:
         """Reboot using a vector table read from flash at ``addr``."""
         args = struct.pack("<I", addr)
-        await self._execute(CMD_VECTORIZE_FLASH, args)
+        await self.__execute(CMD_VECTORIZE_FLASH, args)
 
     async def reboot(self, pc: int = 0, sp: int = 0,
                      delay_ms: int = 100) -> None:
@@ -390,7 +390,7 @@ class PicobootUsbTransport:
         from USB before the ack arrives."""
         args = struct.pack("<III", pc, sp, delay_ms)
         try:
-            await self._execute(CMD_REBOOT, args, timeout=0.5)
+            await self.__execute(CMD_REBOOT, args, timeout=0.5)
         except (PicobootError, TimeoutError, TransferError):
             pass
 
@@ -405,6 +405,6 @@ class PicobootUsbTransport:
         except Exception:
             pass
         try:
-            self._device.handle.releaseInterface(self._interface)
+            self.__device.handle.releaseInterface(self.__interface)
         except Exception:
             pass
