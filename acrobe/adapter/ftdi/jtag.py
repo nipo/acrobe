@@ -34,12 +34,12 @@ class JtagMpsse(jtag.JtagInterface):
 
     def __init__(self, engine: MpsseEngine):
         super().__init__()
-        self._engine = engine
-        self._state = self.STATE_UNKNOWN
-        self._gpio_oe = 0
-        self._gpio_val = 0
-        self._clock_state = None
-        self._read_pol = "+"
+        self.__engine = engine
+        self.__state = self.STATE_UNKNOWN
+        self.__gpio_oe = 0
+        self.__gpio_val = 0
+        self.__clock_state = None
+        self.__read_pol = "+"
 
     def freq_update(self, freq):
         """Compute and apply clock divisor for the requested frequency.
@@ -51,7 +51,7 @@ class JtagMpsse(jtag.JtagInterface):
         setup margin (matches crobe behavior).
         """
         if freq is None:
-            self._read_pol = "+"
+            self.__read_pol = "+"
             return None
 
         # Clock calculation for FT2232H (60 MHz base):
@@ -70,13 +70,13 @@ class JtagMpsse(jtag.JtagInterface):
 
         # At high clock rates, sample TDO on the falling edge to give
         # extra propagation margin (full period instead of half).
-        self._read_pol = "-" if actual >= 10e6 else "+"
+        self.__read_pol = "-" if actual >= 10e6 else "+"
 
         new_state = (div5, divisor)
-        if new_state != self._clock_state:
-            self._clock_state = new_state
-            self._engine.post(ClockDiv5(div5))
-            self._engine.post(ClockDivisor(divisor))
+        if new_state != self.__clock_state:
+            self.__clock_state = new_state
+            self.__engine.post(ClockDiv5(div5))
+            self.__engine.post(ClockDivisor(divisor))
 
         return actual
 
@@ -93,8 +93,8 @@ class JtagMpsse(jtag.JtagInterface):
         """
         # TCK=bit0, TDI=bit1, TMS=bit3 as outputs; TDO=bit2 as input
         jtag_oe = 0x0B
-        self._gpio_oe = jtag_oe | gpio_oe
-        self._gpio_val = gpio_val
+        self.__gpio_oe = jtag_oe | gpio_oe
+        self.__gpio_val = gpio_val
 
         self.freq_update(freq)
 
@@ -102,16 +102,16 @@ class JtagMpsse(jtag.JtagInterface):
             ThreePhase(False),
             Adaptive(False),
             Loopback(False),
-            SetBitsLow(self._gpio_val & 0xFF, self._gpio_oe & 0xFF),
+            SetBitsLow(self.__gpio_val & 0xFF, self.__gpio_oe & 0xFF),
         ]
-        if self._gpio_oe & 0xFF00:
+        if self.__gpio_oe & 0xFF00:
             ops.append(SetBitsHigh(
-                (self._gpio_val >> 8) & 0xFF,
-                (self._gpio_oe >> 8) & 0xFF))
+                (self.__gpio_val >> 8) & 0xFF,
+                (self.__gpio_oe >> 8) & 0xFF))
 
-        futures = [self._engine.post(op) for op in ops]
+        futures = [self.__engine.post(op) for op in ops]
         await asyncio.gather(*futures)
-        self._state = self.STATE_UNKNOWN
+        self.__state = self.STATE_UNKNOWN
 
     async def flush_ops(self, batch):
         """Translate JTAG operations to MPSSE and post them.
@@ -132,20 +132,20 @@ class JtagMpsse(jtag.JtagInterface):
             tdo_range = None
 
             if isinstance(op, (jtag.Reset, jtag.SwdToJtag)):
-                self._emit_tms_pattern(mpsse_ops, op.tms)
-                self._state = self.STATE_RESET
+                self.__emit_tms_pattern(mpsse_ops, op.tms)
+                self.__state = self.STATE_RESET
 
             elif isinstance(op, jtag.Run):
-                self._emit_run(mpsse_ops, op.cycles)
+                self.__emit_run(mpsse_ops, op.cycles)
 
             elif isinstance(op, jtag.CaptureDr):
-                self._emit_capture_dr(mpsse_ops)
+                self.__emit_capture_dr(mpsse_ops)
 
             elif isinstance(op, jtag.CaptureIr):
-                self._emit_capture_ir(mpsse_ops)
+                self.__emit_capture_ir(mpsse_ops)
 
             elif isinstance(op, jtag.Shift):
-                start, end = self._emit_shift(mpsse_ops, op)
+                start, end = self.__emit_shift(mpsse_ops, op)
                 if op.read_tdo:
                     tdo_range = (start, end)
 
@@ -170,18 +170,18 @@ class JtagMpsse(jtag.JtagInterface):
         # shifts), but skipping per-op futures saves thousands of
         # asyncio.Future allocations per chunk.
         for op in mpsse_ops[:-1]:
-            self._engine.post_no_wait(op)
-        last_future = self._engine.post(mpsse_ops[-1])
+            self.__engine.post_no_wait(op)
+        last_future = self.__engine.post(mpsse_ops[-1])
 
         last_future.add_done_callback(
             lambda _lf,
                    anchors=op_anchors,
                    ops=mpsse_ops,
                    anchor=last_future:
-                JtagMpsse._resolve_batch(anchors, ops, anchor))
+                JtagMpsse.__resolve_batch(anchors, ops, anchor))
 
     @staticmethod
-    def _resolve_batch(op_anchors, mpsse_ops, anchor_future):
+    def __resolve_batch(op_anchors, mpsse_ops, anchor_future):
         """Single-pass resolution of every batch-op future. Reads
         directly from ``mpsse_ops[start:end].data`` for read shifts —
         those attributes are populated by MpsseEngine.read_done in
@@ -214,22 +214,22 @@ class JtagMpsse(jtag.JtagInterface):
 
     # --- State machine helpers ---
 
-    def _emit_tms_pattern(self, mpsse_ops, tms):
+    def __emit_tms_pattern(self, mpsse_ops, tms):
         """Emit TMS bit pattern as ShiftTms ops (max 7 bits each)."""
         for off in range(0, len(tms), 7):
             chunk = min(7, len(tms) - off)
             mpsse_ops.append(ShiftTms(int(tms[off:off + chunk]), chunk))
 
-    def _emit_run(self, mpsse_ops, cycles):
+    def __emit_run(self, mpsse_ops, cycles):
         """Emit Run-Test/Idle transition and clock cycles."""
-        if self._state == self.STATE_PAUSE:
+        if self.__state == self.STATE_PAUSE:
             # Pause → Exit2 → Update
             mpsse_ops.append(ShiftTms(0b11, 2))
-            self._state = self.STATE_RTI
-        elif self._state == self.STATE_RESET:
-            self._state = self.STATE_RTI
+            self.__state = self.STATE_RTI
+        elif self.__state == self.STATE_RESET:
+            self.__state = self.STATE_RTI
 
-        if self._state == self.STATE_RTI:
+        if self.__state == self.STATE_RTI:
             # TMS=0 keeps us in RTI (or enters RTI from TLR/Update)
             mpsse_ops.append(ShiftTms(0b0, 1))
             left = max(cycles - 1, 0)
@@ -243,31 +243,31 @@ class JtagMpsse(jtag.JtagInterface):
             # Unknown state: reset first
             mpsse_ops.append(ShiftTms(0b11111, 5))
             mpsse_ops.append(ShiftTms(0b0, 1))
-            self._state = self.STATE_RTI
+            self.__state = self.STATE_RTI
 
-    def _emit_capture_dr(self, mpsse_ops):
+    def __emit_capture_dr(self, mpsse_ops):
         """Emit RTI/Update → Capture-DR → Pause-DR transition."""
-        if self._state == self.STATE_PAUSE:
+        if self.__state == self.STATE_PAUSE:
             # Pause → Exit2 → Update (then fall through)
             mpsse_ops.append(ShiftTms(0b11, 2))
-        elif self._state != self.STATE_RTI:
-            raise ValueError(f"CaptureDr from unexpected state: {self._state}")
+        elif self.__state != self.STATE_RTI:
+            raise ValueError(f"CaptureDr from unexpected state: {self.__state}")
         # RTI/Update → Select-DR → Capture-DR → Exit1-DR → Pause-DR
         mpsse_ops.append(ShiftTms(0b0101, 4))
-        self._state = self.STATE_PAUSE
+        self.__state = self.STATE_PAUSE
 
-    def _emit_capture_ir(self, mpsse_ops):
+    def __emit_capture_ir(self, mpsse_ops):
         """Emit RTI/Update → Capture-IR → Pause-IR transition."""
-        if self._state == self.STATE_PAUSE:
+        if self.__state == self.STATE_PAUSE:
             # Pause → Exit2 → Update (then fall through)
             mpsse_ops.append(ShiftTms(0b11, 2))
-        elif self._state != self.STATE_RTI:
-            raise ValueError(f"CaptureIr from unexpected state: {self._state}")
+        elif self.__state != self.STATE_RTI:
+            raise ValueError(f"CaptureIr from unexpected state: {self.__state}")
         # RTI/Update → Sel-DR → Sel-IR → Cap-IR → Ex1-IR → Pause-IR
         mpsse_ops.append(ShiftTms(0b01011, 5))
-        self._state = self.STATE_PAUSE
+        self.__state = self.STATE_PAUSE
 
-    def _emit_shift(self, mpsse_ops, op):
+    def __emit_shift(self, mpsse_ops, op):
         """Emit Pause → Shift → data → Exit1 → Pause/RTI.
 
         If ``op.post_run`` is non-zero, the trailing framing goes
@@ -278,7 +278,7 @@ class JtagMpsse(jtag.JtagInterface):
 
         Returns (mpsse_start, mpsse_end) indices of ops contributing to TDO.
         """
-        assert self._state == self.STATE_PAUSE
+        assert self.__state == self.STATE_PAUSE
 
         tdi = op.tdi
         read = op.read_tdo
@@ -293,8 +293,8 @@ class JtagMpsse(jtag.JtagInterface):
                 # Empty shift but caller still wants trailing idle.
                 # Pause → Exit2 → Update → RTI, then idle.
                 mpsse_ops.append(ShiftTms(0b011, 3))
-                self._state = self.STATE_RTI
-                self._emit_idle_in_rti(mpsse_ops, post_run)
+                self.__state = self.STATE_RTI
+                self.__emit_idle_in_rti(mpsse_ops, post_run)
             return (len(mpsse_ops), len(mpsse_ops))
 
         # Pause → Exit2 → Shift
@@ -306,7 +306,7 @@ class JtagMpsse(jtag.JtagInterface):
         offset = 0
 
         # Shift all but the last bit
-        read_pol = self._read_pol
+        read_pol = self.__read_pol
         while left >= 8:
             c = min(left, 65536 * 8) & ~7
             chunk = tdi[offset:offset + c]
@@ -329,8 +329,8 @@ class JtagMpsse(jtag.JtagInterface):
             # Exit1 → Update → RTI (TMS=0,1 LSB-first → 0b01 sent
             # over 2 cycles), then idle TCKs.
             mpsse_ops.append(ShiftTms(0b01, 2))
-            self._state = self.STATE_RTI
-            self._emit_idle_in_rti(mpsse_ops, post_run)
+            self.__state = self.STATE_RTI
+            self.__emit_idle_in_rti(mpsse_ops, post_run)
         else:
             # Exit1 → Pause
             mpsse_ops.append(ShiftTms(0b0, 1))
@@ -339,7 +339,7 @@ class JtagMpsse(jtag.JtagInterface):
         return (mpsse_start, mpsse_end)
 
     @staticmethod
-    def _emit_idle_in_rti(mpsse_ops, cycles):
+    def __emit_idle_in_rti(mpsse_ops, cycles):
         """Emit ``cycles`` idle TCKs assuming the FSM is already in
         Run-Test/Idle (TMS held low). Splits into ClockBytes for full
         bytes and a tail ClockBits."""

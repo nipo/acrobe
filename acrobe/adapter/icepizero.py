@@ -30,7 +30,7 @@ class IcePiZero(Node):
         if name.lower() == "jtag":
             oe_mask = (1 << self.TCK) | (1 << self.TMS) | (1 << self.TDI)
             transport = await FtdiTransport.from_device_bitbang(
-                self._adapter._device, oe_mask=oe_mask)
+                self._adapter.device, oe_mask=oe_mask)
             return JtagBitbang(transport,
                                tck=self.TCK, tms=self.TMS,
                                tdi=self.TDI, tdo=self.TDO,

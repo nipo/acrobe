@@ -17,7 +17,7 @@ class GenericFtdiAdapter(Adapter):
 
     def __init__(self, name, device):
         super().__init__(name)
-        self._device = device
+        self.device = device
 
     @classmethod
     async def open(cls, descriptor):
@@ -33,4 +33,4 @@ class GenericFtdiAdapter(Adapter):
         return await self.board_db.acall(name, self)
 
     async def close(self):
-        self._device.handle.close()
+        self.device.handle.close()

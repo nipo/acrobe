@@ -107,28 +107,28 @@ class SwdMpsse(swd.Interface):
         if (oen_pin is None) == (oe_pin is None):
             raise ValueError(
                 "SwdMpsse: pass exactly one of oen_pin / oe_pin")
-        self._engine = engine
+        self.__engine = engine
         # Pin index 0..15. Bits 0..3 are TCK/TDI/TDO/TMS; the OE pin
         # MUST land in 4..15 to avoid clobbering MPSSE's own signals.
         bit = oe_pin if oen_pin is None else oen_pin
         if not (4 <= bit <= 15):
             raise ValueError(
                 f"SwdMpsse: OE pin must be in [4..15], got {bit}")
-        self._oe_bit = bit
+        self.__oe_bit = bit
         # Value driven on the OE pin to make the host source SWDIO:
         # active-low OE → 0; active-high OE → 1.
-        self._oe_host_value = 0 if oen_pin is not None else 1
-        self._gpio_oe = 0
-        self._gpio_val = 0
-        self._side = None       # current OE side; flushed lazily.
-        self._clock_state = None
-        self._read_pol = "+"
+        self.__oe_host_value = 0 if oen_pin is not None else 1
+        self.__gpio_oe = 0
+        self.__gpio_val = 0
+        self.__side = None       # current OE side; flushed lazily.
+        self.__clock_state = None
+        self.__read_pol = "+"
 
     # --- frequency / clock-divisor (mirrors JtagMpsse) ---------------
 
     def freq_update(self, freq):
         if freq is None:
-            self._read_pol = "+"
+            self.__read_pol = "+"
             return None
 
         best = None
@@ -140,13 +140,13 @@ class SwdMpsse(swd.Interface):
         actual, div5, divisor = best
 
         # Sample TDO on the falling edge above 10 MHz for setup margin.
-        self._read_pol = "-" if actual >= 10e6 else "+"
+        self.__read_pol = "-" if actual >= 10e6 else "+"
 
         new_state = (div5, divisor)
-        if new_state != self._clock_state:
-            self._clock_state = new_state
-            self._engine.post(ClockDiv5(div5))
-            self._engine.post(ClockDivisor(divisor))
+        if new_state != self.__clock_state:
+            self.__clock_state = new_state
+            self.__engine.post(ClockDiv5(div5))
+            self.__engine.post(ClockDivisor(divisor))
 
         return actual
 
@@ -164,13 +164,13 @@ class SwdMpsse(swd.Interface):
         in TCK/TDI/TMS/OE on top.
         """
         # TCK=bit0, TDI=bit1, TMS=bit3 are outputs; TDO=bit2 is input.
-        mpsse_oe = 0x0B | (1 << self._oe_bit)
-        self._gpio_oe = mpsse_oe | gpio_oe
+        mpsse_oe = 0x0B | (1 << self.__oe_bit)
+        self.__gpio_oe = mpsse_oe | gpio_oe
         # Force the OE pin to the host-drive value at idle.
-        bit_mask = 1 << self._oe_bit
-        oe_val = self._oe_host_value << self._oe_bit
-        self._gpio_val = (gpio_val & ~bit_mask) | oe_val
-        self._side = self.SIDE_HOST
+        bit_mask = 1 << self.__oe_bit
+        oe_val = self.__oe_host_value << self.__oe_bit
+        self.__gpio_val = (gpio_val & ~bit_mask) | oe_val
+        self.__side = self.SIDE_HOST
 
         self.freq_update(freq)
 
@@ -178,42 +178,42 @@ class SwdMpsse(swd.Interface):
             ThreePhase(False),
             Adaptive(False),
             Loopback(False),
-            SetBitsLow(self._gpio_val & 0xFF, self._gpio_oe & 0xFF),
+            SetBitsLow(self.__gpio_val & 0xFF, self.__gpio_oe & 0xFF),
         ]
-        if self._gpio_oe & 0xFF00:
+        if self.__gpio_oe & 0xFF00:
             ops.append(SetBitsHigh(
-                (self._gpio_val >> 8) & 0xFF,
-                (self._gpio_oe >> 8) & 0xFF))
+                (self.__gpio_val >> 8) & 0xFF,
+                (self.__gpio_oe >> 8) & 0xFF))
 
-        futures = [self._engine.post(op) for op in ops]
+        futures = [self.__engine.post(op) for op in ops]
         await asyncio.gather(*futures)
 
     # --- OE flipping ------------------------------------------------
 
-    def _set_side(self, mpsse_ops, side):
+    def __set_side(self, mpsse_ops, side):
         """Flip the OE pin so the *side* drives SWDIO. Cheap no-op
         when we're already on that side."""
-        if self._side == side:
+        if self.__side == side:
             return
-        target_value = (self._oe_host_value if side == self.SIDE_HOST
-                        else 1 - self._oe_host_value)
-        bit_mask = 1 << self._oe_bit
+        target_value = (self.__oe_host_value if side == self.SIDE_HOST
+                        else 1 - self.__oe_host_value)
+        bit_mask = 1 << self.__oe_bit
         if target_value:
-            self._gpio_val |= bit_mask
+            self.__gpio_val |= bit_mask
         else:
-            self._gpio_val &= ~bit_mask
-        if self._oe_bit < 8:
+            self.__gpio_val &= ~bit_mask
+        if self.__oe_bit < 8:
             mpsse_ops.append(SetBitsLow(
-                self._gpio_val & 0xFF, self._gpio_oe & 0xFF))
+                self.__gpio_val & 0xFF, self.__gpio_oe & 0xFF))
         else:
             mpsse_ops.append(SetBitsHigh(
-                (self._gpio_val >> 8) & 0xFF,
-                (self._gpio_oe >> 8) & 0xFF))
-        self._side = side
+                (self.__gpio_val >> 8) & 0xFF,
+                (self.__gpio_oe >> 8) & 0xFF))
+        self.__side = side
 
     # --- Wire helpers ------------------------------------------------
 
-    def _shift_run(self, mpsse_ops, cycles, value):
+    def __shift_run(self, mpsse_ops, cycles, value):
         """Clock ``cycles`` cycles with TDI driven to ``value``. Caller
         owns the OE side; this is just bit-shifting."""
         if cycles <= 0:
@@ -233,7 +233,7 @@ class SwdMpsse(swd.Interface):
         if tail:
             mpsse_ops.append(ShiftBits(byte_value, tail))
 
-    def _shift_word(self, mpsse_ops, value, bits):
+    def __shift_word(self, mpsse_ops, value, bits):
         """Drive a small (≤32-bit) value LSB-first."""
         full_bytes, tail = divmod(bits, 8)
         if full_bytes:
@@ -246,40 +246,40 @@ class SwdMpsse(swd.Interface):
 
     # --- Per-op lowering --------------------------------------------
 
-    def _emit_read(self, mpsse_ops, ap, addr):
+    def __emit_read(self, mpsse_ops, ap, addr):
         """Returns (ack_op, data_op, parity_op) — MPSSE Operation
         instances whose ``data`` fields hold the captured ACK/DATA/
         parity bits after the batch executes."""
         cmd = _swd_cmd_byte(ap, True, addr)
         # Host drives the cmd byte.
-        self._set_side(mpsse_ops, self.SIDE_HOST)
+        self.__set_side(mpsse_ops, self.SIDE_HOST)
         mpsse_ops.append(ShiftBits(cmd, 8))
         # TRN + ACK + DATA + parity all happen with target driving.
-        self._set_side(mpsse_ops, self.SIDE_TARGET)
+        self.__set_side(mpsse_ops, self.SIDE_TARGET)
         # 1 TRN cycle (clocked but ignored on receive).
         mpsse_ops.append(ShiftBits(0, _TRN_CYCLES, read=True))
-        ack_op = ShiftBits(None, 3, read=True, read_pol=self._read_pol)
+        ack_op = ShiftBits(None, 3, read=True, read_pol=self.__read_pol)
         mpsse_ops.append(ack_op)
-        data_op = ShiftBytes(4, read=True, read_pol=self._read_pol)
+        data_op = ShiftBytes(4, read=True, read_pol=self.__read_pol)
         mpsse_ops.append(data_op)
-        par_op = ShiftBits(None, 1, read=True, read_pol=self._read_pol)
+        par_op = ShiftBits(None, 1, read=True, read_pol=self.__read_pol)
         mpsse_ops.append(par_op)
         # Hand the line back — TRN with host now driving (line still
         # in transition; pull-up keeps it sane).
-        self._set_side(mpsse_ops, self.SIDE_HOST)
+        self.__set_side(mpsse_ops, self.SIDE_HOST)
         mpsse_ops.append(ShiftBits(0, _TRN_CYCLES))
         return ack_op, data_op, par_op
 
-    def _emit_write(self, mpsse_ops, ap, addr, data):
+    def __emit_write(self, mpsse_ops, ap, addr, data):
         cmd = _swd_cmd_byte(ap, False, addr)
-        self._set_side(mpsse_ops, self.SIDE_HOST)
+        self.__set_side(mpsse_ops, self.SIDE_HOST)
         mpsse_ops.append(ShiftBits(cmd, 8))
-        self._set_side(mpsse_ops, self.SIDE_TARGET)
+        self.__set_side(mpsse_ops, self.SIDE_TARGET)
         mpsse_ops.append(ShiftBits(0, _TRN_CYCLES, read=True))
-        ack_op = ShiftBits(None, 3, read=True, read_pol=self._read_pol)
+        ack_op = ShiftBits(None, 3, read=True, read_pol=self.__read_pol)
         mpsse_ops.append(ack_op)
         # Host takes the line back to drive the data + parity.
-        self._set_side(mpsse_ops, self.SIDE_HOST)
+        self.__set_side(mpsse_ops, self.SIDE_HOST)
         mpsse_ops.append(ShiftBits(0, _TRN_CYCLES))
         data &= 0xFFFFFFFF
         mpsse_ops.append(ShiftBytes(data.to_bytes(4, "little")))
@@ -306,39 +306,39 @@ class SwdMpsse(swd.Interface):
 
         for op, future in batch:
             if isinstance(op, swd.Run):
-                self._set_side(mpsse_ops, self.SIDE_HOST)
-                self._shift_run(mpsse_ops, op.cycles, 0)
+                self.__set_side(mpsse_ops, self.SIDE_HOST)
+                self.__shift_run(mpsse_ops, op.cycles, 0)
                 future.set_result(None)
                 continue
 
             if isinstance(op, swd.Wakeup):
-                self._set_side(mpsse_ops, self.SIDE_HOST)
-                self._shift_run(mpsse_ops, op.cycles, 1)
+                self.__set_side(mpsse_ops, self.SIDE_HOST)
+                self.__shift_run(mpsse_ops, op.cycles, 1)
                 future.set_result(None)
                 continue
 
             if isinstance(op, swd.LineReset):
-                self._set_side(mpsse_ops, self.SIDE_HOST)
-                self._shift_run(mpsse_ops, 60, 1)
-                self._shift_run(mpsse_ops, 8, 0)
+                self.__set_side(mpsse_ops, self.SIDE_HOST)
+                self.__shift_run(mpsse_ops, 60, 1)
+                self.__shift_run(mpsse_ops, 8, 0)
                 future.set_result(None)
                 continue
 
             if isinstance(op, swd.JtagToSwd):
-                self._set_side(mpsse_ops, self.SIDE_HOST)
+                self.__set_side(mpsse_ops, self.SIDE_HOST)
                 # Standard wakeup pattern: line reset + 0xE79E switch
                 # (LSB-first) + line reset + idle. Idempotent.
-                self._shift_run(mpsse_ops, 60, 1)
-                self._shift_word(mpsse_ops, 0xE79E, 16)
-                self._shift_run(mpsse_ops, 60, 1)
-                self._shift_word(mpsse_ops, 0xE79E, 16)
-                self._shift_run(mpsse_ops, 60, 1)
-                self._shift_run(mpsse_ops, 8, 0)
+                self.__shift_run(mpsse_ops, 60, 1)
+                self.__shift_word(mpsse_ops, 0xE79E, 16)
+                self.__shift_run(mpsse_ops, 60, 1)
+                self.__shift_word(mpsse_ops, 0xE79E, 16)
+                self.__shift_run(mpsse_ops, 60, 1)
+                self.__shift_run(mpsse_ops, 8, 0)
                 future.set_result(None)
                 continue
 
             if isinstance(op, swd.Read):
-                ack_op, data_op, par_op = self._emit_read(
+                ack_op, data_op, par_op = self.__emit_read(
                     mpsse_ops, op.ap, op.addr)
                 if op.ap:
                     # AP read: ACK lives here, data lives in the next
@@ -355,7 +355,7 @@ class SwdMpsse(swd.Interface):
                 continue
 
             if isinstance(op, swd.Write):
-                ack_op = self._emit_write(
+                ack_op = self.__emit_write(
                     mpsse_ops, op.ap, op.addr, op.data)
                 kind = "ap_write" if op.ap else "dp_write"
                 # Writes don't update RDBUFF; pending stays where it is.
@@ -368,7 +368,7 @@ class SwdMpsse(swd.Interface):
         # Drain any trailing pending AP read with an explicit RDBUFF
         # read so the user-future resolves before this batch ends.
         if pending is not None:
-            ack_op, data_op, par_op = self._emit_read(
+            ack_op, data_op, par_op = self.__emit_read(
                 mpsse_ops, False, _RDBUFF_REG)
             pending[3] = data_op
             pending[4] = par_op
@@ -379,7 +379,7 @@ class SwdMpsse(swd.Interface):
             return
 
         try:
-            futures = [self._engine.post(op) for op in mpsse_ops]
+            futures = [self.__engine.post(op) for op in mpsse_ops]
             await asyncio.gather(*futures)
         except Exception as exc:
             for rec in records:

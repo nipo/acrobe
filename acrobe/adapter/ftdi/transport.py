@@ -121,22 +121,22 @@ class FtdiTransport:
     """
 
     def __init__(self, ctx, device, interface_index, pair, max_packet_size):
-        self._ctx = ctx
-        self._device = device
-        self._interface_index = interface_index
-        self._pair = pair
-        self._max_packet_size = max_packet_size
-        self._read_queue = asyncio.Queue()
-        self._write_queue = asyncio.Queue()
-        self._lock = asyncio.Lock()
-        self._reader = None
-        self._writer = None
+        self.__ctx = ctx
+        self.__device = device
+        self.__interface_index = interface_index
+        self.__pair = pair
+        self.__max_packet_size = max_packet_size
+        self.__read_queue = asyncio.Queue()
+        self.__write_queue = asyncio.Queue()
+        self.__lock = asyncio.Lock()
+        self.__reader = None
+        self.__writer = None
         # Payload bytes pulled from the IN endpoint past the previous
         # ReadOp's requested size, carried over to the next ReadOp.
         # FTDI may bundle multiple batches' responses into a single USB
         # packet — without this carry-over, the bytes belonging to the
         # next ReadOp would be silently discarded.
-        self._read_residual = b""
+        self.__read_residual = b""
 
         if ctx is not None:
             # Ctx-owning transports register a fallback close so the
@@ -146,7 +146,7 @@ class FtdiTransport:
             on_shutdown(self.close)
 
     @staticmethod
-    def _endpoint_mps(device, interface_index, ep_address):
+    def __endpoint_mps(device, interface_index, ep_address):
         """Read endpoint max packet size from USB descriptor."""
         config = device.descriptor[device.configuration]
         setting = config[interface_index][0]
@@ -154,7 +154,7 @@ class FtdiTransport:
         return ep.max_packet_size
 
     @staticmethod
-    def _drain(ep_in, mps):
+    def __drain(ep_in, mps):
         """Drain stale data from an FTDI IN endpoint.
 
         Reads until only modem status bytes remain.  Handles overflow
@@ -210,13 +210,13 @@ class FtdiTransport:
         # FTDI endpoint addresses: chan A = OUT 0x02/IN 0x81, chan B = OUT 0x04/IN 0x83
         ep_out_addr = 0x02 + interface_index * 2
         ep_in_addr = 0x81 + interface_index * 2
-        mps = cls._endpoint_mps(device, interface_index, ep_in_addr)
+        mps = cls.__endpoint_mps(device, interface_index, ep_in_addr)
 
         ep_out = BulkOutEndpoint(device, ep_out_addr, mps)
         ep_in = BulkInEndpoint(device, ep_in_addr, mps)
         pair = BulkPair(ep_out, ep_in)
 
-        cls._drain(ep_in, mps)
+        cls.__drain(ep_in, mps)
 
         return cls(ctx, device, interface_index, pair, mps)
 
@@ -245,13 +245,13 @@ class FtdiTransport:
 
         ep_out_addr = 0x02 + interface_index * 2
         ep_in_addr = 0x81 + interface_index * 2
-        mps = cls._endpoint_mps(device, interface_index, ep_in_addr)
+        mps = cls.__endpoint_mps(device, interface_index, ep_in_addr)
 
         ep_out = BulkOutEndpoint(device, ep_out_addr, mps)
         ep_in = BulkInEndpoint(device, ep_in_addr, mps)
         pair = BulkPair(ep_out, ep_in)
 
-        cls._drain(ep_in, mps)
+        cls.__drain(ep_in, mps)
 
         return cls(None, device, interface_index, pair, mps)
 
@@ -281,13 +281,13 @@ class FtdiTransport:
 
         ep_out_addr = 0x02 + interface_index * 2
         ep_in_addr = 0x81 + interface_index * 2
-        mps = cls._endpoint_mps(device, interface_index, ep_in_addr)
+        mps = cls.__endpoint_mps(device, interface_index, ep_in_addr)
 
         ep_out = BulkOutEndpoint(device, ep_out_addr, mps)
         ep_in = BulkInEndpoint(device, ep_in_addr, mps)
         pair = BulkPair(ep_out, ep_in)
 
-        cls._drain(ep_in, mps)
+        cls.__drain(ep_in, mps)
 
         return cls(None, device, interface_index, pair, mps)
 
@@ -299,56 +299,56 @@ class FtdiTransport:
         actual, encoded = ftdi_baudrate_divisor(baudrate)
         value = encoded & 0xFFFF
         index = (encoded >> 16) & 0xFFFF
-        if self._interface_index > 0:
-            index = (index & 0xFF00) | (self._interface_index + 1)
-        await self._device.vendor_control(SIO_SET_BAUDRATE, value, index, b'')
+        if self.__interface_index > 0:
+            index = (index & 0xFF00) | (self.__interface_index + 1)
+        await self.__device.vendor_control(SIO_SET_BAUDRATE, value, index, b'')
         return actual
 
     # Write chunk size.  libusb splits into USB packets, so this only
     # needs to stay within the host-controller's transfer limits.
-    _WRITE_CHUNK = 65536
+    __WRITE_CHUNK = 65536
 
     def write(self, data: bytes):
         """Write data to the FTDI bulk OUT endpoint."""
         w = WriteOp(data)
-        self._write_queue.put_nowait(w)
-        if self._writer is None:
-            self._writer = asyncio.create_task(self._writer_worker())
+        self.__write_queue.put_nowait(w)
+        if self.__writer is None:
+            self.__writer = asyncio.create_task(self.__writer_worker())
         return w.future
 
-    async def _writer_worker(self):
+    async def __writer_worker(self):
         while True:
-            async with self._lock:
+            async with self.__lock:
                 try:
-                    todo = self._write_queue.get_nowait()
+                    todo = self.__write_queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    self._writer = None
+                    self.__writer = None
                     return
-            await todo.run(self._pair.out, self._max_packet_size)
+            await todo.run(self.__pair.out, self.__max_packet_size)
 
     # Maximum time to spend in read() before raising a timeout.
-    _READ_DEADLINE = 1.0
+    __READ_DEADLINE = 1.0
 
     def read(self, size: int, timeout: float|None = None):
         """Read data from the FTDI bulk IN endpoint."""
         if timeout is None:
-            timeout = self._READ_DEADLINE
+            timeout = self.__READ_DEADLINE
         r = ReadOp(size, timeout = timeout)
-        self._read_queue.put_nowait(r)
-        if self._reader is None:
-            self._reader = asyncio.create_task(self._reader_worker())
+        self.__read_queue.put_nowait(r)
+        if self.__reader is None:
+            self.__reader = asyncio.create_task(self.__reader_worker())
         return r.future
 
-    async def _reader_worker(self):
+    async def __reader_worker(self):
         while True:
-            async with self._lock:
+            async with self.__lock:
                 try:
-                    todo = self._read_queue.get_nowait()
+                    todo = self.__read_queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    self._reader = None
+                    self.__reader = None
                     return
-            self._read_residual = await todo.run(
-                self._pair.in_, self._max_packet_size, self._read_residual)
+            self.__read_residual = await todo.run(
+                self.__pair.in_, self.__max_packet_size, self.__read_residual)
 
     async def transfer(self, data: bytes, byte_count: int) -> bytes:
         """Write data and read byte_count bytes concurrently.
@@ -370,21 +370,21 @@ class FtdiTransport:
         interface — the caller owns the device lifetime.
         """
         from ...lifecycle import cancel_shutdown
-        async with self._lock:
-            while not self._read_queue.empty():
-                self._read_queue.get_nowait().future.set_exception(asyncio.CancelledError())
-            while not self._write_queue.empty():
-                self._write_queue.get_nowait().future.set_exception(asyncio.CancelledError())
-        if x := self._reader:
+        async with self.__lock:
+            while not self.__read_queue.empty():
+                self.__read_queue.get_nowait().future.set_exception(asyncio.CancelledError())
+            while not self.__write_queue.empty():
+                self.__write_queue.get_nowait().future.set_exception(asyncio.CancelledError())
+        if x := self.__reader:
             await x
-        if x := self._writer:
+        if x := self.__writer:
             await x
         cancel_shutdown(self.close)
-        idx = self._interface_index + 1
-        await self._device.vendor_control(
+        idx = self.__interface_index + 1
+        await self.__device.vendor_control(
             SIO_SET_BITMODE, BITMODE_RESET << 8, idx, b'')
-        self._device.handle.releaseInterface(self._interface_index)
-        if self._ctx is not None:
-            self._device.handle.close()
-            self._ctx.close()
-            self._ctx = None
+        self.__device.handle.releaseInterface(self.__interface_index)
+        if self.__ctx is not None:
+            self.__device.handle.close()
+            self.__ctx.close()
+            self.__ctx = None

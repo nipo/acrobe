@@ -256,24 +256,24 @@ class ShiftBits(Operation):
             data = data or 0
             if not lsb_first:
                 data <<= 8 - count
-            self._data_byte = data & 0xff
-            self._has_data = True
+            self.__data_byte = data & 0xff
+            self.__has_data = True
         else:
-            self._data_byte = 0
-            self._has_data = False
+            self.__data_byte = 0
+            self.__has_data = False
 
         if read:
             cmd |= mpsse_cmd.READ
             if read_pol != "+":
                 cmd |= mpsse_cmd.READ_NEG
 
-        self._cmd_byte = cmd
+        self.__cmd_byte = cmd
 
     def encode(self, buf):
-        buf.append(self._cmd_byte)
+        buf.append(self.__cmd_byte)
         buf.append(self.count - 1)
-        if self._has_data:
-            buf.append(self._data_byte)
+        if self.__has_data:
+            buf.append(self.__data_byte)
 
     def rsp_handle(self, data: bytes):
         if self.read:
@@ -326,8 +326,8 @@ class ShiftBytes(Operation):
             if read_pol != "+":
                 cmd |= mpsse_cmd.READ_NEG
 
-        self._cmd_byte = cmd
-        self._data_out = data_out
+        self.__cmd_byte = cmd
+        self.__data_out = data_out
         self.byte_count = byte_count
         self.read = read
         self.rsp_size = byte_count if read else 0
@@ -335,11 +335,11 @@ class ShiftBytes(Operation):
 
     def encode(self, buf):
         c = self.byte_count - 1
-        buf.append(self._cmd_byte)
+        buf.append(self.__cmd_byte)
         buf.append(c & 0xff)
         buf.append(c >> 8)
-        if self._data_out:
-            buf += self._data_out
+        if self.__data_out:
+            buf += self.__data_out
 
     def rsp_handle(self, data: bytes):
         if self.read:
@@ -372,8 +372,8 @@ class ShiftTms(Operation):
             if read_pol != "+":
                 cmd |= mpsse_cmd.READ_NEG
 
-        self._cmd_byte = cmd
-        self._data_byte = (data & 0x7f) | ((tdi & 1) << 7)
+        self.__cmd_byte = cmd
+        self.__data_byte = (data & 0x7f) | ((tdi & 1) << 7)
         self.count = count
         self.write_pol = write_pol
         self.read_pol = read_pol
@@ -382,19 +382,19 @@ class ShiftTms(Operation):
         # accessed (only by __repr__ / __add__ — never on the hot
         # transfer path). Saves thousands of small BitString
         # allocations per chunk.
-        self._tms_value = data
+        self.__tms_value = data
         self.tdi = int(bool(tdi))
         self.rsp_size = 1 if read else 0
         self.cycle_count = count
 
     @property
     def tms(self):
-        return BitString(self._tms_value, self.count)
+        return BitString(self.__tms_value, self.count)
 
     def encode(self, buf):
-        buf.append(self._cmd_byte)
+        buf.append(self.__cmd_byte)
         buf.append(self.count - 1)
-        buf.append(self._data_byte)
+        buf.append(self.__data_byte)
 
     def rsp_handle(self, data: bytes):
         if self.read:
@@ -420,10 +420,10 @@ class ShiftTms(Operation):
 class MpsseEngine(Batcher):
     def __init__(self, transport: Transport, logger):
         super().__init__()
-        self._transport = transport
+        self.__transport = transport
         self.logger = logger
-        self._bracket_pre = b""
-        self._bracket_post = b""
+        self.__bracket_pre = b""
+        self.__bracket_post = b""
 
     def set_bracket(self, pre: bytes, post: bytes):
         """Raw MPSSE bytes prepended/appended to each batch's command stream.
@@ -431,8 +431,8 @@ class MpsseEngine(Batcher):
         Both sequences must produce zero response bytes. Used to pulse
         activity LEDs or similar per-batch side-effects.
         """
-        self._bracket_pre = pre
-        self._bracket_post = post
+        self.__bracket_pre = pre
+        self.__bracket_post = post
 
     async def flush_ops(self, batch):
         """Serialize the whole batch into one growing bytearray, then
@@ -440,16 +440,16 @@ class MpsseEngine(Batcher):
         in place via ``encode(buf)`` — no per-op bytes allocation,
         no terminal ``b"".join``."""
         buf = bytearray()
-        if self._bracket_pre:
-            buf += self._bracket_pre
+        if self.__bracket_pre:
+            buf += self.__bracket_pre
 
         total_rsp = 0
         for op, _future in batch:
             op.encode(buf)
             total_rsp += op.rsp_size
 
-        if self._bracket_post:
-            buf += self._bracket_post
+        if self.__bracket_post:
+            buf += self.__bracket_post
 
         if total_rsp == 0:
             # Need at least 1 response byte to synchronize.
@@ -460,7 +460,7 @@ class MpsseEngine(Batcher):
         if self.logger.isEnabledFor(PROTOCOL):
             self.logger.protocol(
                 "USB >> %d bytes, expect %d back", len(buf), total_rsp)
-        self._transport.write(bytes(buf))
+        self.__transport.write(bytes(buf))
 
         def read_done(rsp):
             try:
@@ -486,4 +486,4 @@ class MpsseEngine(Batcher):
                 if future is not None:
                     future.set_result(op)
 
-        self._transport.read(total_rsp).add_done_callback(read_done)
+        self.__transport.read(total_rsp).add_done_callback(read_done)

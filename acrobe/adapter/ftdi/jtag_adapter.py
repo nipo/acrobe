@@ -25,8 +25,8 @@ class FtdiJtagAdapter(Adapter):
 
     def __init__(self, name, device, transport, engine):
         super().__init__(name)
-        self._device = device
-        self._transport = transport
+        self.__device = device
+        self.__transport = transport
         self._engine = engine
 
     @classmethod
@@ -71,5 +71,5 @@ class FtdiJtagAdapter(Adapter):
         raise NoMatch("interface", name)
 
     async def close(self):
-        await self._transport.close()
-        self._device.handle.close()
+        await self.__transport.close()
+        self.__device.handle.close()
