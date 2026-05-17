@@ -60,18 +60,18 @@ class TelnetPipe(Pipe):
         # under its own connection logger). Default falls back to the
         # Node fqdn-derived logger.
         super().__init__(name)
-        self._transport = transport
+        self.__transport = transport
         if logger is not None:
             self.__logger_override = logger
         else:
             self.__logger_override = None
-        self._options: dict[int, TelnetOption] = {}
-        self._rx_buf = bytearray()       # pending user-data bytes
-        self._rx_event = asyncio.Event()  # set when data or EOF available
-        self._eof = False
-        self._reader_task: asyncio.Task | None = None
-        self._write_lock = asyncio.Lock()
-        self._closed = False
+        self.__options: dict[int, TelnetOption] = {}
+        self.__rx_buf = bytearray()       # pending user-data bytes
+        self.__rx_event = asyncio.Event()  # set when data or EOF available
+        self.__eof = False
+        self.__reader_task: asyncio.Task | None = None
+        self.__write_lock = asyncio.Lock()
+        self.__closed = False
 
     @property
     def logger(self):
@@ -85,27 +85,27 @@ class TelnetPipe(Pipe):
 
     async def start(self):
         """Node-lifecycle start. Spins up the background IAC reader."""
-        self._ensure_reader()
+        self.__ensure_reader()
 
-    def _ensure_reader(self):
+    def __ensure_reader(self):
         """Idempotently launch the background reader task. Must be
         called from inside a running event loop. Safe to call from
         ``flush_ops`` and from explicit ``start()``."""
-        if self._reader_task is None:
-            self._reader_task = asyncio.create_task(self._reader_loop())
+        if self.__reader_task is None:
+            self.__reader_task = asyncio.create_task(self.__reader_loop())
 
     async def close(self):
-        self._closed = True
-        if self._reader_task is not None:
-            self._reader_task.cancel()
+        self.__closed = True
+        if self.__reader_task is not None:
+            self.__reader_task.cancel()
             try:
-                await self._reader_task
+                await self.__reader_task
             except (asyncio.CancelledError, Exception):
                 pass
 
     def option_add(self, option: TelnetOption):
         assert 0 <= option.code <= 255
-        self._options[option.code] = option
+        self.__options[option.code] = option
 
     # ------------------------------------------------------------------
     # Pipe interface (Batcher flush)
@@ -117,13 +117,13 @@ class TelnetPipe(Pipe):
         # for incoming data, so they get spawned as background tasks
         # so concurrent writes (or other reads) aren't held up by the
         # Batcher's serialization lock.
-        self._ensure_reader()
+        self.__ensure_reader()
         for op, future in batch:
             if isinstance(op, Write):
                 escaped = op.data.replace(bytes([IAC]), bytes([IAC, IAC]))
                 try:
-                    async with self._write_lock:
-                        await self._transport.write(escaped)
+                    async with self.__write_lock:
+                        await self.__transport.write(escaped)
                 except Exception as exc:
                     if not future.done():
                         future.set_exception(exc)
@@ -131,15 +131,15 @@ class TelnetPipe(Pipe):
                 if not future.done():
                     future.set_result(None)
             elif isinstance(op, Read):
-                asyncio.create_task(self._read_task(op.size, future))
+                asyncio.create_task(self.__read_task(op.size, future))
             else:
                 if not future.done():
                     future.set_exception(TypeError(
                         f"TelnetPipe: unsupported op {type(op).__name__}"))
 
-    async def _read_task(self, size, future):
+    async def __read_task(self, size, future):
         try:
-            data = await self._read_exact(size)
+            data = await self.__read_exact(size)
         except Exception as exc:
             if not future.done():
                 future.set_exception(exc)
@@ -147,18 +147,18 @@ class TelnetPipe(Pipe):
         if not future.done():
             future.set_result(data)
 
-    async def _read_exact(self, size: int) -> bytes:
+    async def __read_exact(self, size: int) -> bytes:
         out = bytearray()
         while len(out) < size:
-            if self._rx_buf:
-                take = min(size - len(out), len(self._rx_buf))
-                out += self._rx_buf[:take]
-                del self._rx_buf[:take]
+            if self.__rx_buf:
+                take = min(size - len(out), len(self.__rx_buf))
+                out += self.__rx_buf[:take]
+                del self.__rx_buf[:take]
                 continue
-            if self._eof:
+            if self.__eof:
                 raise EOFError("Telnet transport closed")
-            self._rx_event.clear()
-            await self._rx_event.wait()
+            self.__rx_event.clear()
+            await self.__rx_event.wait()
         return bytes(out)
 
     # ------------------------------------------------------------------
@@ -168,21 +168,21 @@ class TelnetPipe(Pipe):
     async def send_iac(self, *parts: int) -> None:
         """Send a 2- or 3-byte IAC sequence (e.g. IAC, WILL, 44)."""
         buf = bytes([IAC, *parts])
-        async with self._write_lock:
-            await self._transport.write(buf)
+        async with self.__write_lock:
+            await self.__transport.write(buf)
 
     async def send_sb(self, option: int, payload: bytes) -> None:
         """Send IAC SB <option> <payload> IAC SE, escaping IAC in payload."""
         escaped = payload.replace(bytes([IAC]), bytes([IAC, IAC]))
         buf = bytes([IAC, SB, option]) + escaped + bytes([IAC, SE])
-        async with self._write_lock:
-            await self._transport.write(buf)
+        async with self.__write_lock:
+            await self.__transport.write(buf)
 
     # ------------------------------------------------------------------
     # Background reader — parses IAC out of the stream
     # ------------------------------------------------------------------
 
-    async def _reader_loop(self):
+    async def __reader_loop(self):
         NORMAL, GOT_IAC, GOT_VERB, GOT_SB, IN_SB, SB_IAC = range(6)
 
         state = NORMAL
@@ -191,11 +191,11 @@ class TelnetPipe(Pipe):
         sb_payload = bytearray()
 
         try:
-            while not self._closed:
-                chunk = await self._read_some()
+            while not self.__closed:
+                chunk = await self.__read_some()
                 if not chunk:
-                    self._eof = True
-                    self._rx_event.set()
+                    self.__eof = True
+                    self.__rx_event.set()
                     break
 
                 for byte in chunk:
@@ -203,12 +203,12 @@ class TelnetPipe(Pipe):
                         if byte == IAC:
                             state = GOT_IAC
                         else:
-                            self._rx_buf.append(byte)
+                            self.__rx_buf.append(byte)
 
                     elif state == GOT_IAC:
                         if byte == IAC:
                             # Escaped 0xFF in data stream
-                            self._rx_buf.append(IAC)
+                            self.__rx_buf.append(IAC)
                             state = NORMAL
                         elif byte in (DO, DONT, WILL, WONT):
                             verb = byte
@@ -221,7 +221,7 @@ class TelnetPipe(Pipe):
                             state = NORMAL
 
                     elif state == GOT_VERB:
-                        await self._handle_verb(verb, byte)
+                        await self.__handle_verb(verb, byte)
                         state = NORMAL
 
                     elif state == GOT_SB:
@@ -240,35 +240,35 @@ class TelnetPipe(Pipe):
                             sb_payload.append(IAC)
                             state = IN_SB
                         elif byte == SE:
-                            await self._handle_sb(sb_opt, bytes(sb_payload))
+                            await self.__handle_sb(sb_opt, bytes(sb_payload))
                             state = NORMAL
                         else:
                             # Out-of-spec but tolerate: treat as end of SB
                             self.logger.debug(
                                 "Telnet: unexpected IAC %d mid-SB", byte)
-                            await self._handle_sb(sb_opt, bytes(sb_payload))
+                            await self.__handle_sb(sb_opt, bytes(sb_payload))
                             state = NORMAL
 
-                self._rx_event.set()
+                self.__rx_event.set()
         except asyncio.CancelledError:
             raise
         except Exception as e:
             self.logger.debug("Telnet reader exited: %r", e)
-            self._eof = True
-            self._rx_event.set()
+            self.__eof = True
+            self.__rx_event.set()
 
-    async def _read_some(self) -> bytes:
+    async def __read_some(self) -> bytes:
         # Pipe.read is "exactly size" — we want "some bytes". Read in
         # chunks of 1 and accumulate nothing (1-byte reads are fine
         # for a framing layer that uses byte-accurate lookahead).
         try:
-            return await self._transport.read(1)
+            return await self.__transport.read(1)
         except (EOFError, ConnectionError):
             return b""
 
-    async def _handle_verb(self, verb: int, opt_code: int):
+    async def __handle_verb(self, verb: int, opt_code: int):
         self.logger.debug("Telnet << IAC %s %d", _NAME.get(verb, verb), opt_code)
-        opt = self._options.get(opt_code)
+        opt = self.__options.get(opt_code)
         if opt is None:
             # No handler: refuse politely
             if verb == DO:
@@ -291,9 +291,9 @@ class TelnetPipe(Pipe):
             return
         await method(self)
 
-    async def _handle_sb(self, opt_code: int, payload: bytes):
+    async def __handle_sb(self, opt_code: int, payload: bytes):
         self.logger.debug("Telnet << IAC SB %d [%d bytes]", opt_code, len(payload))
-        opt = self._options.get(opt_code)
+        opt = self.__options.get(opt_code)
         if opt is None:
             return
         method = getattr(opt, "peer_sb", None)
