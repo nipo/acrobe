@@ -43,8 +43,8 @@ class CmsisDapAdapter(Adapter):
                  vendor_name: str, product_name: str, fw_version: str,
                  capabilities: int, packet_size: int, packet_count: int):
         super().__init__(name)
-        self._info = info
-        self._transport = transport
+        self.__info = info
+        self.__transport = transport
         self.vendor_name = vendor_name
         self.product_name = product_name
         self.fw_version = fw_version
@@ -73,15 +73,15 @@ class CmsisDapAdapter(Adapter):
         # known before we send anything large — read it first, then
         # update the transport so subsequent commands use the real
         # MPS. Many devices report 64; some go up to 1024.
-        packet_size = await cls._info_u16(transport, protocol.INFO_PACKET_SIZE)
+        packet_size = await cls.__info_u16(transport, protocol.INFO_PACKET_SIZE)
         if packet_size:
             transport.packet_size = packet_size
-        packet_count = await cls._info_u8(transport, protocol.INFO_PACKET_COUNT) or 1
+        packet_count = await cls.__info_u8(transport, protocol.INFO_PACKET_COUNT) or 1
 
-        vendor_name = await cls._info_string(transport, protocol.INFO_VENDOR_NAME)
-        product_name = await cls._info_string(transport, protocol.INFO_PRODUCT_NAME)
-        fw_version = await cls._info_string(transport, protocol.INFO_FW_VERSION)
-        caps = await cls._info_u8(transport, protocol.INFO_CAPABILITIES)
+        vendor_name = await cls.__info_string(transport, protocol.INFO_VENDOR_NAME)
+        product_name = await cls.__info_string(transport, protocol.INFO_PRODUCT_NAME)
+        fw_version = await cls.__info_string(transport, protocol.INFO_FW_VERSION)
+        caps = await cls.__info_u8(transport, protocol.INFO_CAPABILITIES)
 
         logger.info("CMSIS-DAP %s — %s (FW %s)",
                     vendor_name or "?", product_name or "?", fw_version or "?")
@@ -103,7 +103,7 @@ class CmsisDapAdapter(Adapter):
     # -- DAP_Info helpers -------------------------------------------
 
     @staticmethod
-    async def _info_request(transport: CmsisDapTransport, info_id: int) -> bytes:
+    async def __info_request(transport: CmsisDapTransport, info_id: int) -> bytes:
         resp = await transport.request(bytes([protocol.CMD_INFO, info_id]))
         if not resp or resp[0] != protocol.CMD_INFO:
             raise protocol.CmsisDapError(
@@ -113,21 +113,21 @@ class CmsisDapAdapter(Adapter):
         return bytes(resp[2:2 + length])
 
     @classmethod
-    async def _info_string(cls, transport: CmsisDapTransport,
+    async def __info_string(cls, transport: CmsisDapTransport,
                            info_id: int) -> str:
-        data = await cls._info_request(transport, info_id)
+        data = await cls.__info_request(transport, info_id)
         return data.rstrip(b"\x00").decode("utf-8", errors="replace")
 
     @classmethod
-    async def _info_u8(cls, transport: CmsisDapTransport,
+    async def __info_u8(cls, transport: CmsisDapTransport,
                        info_id: int) -> int:
-        data = await cls._info_request(transport, info_id)
+        data = await cls.__info_request(transport, info_id)
         return data[0] if data else 0
 
     @classmethod
-    async def _info_u16(cls, transport: CmsisDapTransport,
+    async def __info_u16(cls, transport: CmsisDapTransport,
                         info_id: int) -> int:
-        data = await cls._info_request(transport, info_id)
+        data = await cls.__info_request(transport, info_id)
         if len(data) >= 2:
             return data[0] | (data[1] << 8)
         if data:
@@ -139,7 +139,7 @@ class CmsisDapAdapter(Adapter):
     async def child_spawn(self, name):
         if name == "swd":
             from .swd import CmsisDapSwdInterface
-            return CmsisDapSwdInterface(self._transport, self.capabilities,
+            return CmsisDapSwdInterface(self.__transport, self.capabilities,
                                         name="swd")
         if name == "jtag":
             # JTAG slot reserved — implementation lands in a follow-up
@@ -150,7 +150,7 @@ class CmsisDapAdapter(Adapter):
         raise NoMatch("interface", name)
 
     async def close(self):
-        await self._transport.close()
+        await self.__transport.close()
 
 
 for _info in _CMSIS_DAP_INFOS:

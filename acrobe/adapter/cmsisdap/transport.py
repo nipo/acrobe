@@ -34,10 +34,10 @@ class CmsisDapTransport:
 
     def __init__(self, device: hid.device, packet_size: int,
                  logger: logging.Logger):
-        self._device = device
-        self._packet_size = packet_size
-        self._lock = asyncio.Lock()
-        self._logger = logger
+        self.__device = device
+        self.__packet_size = packet_size
+        self.__lock = asyncio.Lock()
+        self.__logger = logger
 
     @classmethod
     def from_descriptor(cls, vid: int, pid: int, *,
@@ -75,11 +75,11 @@ class CmsisDapTransport:
 
     @property
     def packet_size(self) -> int:
-        return self._packet_size
+        return self.__packet_size
 
     @packet_size.setter
     def packet_size(self, value: int) -> None:
-        self._packet_size = value
+        self.__packet_size = value
 
     async def request(self, payload: bytes) -> bytes:
         """Issue one CMSIS-DAP request and return the response.
@@ -90,29 +90,29 @@ class CmsisDapTransport:
         echoes the report ID and trims trailing zero padding back
         to a sensible length (the protocol's status/data sections
         are not length-prefixed; callers parse by command shape)."""
-        if len(payload) > self._packet_size:
+        if len(payload) > self.__packet_size:
             raise ValueError(
                 f"CMSIS-DAP request {len(payload)} bytes exceeds "
-                f"packet size {self._packet_size}")
+                f"packet size {self.__packet_size}")
         # CMSIS-DAP HID uses report ID 0 (unnumbered reports). The
         # cython-hidapi `write()` call expects the first byte to be
         # the report ID, so we prepend a 0 and pad to packet_size.
         report = bytes([0x00]) + payload
-        report += bytes(self._packet_size + 1 - len(report))
+        report += bytes(self.__packet_size + 1 - len(report))
 
-        self._logger.protocol(
+        self.__logger.protocol(
             "DAP -> cmd=0x%02x args=%s",
             payload[0], payload[1:16].hex())
 
-        async with self._lock:
-            await asyncio.to_thread(self._device.write, report)
+        async with self.__lock:
+            await asyncio.to_thread(self.__device.write, report)
             resp = await asyncio.to_thread(
-                self._device.read, self._packet_size, 1000)
+                self.__device.read, self.__packet_size, 1000)
 
-        self._logger.protocol(
+        self.__logger.protocol(
             "DAP <- cmd=0x%02x rsp=%s",
             resp[0] if resp else 0xFF, bytes(resp[:16]).hex())
         return bytes(resp)
 
     async def close(self) -> None:
-        await asyncio.to_thread(self._device.close)
+        await asyncio.to_thread(self.__device.close)

@@ -66,12 +66,12 @@ class CmsisDapSwdInterface(swd.Interface):
 
     def __init__(self, transport, capabilities: int, name: str = "swd"):
         super().__init__(name=name)
-        self._transport = transport
-        self._capabilities = capabilities
+        self.__transport = transport
+        self.__capabilities = capabilities
         # Whether the session has done DAP_Connect(SWD) yet. Done
         # lazily on the first flush so simple "info adapters"-style
         # listings don't drive the wire.
-        self._connected = False
+        self.__connected = False
 
     async def start(self):
         """Bring the DAP up to a known state.
@@ -80,17 +80,17 @@ class CmsisDapSwdInterface(swd.Interface):
         clock and the standard SWD framing (turnaround=1, no data
         phase), and configure transfer-level retry/idle defaults
         so :class:`SwDp`'s ``Run`` ops can be no-ops at this layer."""
-        if not (self._capabilities & protocol.CAP_SWD):
+        if not (self.__capabilities & protocol.CAP_SWD):
             raise protocol.CmsisDapError("Adapter does not advertise SWD support")
 
-        await self._dap_connect(protocol.PORT_SWD)
-        await self._dap_swj_clock(1_000_000)  # 1 MHz default
-        await self._dap_swd_configure(turnaround=1, data_phase=False)
-        await self._dap_transfer_configure(
+        await self.__dap_connect(protocol.PORT_SWD)
+        await self.__dap_swj_clock(1_000_000)  # 1 MHz default
+        await self.__dap_swd_configure(turnaround=1, data_phase=False)
+        await self.__dap_transfer_configure(
             idle_cycles=_DEFAULT_IDLE_CYCLES,
             wait_retry=_DEFAULT_WAIT_RETRY,
             match_retry=_DEFAULT_MATCH_RETRY)
-        self._connected = True
+        self.__connected = True
         await super().start()
 
     async def flush_ops(self, batch):
@@ -111,13 +111,13 @@ class CmsisDapSwdInterface(swd.Interface):
 
         for kind, items in groups:
             if kind == "swj":
-                await self._flush_swj_group(items)
+                await self.__flush_swj_group(items)
             else:
-                await self._flush_xfer_group(items)
+                await self.__flush_xfer_group(items)
 
     # -- SWJ-side ops -----------------------------------------------
 
-    async def _flush_swj_group(self, items):
+    async def __flush_swj_group(self, items):
         """Lower Run/Wakeup/LineReset/JtagToSwd to DAP_SWJ_Sequence."""
         bits: list[int] = []
 
@@ -157,7 +157,7 @@ class CmsisDapSwdInterface(swd.Interface):
 
         # DAP_SWJ_Sequence has its own 256-bit-per-call limit; chunk.
         for count, payload in _swj_chunks(bits):
-            await self._dap_swj_sequence(count, payload)
+            await self.__dap_swj_sequence(count, payload)
 
         # All these ops resolve with no result.
         for _op, future in items:
@@ -166,7 +166,7 @@ class CmsisDapSwdInterface(swd.Interface):
 
     # -- Transfer-side ops ------------------------------------------
 
-    async def _flush_xfer_group(self, items):
+    async def __flush_xfer_group(self, items):
         """Lower a run of swd.Read / swd.Write to DAP_Transfer.
 
         Splits across multiple DAP_Transfer calls when the request
@@ -174,7 +174,7 @@ class CmsisDapSwdInterface(swd.Interface):
         # Pre-compute each transfer's request byte + payload bytes.
         encoded = []
         for op, future in items:
-            req = self._transfer_request_byte(op)
+            req = self.__transfer_request_byte(op)
             if isinstance(op, swd.Write):
                 payload = (op.data & 0xFFFFFFFF).to_bytes(4, "little")
             else:
@@ -184,8 +184,8 @@ class CmsisDapSwdInterface(swd.Interface):
         # Pack into per-call batches that fit in one packet. Headers:
         # request = 3 (cmd, dap_index, count) + per-transfer (1 + payload)
         # response = 3 (cmd, count, response) + 4 * read_count
-        max_req = self._transport.packet_size - 3
-        max_resp = self._transport.packet_size - 3
+        max_req = self.__transport.packet_size - 3
+        max_resp = self.__transport.packet_size - 3
 
         i = 0
         while i < len(encoded):
@@ -211,17 +211,17 @@ class CmsisDapSwdInterface(swd.Interface):
                     "Transfer too large to fit in one CMSIS-DAP packet"))
                 i += 1
                 continue
-            await self._issue_transfer(encoded[i:j])
+            await self.__issue_transfer(encoded[i:j])
             i = j
 
-    async def _issue_transfer(self, encoded_slice):
+    async def __issue_transfer(self, encoded_slice):
         count = len(encoded_slice)
         req = bytearray([protocol.CMD_TRANSFER, 0, count])
         for _op, _future, request_byte, payload in encoded_slice:
             req.append(request_byte)
             req.extend(payload)
 
-        resp = await self._transport.request(bytes(req))
+        resp = await self.__transport.request(bytes(req))
         if not resp or resp[0] != protocol.CMD_TRANSFER:
             for _op, fut, _, _ in encoded_slice:
                 if not fut.done():
@@ -258,7 +258,7 @@ class CmsisDapSwdInterface(swd.Interface):
                 future.set_result(None)
 
     @staticmethod
-    def _transfer_request_byte(op) -> int:
+    def __transfer_request_byte(op) -> int:
         # Bits: 0=APnDP, 1=RnW, 2=A2, 3=A3
         request = 0
         if op.ap:
@@ -274,8 +274,8 @@ class CmsisDapSwdInterface(swd.Interface):
 
     # -- Low-level command helpers ----------------------------------
 
-    async def _dap_connect(self, port: int) -> int:
-        resp = await self._transport.request(
+    async def __dap_connect(self, port: int) -> int:
+        resp = await self.__transport.request(
             bytes([protocol.CMD_CONNECT, port]))
         if not resp or resp[0] != protocol.CMD_CONNECT:
             raise protocol.CmsisDapError(
@@ -285,37 +285,37 @@ class CmsisDapSwdInterface(swd.Interface):
                 "DAP_Connect failed (firmware reports port=0 — unsupported)")
         return resp[1]
 
-    async def _dap_swj_clock(self, hz: int) -> None:
-        resp = await self._transport.request(
+    async def __dap_swj_clock(self, hz: int) -> None:
+        resp = await self.__transport.request(
             bytes([protocol.CMD_SWJ_CLOCK]) +
             int(hz).to_bytes(4, "little"))
-        self._check_status(resp, protocol.CMD_SWJ_CLOCK, "DAP_SWJ_Clock")
+        self.__check_status(resp, protocol.CMD_SWJ_CLOCK, "DAP_SWJ_Clock")
 
-    async def _dap_swd_configure(self, turnaround: int, data_phase: bool) -> None:
+    async def __dap_swd_configure(self, turnaround: int, data_phase: bool) -> None:
         cfg = (turnaround - 1) & 0x3
         if data_phase:
             cfg |= 0x4
-        resp = await self._transport.request(
+        resp = await self.__transport.request(
             bytes([protocol.CMD_SWD_CONFIGURE, cfg]))
-        self._check_status(resp, protocol.CMD_SWD_CONFIGURE, "DAP_SWD_Configure")
+        self.__check_status(resp, protocol.CMD_SWD_CONFIGURE, "DAP_SWD_Configure")
 
-    async def _dap_transfer_configure(self, idle_cycles: int,
+    async def __dap_transfer_configure(self, idle_cycles: int,
                                       wait_retry: int,
                                       match_retry: int) -> None:
-        resp = await self._transport.request(
+        resp = await self.__transport.request(
             bytes([protocol.CMD_TRANSFER_CONFIGURE, idle_cycles & 0xFF])
             + int(wait_retry).to_bytes(2, "little")
             + int(match_retry).to_bytes(2, "little"))
-        self._check_status(resp, protocol.CMD_TRANSFER_CONFIGURE,
+        self.__check_status(resp, protocol.CMD_TRANSFER_CONFIGURE,
                            "DAP_TransferConfigure")
 
-    async def _dap_swj_sequence(self, count: int, payload: bytes) -> None:
-        resp = await self._transport.request(
+    async def __dap_swj_sequence(self, count: int, payload: bytes) -> None:
+        resp = await self.__transport.request(
             bytes([protocol.CMD_SWJ_SEQUENCE, count]) + payload)
-        self._check_status(resp, protocol.CMD_SWJ_SEQUENCE, "DAP_SWJ_Sequence")
+        self.__check_status(resp, protocol.CMD_SWJ_SEQUENCE, "DAP_SWJ_Sequence")
 
     @staticmethod
-    def _check_status(resp: bytes, cmd: int, label: str) -> None:
+    def __check_status(resp: bytes, cmd: int, label: str) -> None:
         if not resp or resp[0] != cmd:
             raise protocol.CmsisDapError(
                 f"{label} bad echo: {resp[:2].hex() if resp else '(empty)'}")
