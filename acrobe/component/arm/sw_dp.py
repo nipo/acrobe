@@ -36,13 +36,23 @@ class SwDp(dpmod.Dp):
     AP_IDLE_CYCLES = 32
 
     def __init__(self, swd_interface: swd.Interface, *,
-                 dpidr: int | None = None, name: str = "dp"):
-        super().__init__(name=name, dpidr=dpidr)
+                 dpidr: int | None = None,
+                 targetsel: int | None = None,
+                 name: str | None = None):
+        super().__init__(
+            name=name or ("dp" if targetsel is None
+                          else f"dp-{targetsel:08x}"),
+            dpidr=dpidr)
         self.__swd = swd_interface
         # swd.Interface.start() leaves the DP's SELECT register at 0
         # (line reset clears it); pre-seed accordingly so the first
         # access doesn't emit a redundant SELECT write.
         self.__select: int = 0
+        # On a multidrop wire, the DP must announce itself at the
+        # head of every batch — the Interface deduplicates so
+        # back-to-back batches for the same target don't actually
+        # send a TARGETSEL preamble.
+        self.targetsel: int | None = targetsel
 
     def __select_for(self, op) -> int:
         """Compute the SELECT value needed to access ``op``'s register.
@@ -64,6 +74,12 @@ class SwDp(dpmod.Dp):
         # at the end and propagate results/exceptions.
         records: list[tuple] = []
         select = self.__select
+
+        if self.targetsel is not None:
+            # The Interface elides this when current_target already
+            # matches, so the cost is one Python-side post per batch
+            # in the steady state.
+            self.__swd.post(swd.TargetSelect(target=self.targetsel))
 
         for op, future in batch:
             if isinstance(op, dpmod.Run):
