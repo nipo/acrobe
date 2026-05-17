@@ -113,60 +113,60 @@ class ElfSegment(Node, Readable, Addressable):
     def __init__(self, name, source, file_offset, file_size,
                  vaddr, paddr, mem_size, flags):
         super().__init__(name)
-        self._source = source
-        self._file_offset = file_offset
-        self._file_size = file_size
-        self._vaddr = vaddr
-        self._paddr = paddr
-        self._mem_size = mem_size
-        self._flags = flags
+        self.__source = source
+        self.__file_offset = file_offset
+        self.__file_size = file_size
+        self.__vaddr = vaddr
+        self.__paddr = paddr
+        self.__mem_size = mem_size
+        self.__flags = flags
 
     @property
     def size(self) -> int:
         # Expose mem_size so .bss-style padding is part of the view;
         # bytes beyond file_size are synthesised as zeros.
-        return self._mem_size
+        return self.__mem_size
 
     async def read(self, offset, size):
-        if offset < 0 or offset > self._mem_size:
+        if offset < 0 or offset > self.__mem_size:
             raise ValueError(f"offset {offset} out of range")
-        avail = self._mem_size - offset
+        avail = self.__mem_size - offset
         n = min(size, avail)
         if n <= 0:
             return b""
         # Bytes from [offset, offset + n) within the segment.
         # Up to file_size are read from source; the rest is zeros.
-        if offset >= self._file_size:
+        if offset >= self.__file_size:
             return b"\x00" * n
-        from_file_n = min(n, self._file_size - offset)
-        from_file = await self._source.read(
-            self._file_offset + offset, from_file_n)
+        from_file_n = min(n, self.__file_size - offset)
+        from_file = await self.__source.read(
+            self.__file_offset + offset, from_file_n)
         if from_file_n == n:
             return from_file
         return from_file + b"\x00" * (n - from_file_n)
 
     @property
     def load_address(self) -> int:
-        return self._paddr
+        return self.__paddr
 
     @property
     def addresses(self) -> dict:
         return {
-            "vma": self._vaddr,
-            "lma": self._paddr,
-            "file_offset": self._file_offset,
-            "load": self._paddr,
+            "vma": self.__vaddr,
+            "lma": self.__paddr,
+            "file_offset": self.__file_offset,
+            "load": self.__paddr,
         }
 
     @property
     def metadata(self) -> dict:
         return {
-            "vma": self._vaddr,
-            "lma": self._paddr,
-            "file_offset": self._file_offset,
-            "file_size": self._file_size,
-            "mem_size": self._mem_size,
-            "flags": self._flags,
+            "vma": self.__vaddr,
+            "lma": self.__paddr,
+            "file_offset": self.__file_offset,
+            "file_size": self.__file_size,
+            "mem_size": self.__mem_size,
+            "flags": self.__flags,
             **self._metadata,
         }
 
@@ -192,57 +192,57 @@ class ElfSection(Node, Readable):
     def __init__(self, name, source, file_offset, size, vaddr,
                  lma, flags, sh_type):
         super().__init__(name)
-        self._source = source
-        self._file_offset = file_offset
-        self._size = size
-        self._vaddr = vaddr
-        self._lma = lma
-        self._flags = flags  # frozenset of strings
-        self._sh_type = sh_type
+        self.__source = source
+        self.__file_offset = file_offset
+        self.__size = size
+        self.vaddr = vaddr
+        self.__lma = lma
+        self.__flags = flags  # frozenset of strings
+        self.__sh_type = sh_type
 
     @property
     def size(self) -> int:
-        return self._size
+        return self.__size
 
     async def read(self, offset, size):
-        if offset < 0 or offset > self._size:
+        if offset < 0 or offset > self.__size:
             raise ValueError(f"offset {offset} out of range")
-        avail = self._size - offset
+        avail = self.__size - offset
         n = min(size, avail)
         if n <= 0:
             return b""
         # NOBITS sections (e.g. .bss) have no file backing —
         # synthesise zeros.
-        if self._sh_type == SHT_NOBITS:
+        if self.__sh_type == SHT_NOBITS:
             return b"\x00" * n
-        return await self._source.read(self._file_offset + offset, n)
+        return await self.__source.read(self.__file_offset + offset, n)
 
     @property
     def addresses(self) -> dict:
         return {
-            "vma": self._vaddr,
-            "lma": self._lma,
-            "file_offset": self._file_offset,
-            "load": self._lma,
+            "vma": self.vaddr,
+            "lma": self.__lma,
+            "file_offset": self.__file_offset,
+            "load": self.__lma,
         }
 
     @property
     def section_type(self) -> str:
-        return _section_type_name(self._sh_type)
+        return _section_type_name(self.__sh_type)
 
     @property
     def flags(self) -> frozenset:
-        return self._flags
+        return self.__flags
 
     @property
     def metadata(self) -> dict:
         return {
-            "vma": self._vaddr,
-            "lma": self._lma,
-            "file_offset": self._file_offset,
-            "size": self._size,
-            "flags": list(self._flags),
-            "section_type": _section_type_name(self._sh_type),
+            "vma": self.vaddr,
+            "lma": self.__lma,
+            "file_offset": self.__file_offset,
+            "size": self.__size,
+            "flags": list(self.__flags),
+            "section_type": _section_type_name(self.__sh_type),
             **self._metadata,
         }
 
@@ -254,24 +254,24 @@ class ElfSymbol(Node, Addressable):
     def __init__(self, name, value, size, sym_type, binding,
                  section_name):
         super().__init__(name)
-        self._value = value
-        self._size = size
-        self._sym_type = sym_type
-        self._binding = binding
-        self._section_name = section_name
+        self.value = value
+        self.__size = size
+        self.__sym_type = sym_type
+        self.__binding = binding
+        self.__section_name = section_name
 
     @property
     def load_address(self) -> int:
-        return self._value
+        return self.value
 
     @property
     def metadata(self) -> dict:
         return {
-            "value": self._value,
-            "size": self._size,
-            "type": _symbol_type_name(self._sym_type),
-            "binding": _symbol_binding_name(self._binding),
-            "section": self._section_name,
+            "value": self.value,
+            "size": self.__size,
+            "type": _symbol_type_name(self.__sym_type),
+            "binding": _symbol_binding_name(self.__binding),
+            "section": self.__section_name,
             **self._metadata,
         }
 
@@ -283,10 +283,10 @@ class ElfSymbols(Node):
     def __init__(self, name, table):
         super().__init__(name)
         # table: dict[str, ElfSymbol]
-        self._table = table
+        self.table = table
 
     async def child_spawn(self, name):
-        sym = self._table.get(name)
+        sym = self.table.get(name)
         if sym is None:
             raise NoMatch("symbol", name)
         # Re-attach an existing Node into this parent. The on-demand
@@ -504,43 +504,43 @@ class Elf(FormatNode):
             self._child_attach(symbols_container)
 
     # --- Reverse lookups ---
-    # After populate_format, our children live on _target (the
-    # auto-detected file Node). Methods walk _target.children.
+    # After populate_format, our children live on `target` (the
+    # auto-detected file Node). Methods walk target.children.
 
-    def _container(self, name):
-        owner = getattr(self, "_target", self)
-        for c in owner._children:
+    def __container(self, name):
+        owner = getattr(self, "target", self)
+        for c in owner.children:
             if c.name == name:
                 return c
         return None
 
     def section_at(self, address: int):
         """Return the ElfSection covering `address` (by VMA), or None."""
-        sc = self._container("section")
+        sc = self.__container("section")
         if sc is None:
             return None
         for sec in sc.children:
-            if sec._vaddr <= address < sec._vaddr + sec._size:
+            if sec.vaddr <= address < sec.vaddr + sec.size:
                 return sec
         return None
 
     def symbol_at(self, address: int):
         """Return an ElfSymbol whose value == address, or None."""
-        sc = self._container("symbol")
+        sc = self.__container("symbol")
         if sc is None:
             return None
-        for sym in sc._table.values():
-            if sym._value == address:
+        for sym in sc.table.values():
+            if sym.value == address:
                 return sym
         return None
 
     def symbols_in(self, start: int, end: int):
         """Return all symbols whose value is in [start, end)."""
-        sc = self._container("symbol")
+        sc = self.__container("symbol")
         if sc is None:
             return []
-        return [s for s in sc._table.values()
-                if start <= s._value < end]
+        return [s for s in sc.table.values()
+                if start <= s.value < end]
 
 
 @register_magic

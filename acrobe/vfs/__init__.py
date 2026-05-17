@@ -166,7 +166,7 @@ async def populate_format(target, format_name, source, *, parser_opts=None):
 
     Per design D9: parser children attach directly to `target`,
     NOT under a wrapper. The parser instance itself is kept
-    accessible as `target._format_parsers` (a list — successive
+    accessible as `target.format_parsers` (a list — successive
     detections append).
 
     `parser_opts` (dict) — any options to apply to the parser via
@@ -191,13 +191,13 @@ async def populate_format(target, format_name, source, *, parser_opts=None):
 
     # The parser instance is kept accessible on `target` for code
     # that wants typed methods (e.g. Elf.symbol_at). Methods that
-    # walk children must use parser._target (set here) — parser's
+    # walk children must use parser.target (set here) — parser's
     # own ._children was emptied by the transplant.
-    parser._target = target
+    parser.target = target
 
-    if not hasattr(target, "_format_parsers"):
-        target._format_parsers = []
-    target._format_parsers.append(parser)
+    if not hasattr(target, "format_parsers"):
+        target.format_parsers = []
+    target.format_parsers.append(parser)
 
 
 class FormatNode(Node):
@@ -232,31 +232,31 @@ class AsNode(Node):
 
     def __init__(self, name="as"):
         super().__init__(name)
-        self._format_name = None
-        self._parser_opts = {}
+        self.__format_name = None
+        self.__parser_opts = {}
 
     def option_set(self, key, value):
         if key == "type":
-            self._format_name = value
+            self.__format_name = value
         elif key == "mime-type":
             fmt = detect_by_mime(value)
             if fmt is None:
                 raise ValueError(f"Unknown mime type: {value}")
-            self._format_name = fmt
+            self.__format_name = fmt
         else:
             # Forward to the format parser at start time.
-            self._parser_opts[key] = value
+            self.__parser_opts[key] = value
 
     async def start(self):
-        if self._format_name is None:
+        if self.__format_name is None:
             raise ValueError(
                 f"{self.fqdn}: as() requires type= or mime-type= option")
         if not isinstance(self._parent, Readable):
             raise TypeError(
                 f"{self.fqdn}: as() parent must be Readable")
         await populate_format(
-            self, self._format_name, self._parent,
-            parser_opts=self._parser_opts)
+            self, self.__format_name, self._parent,
+            parser_opts=self.__parser_opts)
 
 
 from .fs import FsRoot, FileNode  # noqa: F401, E402

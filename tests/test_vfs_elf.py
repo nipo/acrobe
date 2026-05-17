@@ -305,8 +305,8 @@ class TestElfReverseLookup:
         await root.start_tree()
         leaf = await root.child_summon("a.elf")
         # Reverse-lookup methods live on the format parser; access
-        # via _format_parsers (set by populate_format).
-        elf_parser = leaf._format_parsers[0]
+        # via format_parsers (set by populate_format).
+        elf_parser = leaf.format_parsers[0]
         sym = elf_parser.symbol_at(0x1000)
         assert sym is not None
         assert sym.name == "main"
@@ -319,7 +319,7 @@ class TestElfReverseLookup:
         root = FsRoot(str(tmp_path))
         await root.start_tree()
         leaf = await root.child_summon("a.elf")
-        elf_parser = leaf._format_parsers[0]
+        elf_parser = leaf.format_parsers[0]
         sec = elf_parser.section_at(0x4008)
         assert sec is not None
         assert sec.name == ".text"
