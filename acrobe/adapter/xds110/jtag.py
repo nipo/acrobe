@@ -52,22 +52,22 @@ class XDS110JtagInterface(jtag.JtagInterface):
     # Cap a single XDS_JTAG_SCAN at the firmware data buffer; longer
     # shifts would need to be split with PAUSE_DR/IR park states. Hasn't
     # been needed yet (typical IR/DR widths sit well below 32 kbit).
-    _MAX_SCAN_BITS = protocol.MAX_DATA_BLOCK * 8
+    __MAX_SCAN_BITS = protocol.MAX_DATA_BLOCK * 8
 
     def __init__(self, transport, version: protocol.Version,
                  *, initial_delay_count: int, name: str = "jtag"):
         super().__init__(name=name)
-        self._transport = transport
-        self._firmware = version.firmware
-        self._delay_count = initial_delay_count
-        self._tck_dirty = False
+        self.__transport = transport
+        self.__firmware = version.firmware
+        self.__delay_count = initial_delay_count
+        self.__tck_dirty = False
         # Deferred arm: CJTAG_CONNECT(MODE_JTAG) is issued once on the
         # first flush rather than at construction so the adapter open
         # sequence and the jtag interface remain independent.
-        self._inited = False
+        self.__inited = False
         # SHIFT_DR / SHIFT_IR while parked at PAUSE_DR/IR after a
         # Capture; False/None when at IDLE or RESET.
-        self._shift_state = False
+        self.__shift_state = False
         # XDS110 fast-mode peak ceiling. The bit-level layer publishes
         # this so FreqCapper clamps user requests rather than handing
         # us a value the firmware can't honour.
@@ -88,10 +88,10 @@ class XDS110JtagInterface(jtag.JtagInterface):
         if freq is None:
             return None
         delay_count, achieved_khz = protocol.TckDelay.for_freq(
-            int(freq), self._firmware)
-        if delay_count != self._delay_count:
-            self._delay_count = delay_count
-            self._tck_dirty = True
+            int(freq), self.__firmware)
+        if delay_count != self.__delay_count:
+            self.__delay_count = delay_count
+            self.__tck_dirty = True
         return achieved_khz * 1000
 
     # ------------------------------------------------------------------
@@ -99,33 +99,33 @@ class XDS110JtagInterface(jtag.JtagInterface):
     # ------------------------------------------------------------------
 
     async def flush_ops(self, batch):
-        if self._tck_dirty:
-            self._tck_dirty = False
-            await self._set_tck(self._delay_count)
+        if self.__tck_dirty:
+            self.__tck_dirty = False
+            await self.__set_tck(self.__delay_count)
 
-        if not self._inited:
-            self._inited = True
-            await self._cjtag_connect_jtag()
+        if not self.__inited:
+            self.__inited = True
+            await self.__cjtag_connect_jtag()
 
         captured: dict[int, BitString] = {}
 
         n = len(batch)
         for i, (op, _future) in enumerate(batch):
             if isinstance(op, jtag.Reset):
-                await self._goto_state(protocol.JtagState.RESET)
+                await self.__goto_state(protocol.JtagState.RESET)
                 # TLR is stable under TMS=1; the long-form count keeps
                 # TMS high for the required number of cycles.
                 extra = max(0, op.count - 5)
                 if extra:
-                    await self._cycle_tck(extra)
-                self._shift_state = None
+                    await self.__cycle_tck(extra)
+                self.__shift_state = None
 
             elif isinstance(op, jtag.SwdToJtag):
                 # ARM SWJ-DP line-reset + JTAG-select TMS pattern
                 # expressed as state-machine transitions.
-                await self._goto_state(protocol.JtagState.RESET)
-                await self._cycle_tck(50)
-                await self._pathmove([
+                await self.__goto_state(protocol.JtagState.RESET)
+                await self.__cycle_tck(50)
+                await self.__pathmove([
                     protocol.JtagState.IDLE,
                     protocol.JtagState.IDLE,
                     protocol.JtagState.SELECT_DR,
@@ -135,7 +135,7 @@ class XDS110JtagInterface(jtag.JtagInterface):
                     protocol.JtagState.IDLE,
                     protocol.JtagState.IDLE,
                 ])
-                await self._pathmove([
+                await self.__pathmove([
                     protocol.JtagState.SELECT_DR,
                     protocol.JtagState.SELECT_IR,
                     protocol.JtagState.RESET,
@@ -145,41 +145,41 @@ class XDS110JtagInterface(jtag.JtagInterface):
                     protocol.JtagState.SELECT_IR,
                     protocol.JtagState.RESET,
                 ])
-                await self._goto_state(protocol.JtagState.RESET)
-                await self._cycle_tck(50)
-                self._shift_state = None
+                await self.__goto_state(protocol.JtagState.RESET)
+                await self.__cycle_tck(50)
+                self.__shift_state = None
 
             elif isinstance(op, jtag.Run):
-                if self._shift_state:
-                    await self._goto_state(protocol.JtagState.IDLE)
-                    self._shift_state = None
+                if self.__shift_state:
+                    await self.__goto_state(protocol.JtagState.IDLE)
+                    self.__shift_state = None
                 if op.cycles > 0:
-                    await self._cycle_tck(op.cycles)
+                    await self.__cycle_tck(op.cycles)
 
             elif isinstance(op, jtag.CaptureDr):
                 # VIA_CAPTURE navigates through Capture-DR from any
                 # current state, covering both normal pre-shift Capture
                 # and Zero-Bit Scan (standalone Capture).
-                self._shift_state = protocol.JtagState.SHIFT_DR
-                await self._goto_state(protocol.JtagState.PAUSE_DR,
+                self.__shift_state = protocol.JtagState.SHIFT_DR
+                await self.__goto_state(protocol.JtagState.PAUSE_DR,
                                        transit=protocol.JtagTransit.VIA_CAPTURE)
 
             elif isinstance(op, jtag.CaptureIr):
-                self._shift_state = protocol.JtagState.SHIFT_IR
-                await self._goto_state(protocol.JtagState.PAUSE_IR,
+                self.__shift_state = protocol.JtagState.SHIFT_IR
+                await self.__goto_state(protocol.JtagState.PAUSE_IR,
                                        transit=protocol.JtagTransit.VIA_CAPTURE)
 
             elif isinstance(op, jtag.Shift):
                 if len(op.tdi):
                     # PAUSE_DR = SHIFT_DR + 2, PAUSE_IR = SHIFT_IR + 2.
-                    tdo = await self._jtag_scan(self._shift_state, op.tdi,
-                                                self._shift_state + 2)
+                    tdo = await self.__jtag_scan(self.__shift_state, op.tdi,
+                                                self.__shift_state + 2)
                     if op.read_tdo:
                         captured[i] = tdo
                 if op.post_run:
-                    await self._goto_state(protocol.JtagState.IDLE)
-                    await self._cycle_tck(op.post_run)
-                    self._shift_state = None
+                    await self.__goto_state(protocol.JtagState.IDLE)
+                    await self.__cycle_tck(op.post_run)
+                    self.__shift_state = None
 
             else:
                 raise ValueError(
@@ -194,49 +194,49 @@ class XDS110JtagInterface(jtag.JtagInterface):
     # Wire-level command helpers
     # ------------------------------------------------------------------
 
-    async def _set_tck(self, delay_count: int) -> None:
+    async def __set_tck(self, delay_count: int) -> None:
         payload = (bytes([protocol.Opcode.XDS_SET_TCK])
                    + protocol.Bytes.pack_u32(delay_count))
-        await self._transport.command(
+        await self.__transport.command(
             payload, response_payload_size=protocol.ERROR_CODE_LEN)
 
-    async def _cjtag_connect_jtag(self) -> None:
+    async def __cjtag_connect_jtag(self) -> None:
         payload = (bytes([protocol.Opcode.CJTAG_CONNECT])
                    + protocol.Bytes.pack_u32(protocol.MODE_JTAG))
-        await self._transport.command(
+        await self.__transport.command(
             payload, response_payload_size=protocol.ERROR_CODE_LEN)
 
-    async def _pathmove(self, states: list) -> None:
+    async def __pathmove(self, states: list) -> None:
         """Emit an exact TMS sequence via OCD_PATHMOVE. Each consecutive
         pair of states must be reachable by a single TMS bit; the firmware
         visits them in order, including transient states."""
         payload = (bytes([protocol.Opcode.OCD_PATHMOVE])
                    + protocol.Bytes.pack_u32(len(states))
                    + bytes(int(s) for s in states))
-        await self._transport.command(
+        await self.__transport.command(
             payload, response_payload_size=protocol.ERROR_CODE_LEN)
 
-    async def _goto_state(self, state: int,
+    async def __goto_state(self, state: int,
                           transit: int = protocol.JtagTransit.QUICKEST) -> None:
         payload = (bytes([protocol.Opcode.XDS_GOTO_STATE])
                    + protocol.Bytes.pack_u32(state)
                    + protocol.Bytes.pack_u32(transit))
-        await self._transport.command(
+        await self.__transport.command(
             payload, response_payload_size=protocol.ERROR_CODE_LEN)
 
-    async def _cycle_tck(self, count: int) -> None:
+    async def __cycle_tck(self, count: int) -> None:
         payload = (bytes([protocol.Opcode.XDS_CYCLE_TCK])
                    + protocol.Bytes.pack_u32(count))
-        await self._transport.command(
+        await self.__transport.command(
             payload, response_payload_size=protocol.ERROR_CODE_LEN)
 
-    async def _jtag_scan(self, shift_state: int, tdi: BitString,
+    async def __jtag_scan(self, shift_state: int, tdi: BitString,
                          end_state: int) -> BitString:
         nbits = len(tdi)
-        if nbits > self._MAX_SCAN_BITS:
+        if nbits > self.__MAX_SCAN_BITS:
             raise ValueError(
                 f"XDS110: shift {nbits} bits exceeds firmware "
-                f"buffer ({self._MAX_SCAN_BITS} bits) — split via "
+                f"buffer ({self.__MAX_SCAN_BITS} bits) — split via "
                 f"PAUSE-DR/IR park states is not implemented yet")
         nbytes = (nbits + 7) // 8
 
@@ -259,6 +259,6 @@ class XDS110JtagInterface(jtag.JtagInterface):
                    + protocol.Bytes.pack_u16(nbytes)   # in_offset
                    + bytes(tdi).ljust(nbytes, b'\x00'))
 
-        result = await self._transport.command(
+        result = await self.__transport.command(
             payload, response_payload_size=protocol.ERROR_CODE_LEN + nbytes)
         return BitString(result, nbits)

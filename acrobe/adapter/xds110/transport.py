@@ -30,13 +30,13 @@ class XDS110Transport:
     def __init__(self, device, interface_index: int,
                  ep_out: BulkOutEndpoint, ep_in: BulkInEndpoint,
                  mps: int, logger: logging.Logger):
-        self._device = device
-        self._interface = interface_index
-        self._ep_out = ep_out
-        self._ep_in = ep_in
-        self._mps = mps
-        self._lock = asyncio.Lock()
-        self._logger = logger
+        self.__device = device
+        self.__interface = interface_index
+        self.__ep_out = ep_out
+        self.__ep_in = ep_in
+        self.__mps = mps
+        self.__lock = asyncio.Lock()
+        self.__logger = logger
 
     @classmethod
     async def from_device(cls, device, *, interface_index: int,
@@ -59,7 +59,7 @@ class XDS110Transport:
             pass
         device.handle.claimInterface(interface_index)
 
-        mps = cls._endpoint_mps(device, interface_index,
+        mps = cls.__endpoint_mps(device, interface_index,
                                 ep_out_addr, ep_in_addr)
         ep_out = BulkOutEndpoint(device, ep_out_addr, mps)
         ep_in = BulkInEndpoint(device, ep_in_addr, mps)
@@ -78,7 +78,7 @@ class XDS110Transport:
         return cls(device, interface_index, ep_out, ep_in, mps, logger)
 
     @staticmethod
-    def _endpoint_mps(device, interface_index: int,
+    def __endpoint_mps(device, interface_index: int,
                       ep_out_addr: int, ep_in_addr: int) -> int:
         """Return the larger of the two bulk endpoints' max packet
         sizes — used as the natural granule for IN reads."""
@@ -112,23 +112,23 @@ class XDS110Transport:
         frame = protocol.Frame.encode(payload)
         opcode = protocol.Opcode(payload[0])
 
-        async with self._lock:
-            self._logger.protocol(
+        async with self.__lock:
+            self.__logger.protocol(
                 "XDS110 -> op=%s, len=%d", opcode.name, len(payload))
-            await self._ep_out.write(frame)
-            response = await self._read_response(response_payload_size,
+            await self.__ep_out.write(frame)
+            response = await self.__read_response(response_payload_size,
                                                  timeout_ms)
 
         status = protocol.Bytes.unpack_i32(response, 0)
         result = bytes(response[protocol.ERROR_CODE_LEN:])
-        self._logger.protocol(
+        self.__logger.protocol(
             "XDS110 <- op=%s, status=%d result=%dB",
             opcode.name, status, len(result))
         if status != protocol.SC_ERR_NONE:
             raise protocol.XDS110Error(status, f"op=0x{opcode:02x}")
         return result
 
-    async def _read_response(self, expected_payload_size: int,
+    async def __read_response(self, expected_payload_size: int,
                              timeout_ms: int) -> bytes:
         """Read one full response, tolerating stale leading bytes.
 
@@ -139,7 +139,7 @@ class XDS110Transport:
         the chunk and try again."""
         # Loop until we land on a valid '*'+size header.
         while True:
-            chunk = await self._read_chunk(timeout_ms)
+            chunk = await self.__read_chunk(timeout_ms)
             if (len(chunk) >= protocol.HEADER_LEN
                     and chunk[0] == protocol.SYNC_BYTE):
                 announced = protocol.Frame.parse_header(chunk)
@@ -154,7 +154,7 @@ class XDS110Transport:
                 buf = bytearray(chunk[protocol.HEADER_LEN:])
                 # Already received this much of the payload.
                 while len(buf) < announced:
-                    more = await self._read_chunk(
+                    more = await self.__read_chunk(
                         timeout_ms, expected_max=announced - len(buf))
                     buf.extend(more)
                 if len(buf) > announced:
@@ -163,21 +163,21 @@ class XDS110Transport:
                         f"response overrun: got {len(buf)}B for "
                         f"{announced}B payload")
                 return bytes(buf)
-            self._logger.warning(
+            self.__logger.warning(
                 "XDS110: discarding %d-byte unsynced chunk", len(chunk))
 
-    async def _read_chunk(self, timeout_ms: int,
+    async def __read_chunk(self, timeout_ms: int,
                           *, expected_max: int | None = None) -> bytes:
         """Read at most one MPS chunk from bulk IN."""
-        size = self._mps if expected_max is None else min(self._mps,
+        size = self.__mps if expected_max is None else min(self.__mps,
                                                           expected_max)
         # ausb's BulkInEndpoint.read returns once one transfer has
         # completed — a USB IN transfer terminates at MPS or short
         # packet, which matches one firmware response chunk.
-        return await self._ep_in.read(size, timeout=timeout_ms)
+        return await self.__ep_in.read(size, timeout=timeout_ms)
 
     async def close(self) -> None:
         try:
-            self._device.handle.releaseInterface(self._interface)
+            self.__device.handle.releaseInterface(self.__interface)
         except Exception:
             pass

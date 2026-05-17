@@ -234,11 +234,11 @@ class TckDelay:
         speed_khz = max(MIN_TCK_KHZ, freq_hz // 1000)
 
         if firmware < FAST_TCK_FIRMWARE_VERSION:
-            return cls._slow(speed_khz)
-        return cls._fast(speed_khz, firmware)
+            return cls.__slow(speed_khz)
+        return cls.__fast(speed_khz, firmware)
 
     @classmethod
-    def _slow(cls, speed_khz: int) -> tuple[int, int]:
+    def __slow(cls, speed_khz: int) -> tuple[int, int]:
         if speed_khz >= MAX_SLOW_TCK_KHZ:
             return 0, MAX_SLOW_TCK_KHZ
 
@@ -264,7 +264,7 @@ class TckDelay:
         return count, int(achieved_hz / 1000)
 
     @classmethod
-    def _fast(cls, speed_khz: int, firmware: int) -> tuple[int, int]:
+    def __fast(cls, speed_khz: int, firmware: int) -> tuple[int, int]:
         if speed_khz >= MAX_FAST_TCK_KHZ:
             return FAST_TCK_DELAY_14000, MAX_FAST_TCK_KHZ
         if speed_khz >= 12000 and firmware >= FAST_TCK_PLUS_FIRMWARE_VERSION:

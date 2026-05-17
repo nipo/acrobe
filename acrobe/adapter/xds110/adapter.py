@@ -50,15 +50,15 @@ class XDS110Adapter(Adapter):
                  transport: XDS110Transport, version: protocol.Version,
                  delay_count: int):
         super().__init__(name)
-        self._info = info
-        self._device = device
-        self._transport = transport
+        self.__info = info
+        self.__device = device
+        self.__transport = transport
         self.version = version
         # Track the TCK ``delay_count`` programmed at open so the
         # JTAG sub-interface can avoid a redundant XDS_SET_TCK on
         # its first flush. Updated only by sub-interfaces that
         # subsequently change the rate.
-        self._delay_count = delay_count
+        self.__delay_count = delay_count
 
     @classmethod
     async def open(cls, descriptor) -> "XDS110Adapter":
@@ -81,7 +81,7 @@ class XDS110Adapter(Adapter):
             ep_out_addr=topology[1], ep_in_addr=topology[2],
             logger=logger)
 
-        version = await cls._get_version(transport)
+        version = await cls.__get_version(transport)
         logger.info("XDS110: %s", version)
         if version.firmware < protocol.OCD_FIRMWARE_VERSION:
             logger.warning("XDS110: firmware 0x%08x is older than the "
@@ -99,22 +99,22 @@ class XDS110Adapter(Adapter):
         # only re-issues XDS_SET_TCK when FreqCapper actually moves it.
         delay_count, achieved_khz = protocol.TckDelay.for_freq(
             protocol.DEFAULT_TCK_KHZ * 1000, version.firmware)
-        await cls._set_tck(transport, delay_count)
+        await cls.__set_tck(transport, delay_count)
         logger.debug("XDS110: TCK ~%d kHz (delay_count=0x%x)",
                      achieved_khz, delay_count)
 
         # nTRST is active-low in the firmware (value=0 asserts,
         # value=1 releases). Pulse it: assert → 50 TCKs → release →
         # 50 TCKs. Targets without nTRST wiring are unaffected.
-        await cls._set_trst(transport, 0)
-        await cls._cycle_tck(transport, 50)
-        await cls._set_trst(transport, 1)
-        await cls._cycle_tck(transport, 50)
+        await cls.__set_trst(transport, 0)
+        await cls.__cycle_tck(transport, 50)
+        await cls.__set_trst(transport, 1)
+        await cls.__cycle_tck(transport, 50)
 
         # Release nSRST too — many TI targets sit held in system
         # reset by the XDS110's nSRST line until explicitly let go.
         # Active-low like nTRST: value=1 means deasserted.
-        await cls._set_srst(transport, 1)
+        await cls.__set_srst(transport, 1)
 
         # Arm the JTAG engine. The JTAG sub-interface repeats this on
         # its first flush; doing it here too ensures the transport is
@@ -127,32 +127,32 @@ class XDS110Adapter(Adapter):
         return cls(name, info, device, transport, version, delay_count)
 
     @staticmethod
-    async def _set_tck(transport: XDS110Transport, delay_count: int) -> None:
+    async def __set_tck(transport: XDS110Transport, delay_count: int) -> None:
         payload = (bytes([protocol.Opcode.XDS_SET_TCK])
                    + protocol.Bytes.pack_u32(delay_count))
         await transport.command(
             payload, response_payload_size=protocol.ERROR_CODE_LEN)
 
     @staticmethod
-    async def _set_trst(transport: XDS110Transport, level: int) -> None:
+    async def __set_trst(transport: XDS110Transport, level: int) -> None:
         await transport.command(
             bytes([protocol.Opcode.XDS_SET_TRST, level & 0xFF]),
             response_payload_size=protocol.ERROR_CODE_LEN)
 
     @staticmethod
-    async def _set_srst(transport: XDS110Transport, level: int) -> None:
+    async def __set_srst(transport: XDS110Transport, level: int) -> None:
         await transport.command(
             bytes([protocol.Opcode.XDS_SET_SRST, level & 0xFF]),
             response_payload_size=protocol.ERROR_CODE_LEN)
 
     @staticmethod
-    async def _cycle_tck(transport: XDS110Transport, count: int) -> None:
+    async def __cycle_tck(transport: XDS110Transport, count: int) -> None:
         await transport.command(
             bytes([protocol.Opcode.XDS_CYCLE_TCK]) + protocol.Bytes.pack_u32(count),
             response_payload_size=protocol.ERROR_CODE_LEN)
 
     @staticmethod
-    async def _get_version(transport: XDS110Transport) -> protocol.Version:
+    async def __get_version(transport: XDS110Transport) -> protocol.Version:
         # XDS_VERSION returns 4 bytes status + 4 bytes firmware (LE u32)
         # + 2 bytes hardware (LE u16).
         result = await transport.command(
@@ -166,19 +166,19 @@ class XDS110Adapter(Adapter):
         if name == "jtag":
             from .jtag import XDS110JtagInterface
             return XDS110JtagInterface(
-                self._transport, self.version,
-                initial_delay_count=self._delay_count, name="jtag")
+                self.__transport, self.version,
+                initial_delay_count=self.__delay_count, name="jtag")
         raise NoMatch("interface", name)
 
     async def close(self):
         try:
-            await self._transport.command(
+            await self.__transport.command(
                 bytes([protocol.Opcode.XDS_DISCONNECT]),
                 response_payload_size=protocol.ERROR_CODE_LEN)
         except Exception as exc:
             self.logger.debug("XDS_DISCONNECT failed (ignored): %s", exc)
-        await self._transport.close()
-        self._device.handle.close()
+        await self.__transport.close()
+        self.__device.handle.close()
 
 
 for _info in _INFOS:
