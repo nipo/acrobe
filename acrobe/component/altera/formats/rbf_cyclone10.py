@@ -25,22 +25,22 @@ class RbfBitstream(Node, Readable):
 
     def __init__(self, name, source, swapped):
         super().__init__(name)
-        self._source = source
-        self._swapped = swapped
+        self.__source = source
+        self.__swapped = swapped
 
     @property
     def size(self) -> int:
-        return self._source.size
+        return self.__source.size
 
     async def read(self, offset, size):
-        data = await self._source.read(offset, size)
-        if self._swapped:
+        data = await self.__source.read(offset, size)
+        if self.__swapped:
             data = bitswap8(data)
         return data
 
     @property
     def metadata(self) -> dict:
-        return {"swapped": self._swapped, **self._metadata}
+        return {"swapped": self.__swapped, **self._metadata}
 
 
 @register_format("altera_rbf",
@@ -56,24 +56,24 @@ class Rbf(FormatNode):
     right format or pass `swap=` to bypass detection.
     """
 
-    _RBF_SYNCS = [
+    __RBF_SYNCS = [
         (RBF_SYNC, False),
         (RBF_SYNC_SWAPPED, True),
     ]
 
     def __init__(self, name, source):
         super().__init__(name, source)
-        self._swap_override = None  # None=auto, True/False=forced
+        self.__swap_override = None  # None=auto, True/False=forced
 
     def option_set(self, key, value):
         if key == "swap":
             v = value.lower()
             if v in ("true", "1", "yes"):
-                self._swap_override = True
+                self.__swap_override = True
             elif v in ("false", "0", "no"):
-                self._swap_override = False
+                self.__swap_override = False
             elif v == "auto":
-                self._swap_override = None
+                self.__swap_override = None
             else:
                 raise ValueError(
                     f"{self.fqdn}: swap must be true/false/auto, "
@@ -82,14 +82,14 @@ class Rbf(FormatNode):
         super().option_set(key, value)
 
     async def start(self):
-        if self._swap_override is not None:
-            swapped = self._swap_override
+        if self.__swap_override is not None:
+            swapped = self.__swap_override
             family = "user-specified"
         else:
             head = await self._source.read(
                 0, min(self._source.size, 4096))
             best = None
-            for sync, sw in self._RBF_SYNCS:
+            for sync, sw in self.__RBF_SYNCS:
                 pos = head.find(sync)
                 if pos >= 0 and (best is None or pos < best[0]):
                     best = (pos, sw, sync)

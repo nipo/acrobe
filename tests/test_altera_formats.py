@@ -280,7 +280,7 @@ class TestRbf:
         root = FsRoot(str(tmp_path))
         await root.start_tree()
         view = await root.child_summon("agilex.rbf", "bitstream")
-        assert view._swapped is False
+        assert view.metadata["swapped"] is False
         assert (await view.read(0, 4)) == RBF_SYNC_AGILEX
 
     @pytest.mark.asyncio
@@ -294,7 +294,7 @@ class TestRbf:
         root = FsRoot(str(tmp_path))
         await root.start_tree()
         view = await root.child_summon("agilex-sw.rbf", "bitstream")
-        assert view._swapped is True
+        assert view.metadata["swapped"] is True
         out = await view.read(0, 4)
         assert out == RBF_SYNC_AGILEX
 
@@ -307,7 +307,7 @@ class TestRbf:
         await root.start_tree()
         view = await root.child_summon(
             "blob", "as(type=altera_rbf,swap=true)", "bitstream")
-        assert view._swapped is True
+        assert view.metadata["swapped"] is True
         # Output is bit-reversed
         assert (await view.read(0, 4)) == bitswap8(body)
 

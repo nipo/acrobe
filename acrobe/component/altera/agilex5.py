@@ -60,10 +60,10 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
     CONF_DONE_BIT = 13
 
     # Bitstream streaming constants
-    _STREAM_HEADER = BitString(0xA17E2A00_FFFFFFFF, 64)
-    _STREAM_INITIAL_CHUNK = 32768
-    _STREAM_MAX_CHUNK = 524288
-    _STREAM_STATUS_RETRIES = 6000
+    STREAM_HEADER = BitString(0xA17E2A00_FFFFFFFF, 64)
+    STREAM_INITIAL_CHUNK = 32768
+    STREAM_MAX_CHUNK = 524288
+    STREAM_STATUS_RETRIES = 6000
 
     # ------------------------------------------------------------------
     # SramFpga interface
@@ -119,7 +119,7 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
 
         self.logger.trace("Streaming %d bits...", total_bits)
         with self.progress("config", len(blob), unit="B"):
-            await self._stream_bitstream(blob, total_bits)
+            await self.__stream_bitstream(blob, total_bits)
 
         self.logger.trace("Checking CONF_DONE...")
 
@@ -189,7 +189,7 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
     # Bitstream streaming (CONFIG DR path)
     # ------------------------------------------------------------------
 
-    async def _stream_status_check(self, request_data=False,
+    async def __stream_status_check(self, request_data=False,
                                    start_config=False, enable=False):
         """Check config status via IR 0x208."""
         tdi_val = 0
@@ -210,7 +210,7 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
         fifo_free = (val >> 32) & 0x1F
         return done, error, progress_words * 32, fifo_free
 
-    async def _stream_bitstream(self, data, total_bits):
+    async def __stream_bitstream(self, data, total_bits):
         """Stream bitstream data to SDM via IR 0x002 (CONFIG).
 
         Matches STAPL J127/J125 flow control:
@@ -220,12 +220,12 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
         4. Chunk doubles on success, halves on stall
         5. Data position tracks SDM progress counter (re-sends on stall)
         """
-        chunk_size = self._STREAM_INITIAL_CHUNK
+        chunk_size = self.STREAM_INITIAL_CHUNK
         first = True       # J123: first-iteration flag
         stalled = False     # J112: was-stalled flag
-        status_retries = self._STREAM_STATUS_RETRIES
+        status_retries = self.STREAM_STATUS_RETRIES
 
-        header_bs = self._STREAM_HEADER
+        header_bs = self.STREAM_HEADER
 
         while True:
             # CONFIG_STATUS poll
@@ -238,7 +238,7 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
                 start_config = False
                 enable = False
 
-            done, error, progress, fifo_free = await self._stream_status_check(
+            done, error, progress, fifo_free = await self.__stream_status_check(
                 request_data=request_data,
                 start_config=start_config,
                 enable=enable,
@@ -261,7 +261,7 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
             # Flow control
             if done:
                 stalled = True
-                if chunk_size > self._STREAM_INITIAL_CHUNK:
+                if chunk_size > self.STREAM_INITIAL_CHUNK:
                     chunk_size //= 2
                 continue
 
@@ -269,7 +269,7 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
             if stalled:
                 stalled = False
             else:
-                chunk_size = min(chunk_size * 2, self._STREAM_MAX_CHUNK)
+                chunk_size = min(chunk_size * 2, self.STREAM_MAX_CHUNK)
 
             remaining = total_bits - progress
             if remaining <= 0:
@@ -288,7 +288,7 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
             self.CONFIG(frame, read_tdo=False)
             await self.run(16)
 
-            status_retries = self._STREAM_STATUS_RETRIES
+            status_retries = self.STREAM_STATUS_RETRIES
 
 
 

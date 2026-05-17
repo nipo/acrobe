@@ -158,7 +158,7 @@ class Sdm(Node):
     
     def __init__(self):
         Node.__init__(self, "sdm")
-        self._id = 0
+        self.__id = 0
 
     async def start(self):
         await self.sync()
@@ -215,8 +215,8 @@ class Sdm(Node):
             chunk = argument[off:off + 4].ljust(4, b'\x00')
             arg_words.append(int.from_bytes(chunk, 'little'))
 
-        cid = self._id & 0xF
-        self._id += 1
+        cid = self.__id & 0xF
+        self.__id += 1
 
         header = (opcode & 0x7FF) \
             | ((len(arg_words) & 0x7FF) << 12) \

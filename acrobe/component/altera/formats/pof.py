@@ -48,32 +48,32 @@ class PofPartition(Node, Readable, Addressable):
 
     def __init__(self, name, source, flash_address, size):
         super().__init__(name)
-        self._source = source
-        self._flash_address = flash_address
-        self._size = size
+        self.__source = source
+        self.__flash_address = flash_address
+        self.__size = size
 
     @property
     def size(self) -> int:
-        return self._size
+        return self.__size
 
     @property
     def load_address(self) -> int:
-        return self._flash_address
+        return self.__flash_address
 
     async def read(self, offset, size):
-        if offset < 0 or offset > self._size:
+        if offset < 0 or offset > self.__size:
             raise ValueError(f"offset {offset} out of range")
-        avail = self._size - offset
+        avail = self.__size - offset
         n = min(size, avail)
         if n <= 0:
             return b""
-        return await self._source.read(self._flash_address + offset, n)
+        return await self.__source.read(self.__flash_address + offset, n)
 
     @property
     def metadata(self) -> dict:
         return {
-            "flash_address": self._flash_address,
-            "size": self._size,
+            "flash_address": self.__flash_address,
+            "size": self.__size,
             **self._metadata,
         }
 
@@ -139,7 +139,7 @@ class Pof(FormatNode):
                 flash_address=config_offset + 12,
                 size=config_size - 12,
             )
-            container = self._make_partition_container([partition])
+            container = self.__make_partition_container([partition])
             self._child_attach(container)
             return
 
@@ -164,10 +164,10 @@ class Pof(FormatNode):
         if not partitions:
             raise ValueError(f"{self.fqdn}: POF BOOT_INFO has no partitions")
 
-        container = self._make_partition_container(partitions)
+        container = self.__make_partition_container(partitions)
         self._child_attach(container)
 
-    def _make_partition_container(self, partitions):
+    def __make_partition_container(self, partitions):
         container = Node("partition")
         for p in partitions:
             container._child_attach(p)

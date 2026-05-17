@@ -27,13 +27,13 @@ class SdmSpiAdapter(spi.Interface):
 
     def __init__(self, sdm):
         super().__init__("spi")
-        self._sdm = sdm
+        self.__sdm = sdm
 
         self.child_add(spi.Target(self, cs=0, mode=0, name="cs0"))
 
     async def start(self):
-        await self._sdm.qspi_open()
-        await self._sdm.qspi_set_cs(0)
+        await self.__sdm.qspi_open()
+        await self.__sdm.qspi_set_cs(0)
 
     async def flush_ops(self, batch):
         # Group shifts between CS assert/deassert into transactions
@@ -50,9 +50,9 @@ class SdmSpiAdapter(spi.Interface):
                 current_shifts.append((op, future))
 
         for shifts in transactions:
-            await self._execute_transaction(shifts)
+            await self.__execute_transaction(shifts)
 
-    async def _execute_transaction(self, shifts):
+    async def __execute_transaction(self, shifts):
         """Execute one CS-held SPI transaction via SDM."""
         # Concatenate MOSI data from all shifts
         mosi = bytearray()
@@ -66,12 +66,12 @@ class SdmSpiAdapter(spi.Interface):
         need_miso = any(op.read_miso for op, _ in shifts)
 
         # Build VIR command: SPI marker header + opcode/data words
-        vir_words = self._build_vir(mosi, need_miso)
+        vir_words = self.__build_vir(mosi, need_miso)
         await self._tr.vir_write(vir_words, atomic=True)
 
         # Read VDR response
         if need_miso:
-            miso_all = await self._read_miso(total_bytes)
+            miso_all = await self.__read_miso(total_bytes)
         else:
             # Just read ack
             await self._tr.vdr_read(2)
@@ -86,7 +86,7 @@ class SdmSpiAdapter(spi.Interface):
                 op.miso = None
             future.set_result(op)
 
-    def _build_vir(self, mosi, need_response):
+    def __build_vir(self, mosi, need_response):
         """Build VIR words for SDM SPI passthrough.
 
         From STAPL analysis, the format is:
@@ -126,7 +126,7 @@ class SdmSpiAdapter(spi.Interface):
 
         return words
 
-    async def _read_miso(self, total_bytes):
+    async def __read_miso(self, total_bytes):
         """Read MISO response bytes from VDR.
 
         The SDM returns response data in VDR words.  We read words

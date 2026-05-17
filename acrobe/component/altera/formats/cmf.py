@@ -54,22 +54,22 @@ class CmfBitstream(Node, Readable):
 
     def __init__(self, name, source, swapped):
         super().__init__(name)
-        self._source = source
-        self._swapped = swapped
+        self.__source = source
+        self.__swapped = swapped
 
     @property
     def size(self) -> int:
-        return self._source.size
+        return self.__source.size
 
     async def read(self, offset, size):
-        data = await self._source.read(offset, size)
-        if self._swapped:
+        data = await self.__source.read(offset, size)
+        if self.__swapped:
             data = bitswap8(data)
         return data
 
     @property
     def metadata(self) -> dict:
-        return {"swapped": self._swapped, **self._metadata}
+        return {"swapped": self.__swapped, **self._metadata}
 
 
 class CmfSection(Node, Readable):
@@ -83,21 +83,21 @@ class CmfSection(Node, Readable):
 
     def __init__(self, name, source, offset, size):
         super().__init__(name)
-        self._source = source
-        self._offset = offset
-        self._size = size
+        self.__source = source
+        self.__offset = offset
+        self.__size = size
 
     @property
     def size(self) -> int:
-        return self._size
+        return self.__size
 
     async def read(self, offset, size):
-        if offset < 0 or offset > self._size:
+        if offset < 0 or offset > self.__size:
             raise ValueError(f"offset {offset} out of range")
-        n = min(size, self._size - offset)
+        n = min(size, self.__size - offset)
         if n <= 0:
             return b""
-        return await self._source.read(self._offset + offset, n)
+        return await self.__source.read(self.__offset + offset, n)
 
 
 def _walk_sections(blob: bytes):
@@ -226,24 +226,24 @@ class Cmf(FormatNode):
     ``swap=true|false|auto`` overrides bitswap detection.
     """
 
-    _CMF_SYNCS = [
+    __CMF_SYNCS = [
         (RBF_SYNC_AGILEX, False),
         (RBF_SYNC_AGILEX_SWAPPED, True),
     ]
 
     def __init__(self, name, source):
         super().__init__(name, source)
-        self._swap_override = None  # None=auto, True/False=forced
+        self.__swap_override = None  # None=auto, True/False=forced
 
     def option_set(self, key, value):
         if key == "swap":
             v = value.lower()
             if v in ("true", "1", "yes"):
-                self._swap_override = True
+                self.__swap_override = True
             elif v in ("false", "0", "no"):
-                self._swap_override = False
+                self.__swap_override = False
             elif v == "auto":
-                self._swap_override = None
+                self.__swap_override = None
             else:
                 raise ValueError(
                     f"{self.fqdn}: swap must be true/false/auto, "
@@ -252,14 +252,14 @@ class Cmf(FormatNode):
         super().option_set(key, value)
 
     async def start(self):
-        if self._swap_override is not None:
-            swapped = self._swap_override
+        if self.__swap_override is not None:
+            swapped = self.__swap_override
             sync_family = "user-specified"
         else:
             head = await self._source.read(
                 0, min(self._source.size, 4096))
             best = None
-            for sync, sw in self._CMF_SYNCS:
+            for sync, sw in self.__CMF_SYNCS:
                 pos = head.find(sync)
                 if pos >= 0 and (best is None or pos < best[0]):
                     best = (pos, sw, sync)
