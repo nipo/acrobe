@@ -47,7 +47,7 @@ async def info():
 async def adapters(ctx):
     hw_root = ctx.obj.hw_root
     any_found = False
-    for enum in hw_root._enumerators:
+    for enum in hw_root.enumerators:
         found = await enum.scan()
         if not found:
             continue

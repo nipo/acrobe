@@ -80,34 +80,34 @@ class UsbEnumerator:
     spawning strategy by HwRoot."""
 
     def __init__(self):
-        self._ctx = None
+        self.__ctx = None
 
-    def _ensure_ctx(self):
-        if self._ctx is None:
+    def __ensure_ctx(self):
+        if self.__ctx is None:
             import ausb
-            self._ctx = ausb.Context(enable_hotplug=False)
+            self.__ctx = ausb.Context(enable_hotplug=False)
             # Hook the context's close into the lifecycle so it
             # doesn't leak when the process exits without a tree-level
             # teardown. The context persists for the process lifetime
             # otherwise.
             from ..lifecycle import on_shutdown
-            on_shutdown(self._close_ctx)
+            on_shutdown(self.__close_ctx)
 
-    async def _close_ctx(self):
-        if self._ctx is not None:
-            self._ctx.close()
-            self._ctx = None
+    async def __close_ctx(self):
+        if self.__ctx is not None:
+            self.__ctx.close()
+            self.__ctx = None
 
-    def _iter_matches(self):
+    def __iter_matches(self):
         """Yield (AdapterInfo, adapter_cls, descriptor) for static descriptor matches."""
-        self._ensure_ctx()
-        for desc in self._ctx.device_filter():
+        self.__ensure_ctx()
+        for desc in self.__ctx.device_filter():
             for info, adapters in adapter_db._registry.items():
                 if info.matches(desc):
                     for adapter_cls in adapters:
                         yield info, adapter_cls, desc
 
-    async def _probe(self, descriptor, adapter_cls):
+    async def __probe(self, descriptor, adapter_cls):
         """Open device briefly to read serial and run runtime check.
 
         Returns mangled serial (may be None if device has no serial),
@@ -135,8 +135,8 @@ class UsbEnumerator:
         Raises NoMatch if no match or ambiguous.
         """
         matches = []
-        for info, adapter_cls, desc in self._iter_matches():
-            serial = await self._probe(desc, adapter_cls)
+        for info, adapter_cls, desc in self.__iter_matches():
+            serial = await self.__probe(desc, adapter_cls)
             if serial is _SKIP:
                 continue
             component_name = make_adapter_name(info, serial)
@@ -159,8 +159,8 @@ class UsbEnumerator:
         then closes. Returns list of (AdapterInfo, adapter_cls, descriptor, serial).
         """
         results = []
-        for info, adapter_cls, desc in self._iter_matches():
-            serial = await self._probe(desc, adapter_cls)
+        for info, adapter_cls, desc in self.__iter_matches():
+            serial = await self.__probe(desc, adapter_cls)
             if serial is _SKIP:
                 continue
             results.append((info, adapter_cls, desc, serial))
@@ -182,17 +182,17 @@ class HwRoot(Node):
 
     def __init__(self):
         super().__init__("HwRoot")
-        self._enumerators = []
-        self._discovery = None
-        self._discovery_task = None
-        self._discovery_needs_run = False
+        self.enumerators = []
+        self.__discovery = None
+        self.__discovery_task = None
+        self.__discovery_needs_run = False
 
     def add_enumerator(self, enumerator):
-        self._enumerators.append(enumerator)
+        self.enumerators.append(enumerator)
 
     async def child_spawn(self, name):
         errors = []
-        for enum in self._enumerators:
+        for enum in self.enumerators:
             try:
                 return await enum.spawn(name)
             except NoMatch as e:
@@ -207,25 +207,25 @@ class HwRoot(Node):
         task. Callers may await the returned Task to wait for the
         active sweep (including any re-run triggered during it).
         """
-        self._discovery_needs_run = True
-        if self._discovery_task is None or self._discovery_task.done():
-            self._discovery_task = asyncio.ensure_future(self.__run_discovery())
-        return self._discovery_task
+        self.__discovery_needs_run = True
+        if self.__discovery_task is None or self.__discovery_task.done():
+            self.__discovery_task = asyncio.ensure_future(self.__run_discovery())
+        return self.__discovery_task
 
     async def discover_targets(self):
         """Run discovery to fixed point and await completion."""
         await self.request_discovery()
 
     def __ensure_discovery(self):
-        if self._discovery is None:
+        if self.__discovery is None:
             from ..target.discovery import TargetDiscovery
-            self._discovery = TargetDiscovery()
-        return self._discovery
+            self.__discovery = TargetDiscovery()
+        return self.__discovery
 
     async def __run_discovery(self):
         await asyncio.sleep(0)
-        while self._discovery_needs_run:
-            self._discovery_needs_run = False
+        while self.__discovery_needs_run:
+            self.__discovery_needs_run = False
             await self.__ensure_discovery().run(self)
 
 
