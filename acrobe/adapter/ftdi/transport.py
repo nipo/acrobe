@@ -99,7 +99,7 @@ class ReadOp:
                 if stall_count > 3:
                     self.future.set_exception(e)
                     return b""
-                self._pair.in_.resume()
+                ep.resume()
                 continue
 
             if len(data) <= 2:
