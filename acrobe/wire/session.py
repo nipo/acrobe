@@ -56,7 +56,7 @@ class Session:
         self.registry = registry
         self.class_to_tag: dict[type, int] = {}
         self.tag_to_class: dict[int, type] = {}
-        self._next_tag = BASE_SESSION_TAG
+        self.__next_tag = BASE_SESSION_TAG
 
     # ----- Catalog issuance / application -----
 
@@ -74,12 +74,12 @@ class Session:
                 f"build_catalog: {node_class.__name__} is not a "
                 f"@wire.node ({node_entry.kind})")
 
-        node_tag = self._allocate_tag(node_class)
+        node_tag = self.__allocate_tag(node_class)
         types: dict[uuid_lib.UUID, int] = {}
 
-        for type_uuid in self._effective_uses(node_entry):
+        for type_uuid in self.__effective_uses(node_entry):
             type_entry = self.registry.lookup_by_uuid(type_uuid)
-            tag = self._allocate_tag(type_entry.cls)
+            tag = self.__allocate_tag(type_entry.cls)
             types[type_uuid] = tag
 
         return Catalog(node_uuid=node_entry.type_uuid,
@@ -100,16 +100,16 @@ class Session:
                 f"in registry; client and server are incompatible"
             ) from exc
 
-        self._install(node_entry.cls, catalog.node_tag)
+        self.__install(node_entry.cls, catalog.node_tag)
 
         for type_uuid, session_tag in catalog.types.items():
             try:
                 type_entry = self.registry.lookup_by_uuid(type_uuid)
             except KeyError:
                 continue
-            self._install(type_entry.cls, session_tag)
+            self.__install(type_entry.cls, session_tag)
 
-    def _effective_uses(self, node_entry: RegistryEntry) -> list[uuid_lib.UUID]:
+    def __effective_uses(self, node_entry: RegistryEntry) -> list[uuid_lib.UUID]:
         """The node's declared `uses` plus:
         - value types referenced transitively by their codecs (so
           BitString fields get a tag for response encoding);
@@ -149,15 +149,15 @@ class Session:
 
         return result
 
-    def _allocate_tag(self, cls: type) -> int:
+    def __allocate_tag(self, cls: type) -> int:
         if cls in self.class_to_tag:
             return self.class_to_tag[cls]
-        tag = self._next_tag
-        self._next_tag += 1
-        self._install(cls, tag)
+        tag = self.__next_tag
+        self.__next_tag += 1
+        self.__install(cls, tag)
         return tag
 
-    def _install(self, cls: type, tag: int) -> None:
+    def __install(self, cls: type, tag: int) -> None:
         existing_tag = self.class_to_tag.get(cls)
         if existing_tag is not None and existing_tag != tag:
             raise SessionError(
@@ -190,7 +190,7 @@ class Session:
         if isinstance(value, dict):
             return {k: self.encode_value(v) for k, v in value.items()}
 
-        entry = self._lookup_with_mro(type(value))
+        entry = self.__lookup_with_mro(type(value))
         if entry is None:
             raise SessionError(
                 f"cannot encode {type(value).__name__}: not a "
@@ -201,7 +201,7 @@ class Session:
                 f"cannot encode {entry.cls.__name__}: not in session catalog")
         return cbor2.CBORTag(tag, entry.codec.encode(value))
 
-    def _lookup_with_mro(self, cls: type):
+    def __lookup_with_mro(self, cls: type):
         for base in cls.__mro__:
             entry = self.registry.try_lookup_by_class(base)
             if entry is not None:
