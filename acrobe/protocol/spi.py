@@ -55,12 +55,12 @@ class Interface(Batcher, Node):
     def __init__(self, adapter, name="spi"):
         Batcher.__init__(self)
         Node.__init__(self, name)
-        self._adapter = adapter
+        self.__adapter = adapter
 
     async def flush_ops(self, batch):
         futures = []
         for op, future in batch:
-            futures.append((self._adapter.post(op), future))
+            futures.append((self.__adapter.post(op), future))
         if futures:
             await asyncio.gather(*[f for f, _ in futures])
         for af, mf in futures:
@@ -84,7 +84,7 @@ class Target(Batcher, Node):
     def __init__(self, interface, cs, mode: int = 0, name: str = "spi"):
         Batcher.__init__(self)
         Node.__init__(self, name)
-        self._interface = interface
+        self.__interface = interface
         self.cs = cs
         self.mode = mode
 
@@ -100,14 +100,14 @@ class Target(Batcher, Node):
         for idx, (op, future) in enumerate(batch):
             if isinstance(op, tuple) and op[0] == "transaction":
                 _, shifts = op
-                self._interface.post(Cs(self.cs, self.mode))
+                self.__interface.post(Cs(self.cs, self.mode))
                 shift_futures = []
                 for s in shifts:
                     if self.logger.isEnabledFor(5):
                         mosi = s.mosi if isinstance(s.mosi, bytes) else bytes(s.byte_count)
                         self.logger.log(5, ">> %s", mosi.hex())
-                    shift_futures.append(self._interface.post(s))
-                self._interface.post(Cs(None))
+                    shift_futures.append(self.__interface.post(s))
+                self.__interface.post(Cs(None))
                 iface_futures.extend(shift_futures)
                 result_map.append((idx, shifts, shift_futures))
 
