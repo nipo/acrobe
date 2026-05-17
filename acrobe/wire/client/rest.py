@@ -38,35 +38,35 @@ class EnumerationClient:
     def __init__(self, base_url: str, *,
                  session: aiohttp.ClientSession | None = None):
         self.base_url = base_url.rstrip("/")
-        self._session = session
-        self._owns_session = session is None
+        self.__session = session
+        self.__owns_session = session is None
 
     async def __aenter__(self) -> "EnumerationClient":
-        if self._session is None:
-            self._session = aiohttp.ClientSession()
+        if self.__session is None:
+            self.__session = aiohttp.ClientSession()
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        if self._owns_session and self._session is not None:
-            await self._session.close()
-            self._session = None
+        if self.__owns_session and self.__session is not None:
+            await self.__session.close()
+            self.__session = None
 
     async def enumerate(self, path: str) -> dict:
         """Fetch the node at `path`. Empty string = root."""
-        if self._session is None:
+        if self.__session is None:
             raise RuntimeError(
                 "EnumerationClient must be used as an async context "
                 "manager, or constructed with an explicit session")
 
-        url = self._url_for(path)
-        async with self._session.get(url) as resp:
+        url = self.__url_for(path)
+        async with self.__session.get(url) as resp:
             payload = await resp.json()
             if resp.status == 404:
                 raise NodeNotFound(path, payload.get("detail", ""))
             resp.raise_for_status()
             return payload
 
-    def _url_for(self, path: str) -> str:
+    def __url_for(self, path: str) -> str:
         clean = path.strip("/")
         if not clean:
             return f"{self.base_url}{REST_PATH_PREFIX}"
