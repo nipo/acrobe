@@ -137,77 +137,77 @@ class TtySerialPort(SerialPort):
 
     def __init__(self, name: str, path: str):
         super().__init__(name)
-        self._path = path
-        self._fd: int | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._read_buf = bytearray()
-        self._read_event = asyncio.Event()
-        self._signal_task: asyncio.Task | None = None
-        self._last_signals = Signals()
+        self.__path = path
+        self.__fd: int | None = None
+        self.__loop: asyncio.AbstractEventLoop | None = None
+        self.__read_buf = bytearray()
+        self.__read_event = asyncio.Event()
+        self.__signal_task: asyncio.Task | None = None
+        self.__last_signals = Signals()
         # Cached rate for platforms where kernel can't report an arbitrary one.
-        self._custom_baud: int | None = None
+        self.__custom_baud: int | None = None
+        self.__modem_supported = True
 
     async def start(self):
-        fd = os.open(self._path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-        self._fd = fd
-        self._loop = asyncio.get_running_loop()
-        self._loop.add_reader(fd, self._on_readable)
+        fd = os.open(self.__path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        self.__fd = fd
+        self.__loop = asyncio.get_running_loop()
+        self.__loop.add_reader(fd, self.__on_readable)
         # Probe for modem-line support; ptys and some devices return ENOTTY.
-        self._modem_supported = True
         try:
-            self._last_signals = self._read_signals_raw()
+            self.__last_signals = self.__read_signals_raw()
         except OSError:
-            self._modem_supported = False
-        if self._modem_supported:
-            self._signal_task = asyncio.create_task(self._signal_poll_loop())
+            self.__modem_supported = False
+        if self.__modem_supported:
+            self.__signal_task = asyncio.create_task(self.__signal_poll_loop())
 
     async def stop(self):
-        if self._signal_task is not None:
-            self._signal_task.cancel()
+        if self.__signal_task is not None:
+            self.__signal_task.cancel()
             try:
-                await self._signal_task
+                await self.__signal_task
             except (asyncio.CancelledError, Exception):
                 pass
-        if self._fd is not None and self._loop is not None:
+        if self.__fd is not None and self.__loop is not None:
             try:
-                self._loop.remove_reader(self._fd)
+                self.__loop.remove_reader(self.__fd)
             except Exception:
                 pass
-            os.close(self._fd)
-            self._fd = None
+            os.close(self.__fd)
+            self.__fd = None
 
     # ------------------------------------------------------------------
     # Data plane
     # ------------------------------------------------------------------
 
-    def _on_readable(self):
+    def __on_readable(self):
         try:
-            data = os.read(self._fd, 4096)
+            data = os.read(self.__fd, 4096)
         except OSError as e:
             if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
                 return
             # Hard error: treat as EOF
-            self._loop.remove_reader(self._fd)
-            self._read_event.set()
+            self.__loop.remove_reader(self.__fd)
+            self.__read_event.set()
             return
         if not data:
-            self._loop.remove_reader(self._fd)
-            self._read_event.set()
+            self.__loop.remove_reader(self.__fd)
+            self.__read_event.set()
             return
-        self._read_buf.extend(data)
-        self._read_event.set()
+        self.__read_buf.extend(data)
+        self.__read_event.set()
 
     async def read(self, size: int) -> bytes:
         out = bytearray()
         while len(out) < size:
-            if self._read_buf:
-                take = min(size - len(out), len(self._read_buf))
-                out += self._read_buf[:take]
-                del self._read_buf[:take]
+            if self.__read_buf:
+                take = min(size - len(out), len(self.__read_buf))
+                out += self.__read_buf[:take]
+                del self.__read_buf[:take]
                 continue
-            self._read_event.clear()
-            await self._read_event.wait()
-            if self._fd is None:
+            self.__read_event.clear()
+            await self.__read_event.wait()
+            if self.__fd is None:
                 raise EOFError("tty closed")
         return bytes(out)
 
@@ -215,23 +215,23 @@ class TtySerialPort(SerialPort):
         offset = 0
         while offset < len(data):
             try:
-                n = os.write(self._fd, data[offset:])
+                n = os.write(self.__fd, data[offset:])
                 offset += n
             except BlockingIOError:
-                fut = self._loop.create_future()
-                self._loop.add_writer(
-                    self._fd, lambda: fut.done() or fut.set_result(None))
+                fut = self.__loop.create_future()
+                self.__loop.add_writer(
+                    self.__fd, lambda: fut.done() or fut.set_result(None))
                 try:
                     await fut
                 finally:
-                    self._loop.remove_writer(self._fd)
+                    self.__loop.remove_writer(self.__fd)
 
     # ------------------------------------------------------------------
     # Config
     # ------------------------------------------------------------------
 
     async def config_set(self, cfg: SerialConfig) -> SerialConfig:
-        attrs = termios.tcgetattr(self._fd)
+        attrs = termios.tcgetattr(self.__fd)
         iflag, oflag, cflag, lflag, ispeed, ospeed, cc = attrs
 
         # Clear/raw config bits
@@ -296,27 +296,27 @@ class TtySerialPort(SerialPort):
         speed = _BAUD_TABLE[cfg.baud] if standard else termios.B9600
         cc[termios.VMIN] = 0
         cc[termios.VTIME] = 0
-        termios.tcsetattr(self._fd, termios.TCSANOW,
+        termios.tcsetattr(self.__fd, termios.TCSANOW,
                           [iflag, oflag, cflag, lflag, speed, speed, cc])
 
         if standard:
-            self._custom_baud = None
+            self.__custom_baud = None
             return cfg
 
-        applied = _set_baud_arbitrary(self._fd, cfg.baud)
-        self._custom_baud = applied
+        applied = _set_baud_arbitrary(self.__fd, cfg.baud)
+        self.__custom_baud = applied
         return cfg.with_(baud=applied)
 
     async def config_get(self) -> SerialConfig:
-        attrs = termios.tcgetattr(self._fd)
+        attrs = termios.tcgetattr(self.__fd)
         iflag, oflag, cflag, lflag, ispeed, ospeed, cc = attrs
         # Resolve baud rate: try arbitrary-rate ioctl first (Linux only),
         # then standard table, then fall back to last-applied cached rate.
-        rate = _get_baud_arbitrary(self._fd)
+        rate = _get_baud_arbitrary(self.__fd)
         if rate is None:
             rate = next((r for r, c in _BAUD_TABLE.items() if c == ospeed), 0)
-        if rate == 0 and self._custom_baud is not None:
-            rate = self._custom_baud
+        if rate == 0 and self.__custom_baud is not None:
+            rate = self.__custom_baud
         size_bits = {termios.CS5: 5, termios.CS6: 6,
                      termios.CS7: 7, termios.CS8: 8}[cflag & termios.CSIZE]
         if not (cflag & termios.PARENB):
@@ -346,22 +346,22 @@ class TtySerialPort(SerialPort):
         if on:
             # termios has no "start break"; use TIOCSBRK/TIOCCBRK on Linux
             # and ioctl on macOS. These constants differ per-platform.
-            fcntl.ioctl(self._fd, _TIOCSBRK, 0)
+            fcntl.ioctl(self.__fd, _TIOCSBRK, 0)
         else:
-            fcntl.ioctl(self._fd, _TIOCCBRK, 0)
+            fcntl.ioctl(self.__fd, _TIOCCBRK, 0)
 
     async def dtr_set(self, on: bool) -> None:
-        self._modem_bit(TIOCM_DTR, on)
+        self.__modem_bit(TIOCM_DTR, on)
 
     async def rts_set(self, on: bool) -> None:
-        self._modem_bit(TIOCM_RTS, on)
+        self.__modem_bit(TIOCM_RTS, on)
 
-    def _modem_bit(self, bit: int, on: bool):
+    def __modem_bit(self, bit: int, on: bool):
         buf = struct.pack("I", bit)
-        fcntl.ioctl(self._fd, TIOCMBIS if on else TIOCMBIC, buf)
+        fcntl.ioctl(self.__fd, TIOCMBIS if on else TIOCMBIC, buf)
 
-    def _read_signals_raw(self) -> Signals:
-        buf = fcntl.ioctl(self._fd, TIOCMGET, struct.pack("I", 0))
+    def __read_signals_raw(self) -> Signals:
+        buf = fcntl.ioctl(self.__fd, TIOCMGET, struct.pack("I", 0))
         v = struct.unpack("I", buf)[0]
         return Signals(
             cts=bool(v & TIOCM_CTS),
@@ -370,16 +370,16 @@ class TtySerialPort(SerialPort):
             dcd=bool(v & TIOCM_CD),
         )
 
-    def _read_signals(self) -> Signals:
-        if not getattr(self, "_modem_supported", True):
+    def __read_signals(self) -> Signals:
+        if not self.__modem_supported:
             return Signals()
         try:
-            return self._read_signals_raw()
+            return self.__read_signals_raw()
         except OSError:
             return Signals()
 
     async def signals_get(self) -> Signals:
-        return self._read_signals()
+        return self.__read_signals()
 
     async def flush(self, tx: bool = True, rx: bool = True) -> None:
         which = None
@@ -390,21 +390,21 @@ class TtySerialPort(SerialPort):
         elif rx:
             which = termios.TCIFLUSH
         if which is not None:
-            termios.tcflush(self._fd, which)
+            termios.tcflush(self.__fd, which)
 
-    async def _signal_poll_loop(self):
+    async def __signal_poll_loop(self):
         try:
             while True:
                 await asyncio.sleep(self._POLL_INTERVAL)
-                if self._fd is None:
+                if self.__fd is None:
                     return
                 try:
-                    new = self._read_signals()
+                    new = self.__read_signals()
                 except OSError:
                     return
-                if new != self._last_signals:
-                    old = self._last_signals
-                    self._last_signals = new
+                if new != self.__last_signals:
+                    old = self.__last_signals
+                    self.__last_signals = new
                     self._emit_signals(old, new)
         except asyncio.CancelledError:
             raise
@@ -430,11 +430,11 @@ class TtyAdapter(Adapter):
 
     def __init__(self, name: str, path: str):
         super().__init__(name)
-        self._path = path
+        self.__path = path
 
     async def child_spawn(self, name):
         if name.lower() == "serial":
-            port = TtySerialPort(name="serial", path=self._path)
+            port = TtySerialPort(name="serial", path=self.__path)
             return port
         raise NoMatch("interface", name)
 
