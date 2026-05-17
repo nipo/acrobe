@@ -166,10 +166,10 @@ class Interface(Batcher, FreqCapper, Node):
     # Keyed on raw 32-bit DPIDR; REVISION (bits 31:28) is masked so
     # one registration covers every silicon roll of a DP design.
     @staticmethod
-    def _dpidr_eq(key, lookup):
+    def __dpidr_eq(key, lookup):
         return (key & 0x0fffffff) == (lookup & 0x0fffffff)
 
-    db: Db = Db("SWD DP DPIDR", eq_func=_dpidr_eq)
+    db: Db = Db("SWD DP DPIDR", eq_func=__dpidr_eq)
 
     def __init__(self, name="swd"):
         Batcher.__init__(self)
