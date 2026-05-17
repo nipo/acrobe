@@ -40,19 +40,19 @@ class StLinkMemAp(MemAp):
     def __init__(self, dp, base: int, idr: int = 0,
                  name: str | None = None):
         super().__init__(dp=dp, base=base, idr=idr, name=name)
-        self._transport = dp._transport
-        self._ap_num = (base >> 24) & 0xFF
+        self.__transport = dp._transport
+        self.__ap_num = (base >> 24) & 0xFF
 
     async def flush_ops(self, batch):
         for op, future in batch:
             try:
                 if isinstance(op, Read32):
-                    raw = await self._transport.read_mem32(
-                        self._ap_num, op.addr, 1)
+                    raw = await self.__transport.read_mem32(
+                        self.__ap_num, op.addr, 1)
                     future.set_result(struct.unpack_from("<I", raw)[0])
                 elif isinstance(op, Write32):
-                    await self._transport.write_mem32(
-                        self._ap_num, op.addr,
+                    await self.__transport.write_mem32(
+                        self.__ap_num, op.addr,
                         struct.pack("<I", op.data))
                     future.set_result(None)
                 elif isinstance(op, (Read8, Read16, Write8, Write16)):

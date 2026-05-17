@@ -47,9 +47,9 @@ class StLinkAdapter(Adapter):
                  transport: StLinkTransport,
                  version: protocol.StLinkVersion):
         super().__init__(name)
-        self._info = info
-        self._device = device
-        self._transport = transport
+        self.__info = info
+        self.__device = device
+        self.__transport = transport
         self.version = version
 
     @classmethod
@@ -91,14 +91,14 @@ class StLinkAdapter(Adapter):
         from .dp import StLinkJtagDp, StLinkSwDp
 
         if name == "jtag":
-            return StLinkJtagDp(self._transport)
+            return StLinkJtagDp(self.__transport)
         if name == "swd":
-            return StLinkSwDp(self._transport)
+            return StLinkSwDp(self.__transport)
         raise NoMatch("interface", name)
 
     async def close(self):
-        await self._transport.close()
-        self._device.handle.close()
+        await self.__transport.close()
+        self.__device.handle.close()
 
 
 for _info in _STLINK_INFOS:

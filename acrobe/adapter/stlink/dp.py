@@ -38,7 +38,7 @@ class StLinkDp(dpmod.Dp):
     def __init__(self, transport: StLinkTransport, name: str | None = None):
         super().__init__(name=name or self.MODE_NAME or "dap")
         self._transport = transport
-        self._opened_aps: set[int] = set()
+        self.__opened_aps: set[int] = set()
 
     async def _enter_mode(self) -> None:
         raise NotImplementedError
@@ -60,12 +60,12 @@ class StLinkDp(dpmod.Dp):
     async def stop(self):
         """Best-effort: leave debug mode and release any APs we
         opened."""
-        for ap_num in list(self._opened_aps):
+        for ap_num in list(self.__opened_aps):
             try:
                 await self._transport.close_ap(ap_num)
             except Exception:
                 pass
-        self._opened_aps.clear()
+        self.__opened_aps.clear()
         try:
             await self._transport.exit_debug()
         except Exception:
@@ -131,14 +131,14 @@ class StLinkDp(dpmod.Dp):
         # Non-MEM-AP: fall through to the standard discovery path.
         return await Ap.discover(self, base=base)
 
-    async def _ensure_ap_open(self, ap_num: int) -> None:
+    async def __ensure_ap_open(self, ap_num: int) -> None:
         """Call INIT_AP once per AP. Failures are non-fatal: on
         ADIv6 chips, ST-Link's INIT_AP can return error codes
         (observed 0x05 on STM32MP2) yet the underlying AP register
         accesses still work through ``read_dap_reg`` /
         ``write_dap_reg``. Cache so we don't retry every transaction.
         """
-        if ap_num in self._opened_aps:
+        if ap_num in self.__opened_aps:
             return
         try:
             await self._transport.init_ap(ap_num)
@@ -148,7 +148,7 @@ class StLinkDp(dpmod.Dp):
                 "an ADIv6 AP that ST-Link can't pre-initialize, but "
                 "direct register access usually still works)",
                 ap_num, protocol.status_name(exc.status))
-        self._opened_aps.add(ap_num)
+        self.__opened_aps.add(ap_num)
 
     async def flush_ops(self, batch):
         """Translate batched DP/AP ops to ST-Link USB transactions.
@@ -173,7 +173,7 @@ class StLinkDp(dpmod.Dp):
                     ap_num = (op.addr >> 24) & 0xFF
                     reg_addr = op.addr & 0x00FFFFFF
                     if reg_addr != Ap.IDR:
-                        await self._ensure_ap_open(ap_num)
+                        await self.__ensure_ap_open(ap_num)
                     val = await self._transport.read_dap_reg(
                         ap_num, reg_addr)
                     future.set_result(val)
@@ -181,7 +181,7 @@ class StLinkDp(dpmod.Dp):
                     ap_num = (op.addr >> 24) & 0xFF
                     reg_addr = op.addr & 0x00FFFFFF
                     if reg_addr != Ap.IDR:
-                        await self._ensure_ap_open(ap_num)
+                        await self.__ensure_ap_open(ap_num)
                     await self._transport.write_dap_reg(
                         ap_num, reg_addr, op.data)
                     future.set_result(None)

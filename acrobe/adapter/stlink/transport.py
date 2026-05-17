@@ -39,12 +39,12 @@ class StLinkTransport:
     def __init__(self, device, interface_index: int,
                  ep_out: BulkOutEndpoint, ep_in: BulkInEndpoint,
                  logger: logging.Logger):
-        self._device = device
-        self._interface = interface_index
-        self._ep_out = ep_out
-        self._ep_in = ep_in
-        self._lock = asyncio.Lock()
-        self._logger = logger
+        self.__device = device
+        self.__interface = interface_index
+        self.__ep_out = ep_out
+        self.__ep_in = ep_in
+        self.__lock = asyncio.Lock()
+        self.__logger = logger
 
     @classmethod
     async def from_device(cls, device, *, interface_index: int = 0,
@@ -65,7 +65,7 @@ class StLinkTransport:
             pass
         device.handle.claimInterface(interface_index)
 
-        ep_out_addr, ep_in_addr, mps = cls._find_endpoints(
+        ep_out_addr, ep_in_addr, mps = cls.__find_endpoints(
             device, interface_index)
         ep_out = BulkOutEndpoint(device, ep_out_addr, mps)
         ep_in = BulkInEndpoint(device, ep_in_addr, mps)
@@ -88,7 +88,7 @@ class StLinkTransport:
         return cls(device, interface_index, ep_out, ep_in, logger)
 
     @staticmethod
-    def _find_endpoints(device, interface_index: int):
+    def __find_endpoints(device, interface_index: int):
         """Return (ep_out_addr, ep_in_addr, mps) for the debug
         interface — the first bulk OUT and bulk IN found in the
         active interface descriptor. ``mps`` is the smaller of the
@@ -129,16 +129,16 @@ class StLinkTransport:
             raise ValueError(
                 f"ST-Link command too long: {len(cmd)} > {_COMMAND_BYTES}")
         padded = cmd + bytes(_COMMAND_BYTES - len(cmd))
-        async with self._lock:
-            self._logger.protocol(
+        async with self.__lock:
+            self.__logger.protocol(
                 "ST-Link cmd %s (response %d B)",
                 " ".join(f"{b:02x}" for b in cmd[:4]),
                 response_size)
-            await self._ep_out.write(padded)
+            await self.__ep_out.write(padded)
             if response_size == 0:
                 return b""
-            resp = await self._ep_in.read(response_size)
-            self._logger.protocol(
+            resp = await self.__ep_in.read(response_size)
+            self.__logger.protocol(
                 "ST-Link rsp %s",
                 " ".join(f"{b:02x}" for b in resp[:8]))
             return resp
@@ -172,7 +172,7 @@ class StLinkTransport:
     # -- Debug-mode entry / exit -----------------------------------
 
     @staticmethod
-    def _check_status(resp: bytes, context: str = "") -> None:
+    def __check_status(resp: bytes, context: str = "") -> None:
         """Raise :class:`StLinkError` if the command status isn't OK.
 
         Status byte is at response[0]. Most DEBUG transactions return
@@ -189,7 +189,7 @@ class StLinkTransport:
             bytes([protocol.CMD_DEBUG,
                    protocol.DEBUG_APIV2_ENTER,
                    protocol.ENTER_JTAG_NO_RESET]), 2)
-        self._check_status(resp, "enter_jtag")
+        self.__check_status(resp, "enter_jtag")
 
     async def enter_swd(self) -> None:
         """Enter SWD debug mode without asserting reset."""
@@ -197,7 +197,7 @@ class StLinkTransport:
             bytes([protocol.CMD_DEBUG,
                    protocol.DEBUG_APIV2_ENTER,
                    protocol.ENTER_SWD_NO_RESET]), 2)
-        self._check_status(resp, "enter_swd")
+        self.__check_status(resp, "enter_swd")
 
     async def exit_debug(self) -> None:
         """Leave debug mode. The command returns no response."""
@@ -223,7 +223,7 @@ class StLinkTransport:
             addr & 0xFF, (addr >> 8) & 0xFF,
         ])
         resp = await self.command(cmd, 8)
-        self._check_status(
+        self.__check_status(
             resp, f"read_dap_reg(port=0x{dap_port:04x}, addr=0x{addr:04x})")
         return (resp[4] | (resp[5] << 8)
                 | (resp[6] << 16) | (resp[7] << 24))
@@ -239,7 +239,7 @@ class StLinkTransport:
             (value >> 16) & 0xFF, (value >> 24) & 0xFF,
         ])
         resp = await self.command(cmd, 2)
-        self._check_status(
+        self.__check_status(
             resp,
             f"write_dap_reg(port=0x{dap_port:04x}, "
             f"addr=0x{addr:04x}, val=0x{value:08x})")
@@ -253,7 +253,7 @@ class StLinkTransport:
             bytes([protocol.CMD_DEBUG,
                    protocol.DEBUG_APIV2_INIT_AP,
                    ap_num & 0xFF]), 2)
-        self._check_status(resp, f"init_ap({ap_num})")
+        self.__check_status(resp, f"init_ap({ap_num})")
 
     async def close_ap(self, ap_num: int) -> None:
         """Release a previously-init'd AP."""
@@ -292,7 +292,7 @@ class StLinkTransport:
             (csw >> 24) & 0xFF,
         ])
         data = await self.command(cmd, length)
-        await self._get_last_rw_status()
+        await self.__get_last_rw_status()
         return data
 
     async def write_mem32(self, ap_num: int, addr: int, data: bytes,
@@ -315,15 +315,15 @@ class StLinkTransport:
             (csw >> 16) & 0xFF,
             (csw >> 24) & 0xFF,
         ])
-        async with self._lock:
-            self._logger.protocol(
+        async with self.__lock:
+            self.__logger.protocol(
                 "ST-Link mem-write32 ap=%d addr=0x%x len=%d",
                 ap_num, addr, length)
-            await self._ep_out.write(cmd + bytes(_COMMAND_BYTES - len(cmd)))
-            await self._ep_out.write(data)
-        await self._get_last_rw_status()
+            await self.__ep_out.write(cmd + bytes(_COMMAND_BYTES - len(cmd)))
+            await self.__ep_out.write(data)
+        await self.__get_last_rw_status()
 
-    async def _get_last_rw_status(self) -> None:
+    async def __get_last_rw_status(self) -> None:
         """Check status of the previous mem-read/write transaction.
         Memory commands themselves don't return a status — this
         follow-up does. Raises :class:`StLinkError` on non-OK.
@@ -335,10 +335,10 @@ class StLinkTransport:
         resp = await self.command(
             bytes([protocol.CMD_DEBUG,
                    protocol.DEBUG_GET_LAST_RW_STATUS2]), 12)
-        self._check_status(resp, "get_last_rw_status")
+        self.__check_status(resp, "get_last_rw_status")
 
     async def close(self) -> None:
         try:
-            self._device.handle.releaseInterface(self._interface)
+            self.__device.handle.releaseInterface(self.__interface)
         except Exception:
             pass
