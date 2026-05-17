@@ -78,7 +78,13 @@ class SwDp(dpmod.Dp):
         if self.targetsel is not None:
             # The Interface elides this when current_target already
             # matches, so the cost is one Python-side post per batch
-            # in the steady state.
+            # in the steady state. When the preamble *does* fire,
+            # the line reset inside it clears the DP-side SELECT
+            # register — invalidate our cache so the first access
+            # in this batch unconditionally re-emits SELECT.
+            if self.__swd.current_target != self.targetsel:
+                self.__select = 0
+                select = 0
             self.__swd.post(swd.TargetSelect(target=self.targetsel))
 
         for op, future in batch:
@@ -131,7 +137,14 @@ class SwDp(dpmod.Dp):
             if user_fut.done():
                 continue
             if isinstance(result, BaseException):
-                user_fut.set_exception(result)
+                if isinstance(result, swd.SwdAccessFailure):
+                    # Translate to the DP-layer exception so callers
+                    # catching DpAccessFailure don't have to also
+                    # know about the wire layer.
+                    user_fut.set_exception(
+                        dpmod.DpAccessFailure(str(result)))
+                else:
+                    user_fut.set_exception(result)
             else:
                 user_fut.set_result(result)
 

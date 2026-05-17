@@ -278,15 +278,21 @@ class Interface(Batcher, FreqCapper, Node):
                     if future is not None:
                         future.set_result(None)
                     continue
-                # Emit a wake / TARGETSEL / idle preamble. We give
+                # Emit a wake / TARGETSEL / DPIDR preamble. We give
                 # injected ops their own futures so the wire layer
                 # can resolve them normally; nobody awaits them
-                # outside this batch.
+                # outside this batch. The trailing DPIDR read is
+                # spec-mandated: per ADIv5/v6 the first transaction
+                # after a Target Selection Protocol must be a DPIDR
+                # read to confirm the new selection; without it,
+                # follow-up transactions go unacknowledged.
                 out.append((Wakeup(50), loop.create_future()))
                 out.append((Run(4), loop.create_future()))
                 out.append(
                     (TargetSelWrite(op.target), loop.create_future()))
                 out.append((Run(4), loop.create_future()))
+                out.append((Read(ap=False, addr=0x00),
+                            loop.create_future()))
                 self.current_target = op.target
                 if future is not None:
                     future.set_result(None)
@@ -370,7 +376,10 @@ class Interface(Batcher, FreqCapper, Node):
         """Walk :data:`targetsel_db` and spawn a DP per responsive
         target. Each candidate gets a full dormant cycle so the
         previous TARGETSEL is cleared on every DP."""
-        entries = list(self.targetsel_db.registry.items())
+        entries = [
+            (int(key), handlers[0])
+            for key, handlers in self.targetsel_db.registry.items()
+        ]
         if not entries:
             self.logger.warning(
                 "multidrop=scan: targetsel_db is empty; no targets "
@@ -378,8 +387,7 @@ class Interface(Batcher, FreqCapper, Node):
             return
         responsive: list[tuple[int, str, int]] = []
         with self.freq_capped("enumeration", 1e6):
-            for targetsel_key, name in entries:
-                targetsel_int = int(targetsel_key)
+            for targetsel_int, name in entries:
                 self.post(Wakeup(50))
                 self.post(SwdToDormant())
                 self.post(Wakeup(50))
