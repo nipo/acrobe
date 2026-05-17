@@ -210,5 +210,5 @@ class Ap(Node):
             return cls(dp=dp, base=base, idr=idr)
 
     def __repr__(self):
-        return (f"<{type(self).__name__} {self._name} "
+        return (f"<{type(self).__name__} {self.name} "
                 f"base=0x{self.base:08x} idr=0x{self.idr:08x}>")

@@ -402,7 +402,7 @@ class CortexMDebuggable(Debuggable):
         picks up the CTRL-AP fast path automatically since
         Nrf52Loadable.erase_all overrides the default."""
         from ..loadable import Loadable
-        target = self._parent
+        target = self.parent
         if target is None:
             return "no target attached\n"
         loadables = target.children_of_class(Loadable)

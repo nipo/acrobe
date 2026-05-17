@@ -99,9 +99,9 @@ class Rbf(FormatNode):
                     "no recognised sync word in first 4KiB")
             swapped = best[1]
             family = best[2].hex()
-        self._metadata["sync_family"] = family
+        self.metadata["sync_family"] = family
         view = RbfBitstream("bitstream", self._source, swapped)
-        self._child_attach(view)
+        self.child_add(view)
 
 # Note: RBF magic detection is unreliable from raw bytes alone —
 # the sync word can appear anywhere in the first KB. We don't

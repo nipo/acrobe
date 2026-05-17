@@ -389,8 +389,8 @@ class Dp(Batcher, Node):
         After all children have been started (or failed), log the
         chip identifier — by the time AP root ROM Tables are
         discovered, ``chip_id()``'s fallback path is ready."""
-        await self._ensure_started()
-        for child in self._children:
+        await self.ensure_started()
+        for child in self.children:
             try:
                 await child.start_tree()
             except Exception as exc:
@@ -507,4 +507,4 @@ class Dp(Batcher, Node):
         return None
 
     def __repr__(self):
-        return f"<{type(self).__name__} {self._name}>"
+        return f"<{type(self).__name__} {self.name}>"

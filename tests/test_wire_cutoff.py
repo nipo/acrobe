@@ -73,9 +73,9 @@ class _TestIface(Node, Batcher):
 def _build_remote_tree():
     iface = _TestIface(name="iface")
     adapter = Node("adapter")
-    adapter._child_attach(iface)
+    adapter.child_add(iface)
     root = Node("HwRoot")
-    root._child_attach(adapter)
+    root.child_add(adapter)
     return root
 
 

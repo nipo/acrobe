@@ -61,10 +61,10 @@ class StubParser(FormatNode):
         cursor = body_offset
         for i, sz in enumerate(sizes):
             child = StubSection(f"sec{i}", self._source, cursor, sz)
-            self._child_attach(child)
+            self.child_add(child)
             cursor += sz
-        self._metadata["section_count"] = n
-        self._metadata["sizes"] = sizes
+        self.metadata["section_count"] = n
+        self.metadata["sizes"] = sizes
 
 
 @register_magic

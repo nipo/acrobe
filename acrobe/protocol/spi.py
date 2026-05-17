@@ -67,7 +67,7 @@ class Interface(Batcher, Node):
             mf.set_result(af.result())
 
     def __repr__(self):
-        return f"<spi.Interface {self._name}>"
+        return f"<spi.Interface {self.name}>"
 
 
 # --- SPI Target ---

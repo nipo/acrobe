@@ -1,4 +1,4 @@
-"""Tests for the path options grammar (Node._parse_options).
+"""Tests for the path options grammar (Node._Node__parse_options).
 
 Per docs/vfs-design.md D10:
 
@@ -16,7 +16,7 @@ import pytest
 from acrobe.node import Node, _parse_kv_list, _NotKvList
 
 
-parse = Node._parse_options
+parse = Node._Node__parse_options
 
 
 class TestSimpleNames:
@@ -135,21 +135,21 @@ class TestChildLookupExactBeforeSubstring:
     def test_exact_match_wins(self):
         parent = Node("p")
         for n in ["J2", "J23", "J24", "J25"]:
-            parent._child_attach(Node(n))
+            parent.child_add(Node(n))
         # "J2" must resolve to the exact node, not raise ambiguity.
         assert parent.child_lookup("J2").name == "J2"
         assert parent.child_lookup("J23").name == "J23"
 
     def test_substring_still_works_when_unique(self):
         parent = Node("p")
-        parent._child_attach(Node("longname"))
-        parent._child_attach(Node("other"))
+        parent.child_add(Node("longname"))
+        parent.child_add(Node("other"))
         assert parent.child_lookup("long").name == "longname"
 
     def test_substring_ambiguity_returns_none(self):
         parent = Node("p")
-        parent._child_attach(Node("foo"))
-        parent._child_attach(Node("foobar"))
+        parent.child_add(Node("foo"))
+        parent.child_add(Node("foobar"))
         # Substring "fo" matches both, no exact match → None.
         assert parent.child_lookup("fo") is None
 

@@ -41,7 +41,7 @@ class ZipEntry(Node, Readable):
         # archive.zip/inner.pof where inner.pof is itself a POF
         # to be parsed structurally).
         from . import auto_populate
-        await auto_populate(self, self, self._name)
+        await auto_populate(self, self, self.name)
 
     async def __ensure_data(self):
         if self.__cached is not None:
@@ -102,7 +102,7 @@ class ZipArchive(FormatNode):
                         name, self._source, info),
                 ))
             build_archive_tree(self, entries)
-            self._metadata["entry_count"] = len(entries)
+            self.metadata["entry_count"] = len(entries)
         finally:
             zf.close()
 

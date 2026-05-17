@@ -230,6 +230,10 @@ class Node:
       be started yet).
     - child_remove(child) is async: it stops the child's entire
       subtree (stop_tree), then detaches it.
+    - child_transplant_to(new_parent) moves every child of this
+      node onto new_parent without stopping anything (used by the
+      VFS format auto-detection: a parser is built transiently and
+      its discovered children are reparented onto the host Node).
     - start_tree() walks top-down: calls start() on self, marks
       started, then recurses into existing children.
     - stop_tree() walks top-down: calls stop() on self, clears
@@ -246,46 +250,59 @@ class Node:
       triggers auto-start if parent is started).
 
     Pre-populated vs on-demand children:
-    - Pre-populated children are created in start() and live in
-      self._children — visible via .children and listed by
-      `acrobe resource ls`.
+    - Pre-populated children are created in start() and live under
+      this node — visible via .children and listed by
+      `acrobe loadable ls`.
     - On-demand children (e.g. `as(type=...)`, ELF symbols) are
-      not in self._children but reachable via child_spawn /
+      not in .children but reachable via child_spawn /
       child_summon.
     """
 
     def __init__(self, name: str):
-        self._name = name
-        self._parent = None
-        self._children = []
-        self._started = False
-        self._metadata = {}
+        self.__name = name
+        self.__parent = None
+        self.__children = []
+        self.__started = False
+        # Underlying storage stays as `_metadata` so subclasses that
+        # override the `metadata` property to produce a merged view
+        # (e.g. FileNode) can still mutate the base dict.
+        self._metadata: dict = {}
         # Single-flight bookkeeping so concurrent child_summon /
         # start_tree calls don't open the same hardware twice. Lazy
         # to avoid bind-to-loop on Nodes that are constructed before
         # an event loop exists.
-        self._summon_inflight: dict[str, asyncio.Future] = {}
-        self._start_lock: asyncio.Lock | None = None
+        self.__summon_inflight: dict[str, asyncio.Future] = {}
+        self.__start_lock: asyncio.Lock | None = None
 
     def __str__(self):
-        return self._name
+        return self.__name
 
     def __repr__(self):
-        return f"<{self.__class__.__name__} '{self._name}'>"
+        return f"<{self.__class__.__name__} '{self.__name}'>"
 
     @property
     def name(self) -> str:
-        return self._name
+        return self.__name
+
+    @name.setter
+    def name(self, value: str) -> None:
+        # fqdn / path / logger are computed fresh on each access, so
+        # renaming the node immediately reflects in the next logger
+        # lookup. Subclasses that discover their final name during
+        # start() rely on this.
+        self.__name = value
 
     @property
     def parent(self):
-        return self._parent
+        return self.__parent
 
     @property
     def children(self) -> list:
         """Pre-populated children only. On-demand children
-        (e.g. `as(...)`, ELF symbols) are not listed here."""
-        return list(self._children)
+        (e.g. `as(...)`, ELF symbols) are not listed here.
+        Returns a fresh copy each call — mutating it does not
+        affect the underlying tree."""
+        return list(self.__children)
 
     @property
     def fqdn(self) -> str:
@@ -297,8 +314,8 @@ class Node:
         parts = []
         node = self
         while node is not None:
-            parts.append(node._name)
-            node = node._parent
+            parts.append(node.__name)
+            node = node.__parent
         parts.reverse()
         return ".".join(parts)
 
@@ -309,8 +326,8 @@ class Node:
         parts = []
         node = self
         while node is not None:
-            parts.append(node._name)
-            node = node._parent
+            parts.append(node.__name)
+            node = node.__parent
         parts.reverse()
         return "/".join(parts)
 
@@ -320,36 +337,58 @@ class Node:
 
     @property
     def started(self) -> bool:
-        return self._started
+        return self.__started
 
     @property
     def metadata(self) -> dict:
-        """Free-form metadata for inspection (e.g. by
-        `acrobe resource info`). Format-specific subclasses
-        populate self._metadata in start(); subclasses with typed
-        attributes (e.g. ElfSection.flags, Pof.tool) usually mirror
-        them into this dict.
-        """
+        """Free-form metadata for inspection (`acrobe loadable info`).
+        Subclasses may override this as a read-only property that
+        returns a computed view; in that case they keep populating
+        the base `_metadata` storage in start()."""
         return self._metadata
 
-    def _child_attach(self, child: "Node"):
-        """Attach child without auto-start. Used by child_summon."""
-        assert child._parent is None, f"{child.fqdn} already has a parent"
-        child._parent = self
-        self._children.append(child)
+    @metadata.setter
+    def metadata(self, value: dict) -> None:
+        self._metadata = value
+
+    def __child_attach(self, child: "Node"):
+        """Silent attach. Internal — used by __lookup_or_spawn so
+        that child_summon can take the inflight lock and then start
+        the child itself without racing the auto-start path."""
+        assert child.__parent is None, f"{child.fqdn} already has a parent"
+        child.__parent = self
+        self.__children.append(child)
         self.children_changed()
 
     def child_add(self, child: "Node"):
-        self._child_attach(child)
-        if self._started:
+        """Public eager-attach. Auto-starts the child if this parent
+        is already started; otherwise the start happens when this
+        parent's start_tree() recurses."""
+        self.__child_attach(child)
+        if self.__started:
             asyncio.ensure_future(child.start_tree())
 
     async def child_remove(self, child: "Node"):
-        assert child._parent is self, f"{child.fqdn} is not a child of {self.fqdn}"
+        """Stop the child's subtree, then detach."""
+        assert child.__parent is self, f"{child.fqdn} is not a child of {self.fqdn}"
         await child.stop_tree()
-        self._children.remove(child)
-        child._parent = None
+        self.__children.remove(child)
+        child.__parent = None
         self.children_changed()
+
+    def child_transplant_to(self, new_parent: "Node") -> None:
+        """Move every child of this node onto `new_parent`, in order,
+        without stopping anything. Used by the VFS format auto-
+        detection path: a parser is built transiently, its discovered
+        children are then reparented onto the host node.
+        """
+        moved = list(self.__children)
+        self.__children.clear()
+        for child in moved:
+            child.__parent = new_parent
+            new_parent.__children.append(child)
+        self.children_changed()
+        new_parent.children_changed()
 
     def children_changed(self):
         pass
@@ -358,7 +397,7 @@ class Node:
         result = []
         if include_self and predicate(self):
             result.append(self)
-        for child in self._children:
+        for child in self.__children:
             result.extend(child.children_find(predicate, include_self=True))
         return result
 
@@ -366,11 +405,11 @@ class Node:
         return self.children_find(lambda c: isinstance(c, klass), include_self=include_self)
 
     def parent_of_class(self, klass):
-        node = self._parent
+        node = self.__parent
         while node is not None:
             if isinstance(node, klass):
                 return node
-            node = node._parent
+            node = node.__parent
         raise LookupError(f"No ancestor of class {klass.__name__} found from {self.fqdn}")
 
     @contextmanager
@@ -420,22 +459,22 @@ class Node:
         Returns None if not found.
         """
         if name == "..":
-            return self._parent
+            return self.__parent
         if name == "*":
-            if len(self._children) == 1:
-                return self._children[0]
+            if len(self.__children) == 1:
+                return self.__children[0]
             return None
         try:
-            return self._children[int(name)]
+            return self.__children[int(name)]
         except (ValueError, IndexError):
             pass
         # Exact match wins over substring (avoids false ambiguity when
         # names share a prefix, e.g. STAPL vars J2, J23, J24).
-        for c in self._children:
-            if c._name == name:
+        for c in self.__children:
+            if c.__name == name:
                 return c
-        matches = [c for c in self._children
-                   if name.lower() in c._name.lower()]
+        matches = [c for c in self.__children
+                   if name.lower() in c.__name.lower()]
         if len(matches) == 1:
             return matches[0]
         return None
@@ -444,7 +483,7 @@ class Node:
         """Create a child by name. Override in subclasses."""
         raise NoMatch("child", name)
 
-    async def _child_spawn_mro(self, name):
+    async def __child_spawn_mro(self, name):
         """Walk the MRO trying each class's child_spawn from __dict__.
 
         Each class in the hierarchy can define its own child_spawn
@@ -469,7 +508,7 @@ class Node:
         raise NoMatch("child", name)
 
     @staticmethod
-    def _parse_options(name):
+    def __parse_options(name):
         """Parse "name(key=value,key="quoted value")" into
         (bare_name, options_dict).
 
@@ -562,58 +601,61 @@ class Node:
         if not parts:
             return self
         raw_name, *rest = parts
-        bare_name, opts = self._parse_options(raw_name)
-        child = await self._lookup_or_spawn(bare_name)
+        bare_name, opts = Node.__parse_options(raw_name)
+        child = await self.__lookup_or_spawn(bare_name)
         for k, v in opts.items():
             child.option_set(k, v)
-        await child._ensure_started()
+        await child.ensure_started()
         if not rest:
             return child
         return await child.child_summon(*rest)
 
-    async def _lookup_or_spawn(self, name):
+    async def __lookup_or_spawn(self, name):
         """Return the child named *name*, spawning + attaching once
         across concurrent callers."""
         child = self.child_lookup(name)
         if child is not None:
             return child
-        fut = self._summon_inflight.get(name)
+        fut = self.__summon_inflight.get(name)
         if fut is not None:
             return await fut
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        self._summon_inflight[name] = fut
+        self.__summon_inflight[name] = fut
         try:
             try:
                 child = self.child_lookup(name)
                 if child is None:
-                    child = await self._child_spawn_mro(name)
-                    if child._parent is None:
-                        self._child_attach(child)
+                    child = await self.__child_spawn_mro(name)
+                    if child.parent is None:
+                        self.__child_attach(child)
                 fut.set_result(child)
             except BaseException as exc:
                 if not fut.done():
                     fut.set_exception(exc)
         finally:
-            self._summon_inflight.pop(name, None)
+            self.__summon_inflight.pop(name, None)
         # Always consume `fut` — concurrent callers `await fut` and
         # retrieve its exception/result; this path is the producer's
         # own retrieval, without which asyncio logs "Future exception
         # was never retrieved" whenever no concurrent caller raced us.
         return await fut
 
-    async def _ensure_started(self):
+    async def ensure_started(self):
         """Idempotent, concurrency-safe start. Multiple awaits race
-        through one ``start()`` call."""
-        if self._started:
+        through one ``start()`` call.
+
+        Public — subclasses that need to start a borrowed-reference
+        sibling node before using it call this directly."""
+        if self.__started:
             return
-        if self._start_lock is None:
-            self._start_lock = asyncio.Lock()
-        async with self._start_lock:
-            if self._started:
+        if self.__start_lock is None:
+            self.__start_lock = asyncio.Lock()
+        async with self.__start_lock:
+            if self.__started:
                 return
             await self.start()
-            self._started = True
+            self.__started = True
 
     async def start(self):
         pass
@@ -622,12 +664,12 @@ class Node:
         pass
 
     async def start_tree(self):
-        await self._ensure_started()
-        for child in self._children:
+        await self.ensure_started()
+        for child in self.__children:
             await child.start_tree()
 
     async def stop_tree(self):
         await self.stop()
-        self._started = False
-        for child in self._children:
+        self.__started = False
+        for child in self.__children:
             await child.stop_tree()

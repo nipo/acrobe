@@ -94,7 +94,7 @@ class Bin(FormatNode):
         super().option_set(key, value)
 
     async def start(self):
-        self._child_attach(_make_view(
+        self.child_add(_make_view(
             "data", self._source,
             offset=0, size=self._source.size,
             load_address=self.__load_address))
@@ -136,7 +136,7 @@ class Slice(FormatNode):
                 f"{self.__offset + self.__size}) extends past source size "
                 f"{self._source.size}")
         load = self.__load_address if self.__load_address is not None else self.__offset
-        self._child_attach(_make_view(
+        self.child_add(_make_view(
             "data", self._source,
             offset=self.__offset, size=self.__size,
             load_address=load))

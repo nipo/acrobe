@@ -697,8 +697,8 @@ class MemAp(MemApLowering, Ap, Batcher):
         """Best-effort tree start: a single child's failed start()
         is logged but doesn't drop siblings or block a power-gated
         sibling from later retry."""
-        await self._ensure_started()
-        for child in self._children:
+        await self.ensure_started()
+        for child in self.children:
             try:
                 await child.start_tree()
             except Exception as exc:
@@ -778,8 +778,8 @@ class MemApV2(MemApLowering, MemoryMappedComponent, Batcher):
         self.logger.info(
             "IDR 0x%08x (%s)", self.idr, type_name or "unknown")
         # Now that we know the AP type, refine the Node name.
-        if type_name and self._name.startswith("MEM-AP@"):
-            self._name = f"{type_name}@{self.base:08x}"
+        if type_name and self.name.startswith("MEM-AP@"):
+            self.name = f"{type_name}@{self.base:08x}"
         await self._read_cfg_and_base()
         await self._discover_base_component()
 

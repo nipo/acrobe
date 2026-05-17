@@ -25,7 +25,7 @@ class _Plain(Node):
     def __init__(self, name, children=()):
         super().__init__(name)
         for c in children:
-            self._child_attach(c)
+            self.child_add(c)
 
 
 class _RemoteCapable(Node, Batcher):
@@ -35,7 +35,7 @@ class _RemoteCapable(Node, Batcher):
         Node.__init__(self, name)
         Batcher.__init__(self)
         for c in children:
-            self._child_attach(c)
+            self.child_add(c)
 
     async def flush_ops(self, batch):
         for _, fut in batch:

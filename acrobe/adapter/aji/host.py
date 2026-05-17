@@ -57,7 +57,7 @@ class AjiHost(Node):
         for hw in await self.__client.get_hardware():
             name = hardware_name(hw)
             # Disambiguate duplicates by suffixing with chain_id.
-            existing = {c._name for c in self._children}
+            existing = {c.name for c in self.children}
             if name in existing:
                 name = f"{name}-{hw.chain_id:x}"
             self.child_add(AjiHardware(name=name, hw=hw))
@@ -86,5 +86,5 @@ class AjiHost(Node):
         raise NoMatch("hardware", name)
 
     def __repr__(self) -> str:
-        return (f"<AjiHost {self._name} {self.__host_addr}:{self.__port} "
-                f"hardwares={len(self._children)}>")
+        return (f"<AjiHost {self.name} {self.__host_addr}:{self.__port} "
+                f"hardwares={len(self.children)}>")

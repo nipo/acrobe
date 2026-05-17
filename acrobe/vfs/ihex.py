@@ -72,16 +72,16 @@ class Ihex(FormatNode):
         # regions (see acrobe.program_view).
         region_container = Node("region")
         for i, (addr, data) in enumerate(regions):
-            region_container._child_attach(IhexRegion(str(i), addr, data))
-        self._child_attach(region_container)
+            region_container.child_add(IhexRegion(str(i), addr, data))
+        self.child_add(region_container)
 
         min_addr = min(a for a, _ in regions)
         max_end = max(a + len(d) for a, d in regions)
         if entry is not None:
-            self._metadata["entry"] = entry
-        self._metadata["region_count"] = len(regions)
-        self._metadata["min_address"] = min_addr
-        self._metadata["max_address"] = max_end
+            self.metadata["entry"] = entry
+        self.metadata["region_count"] = len(regions)
+        self.metadata["min_address"] = min_addr
+        self.metadata["max_address"] = max_end
 
     @staticmethod
     def __parse(text):

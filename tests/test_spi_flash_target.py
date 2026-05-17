@@ -165,8 +165,8 @@ class TestDiscovery:
     def make_tree(self):
         root = Node("root")
         flash = FakeSpiFlash(size=0x10000)
-        flash._name = "test-flash"
-        root._child_attach(flash)
+        flash.name = "test-flash"
+        root.child_add(flash)
         return root, flash
 
     @pytest.mark.asyncio
@@ -176,7 +176,7 @@ class TestDiscovery:
         spawned = await disc.run(root)
         assert len(spawned) == 1
         assert isinstance(spawned[0], SpiFlashTarget)
-        assert spawned[0]._parent is root
+        assert spawned[0].parent is root
 
     @pytest.mark.asyncio
     async def test_discover_no_duplicate_on_rerun(self):
@@ -200,8 +200,8 @@ class TestDiscovery:
         root = Node("root")
         for i in range(2):
             f = FakeSpiFlash(size=0x10000)
-            f._name = f"flash-{i}"
-            root._child_attach(f)
+            f.name = f"flash-{i}"
+            root.child_add(f)
 
         disc = TargetDiscovery()
         spawned = await disc.run(root)

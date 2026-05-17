@@ -57,7 +57,7 @@ async def test_remote_jtag_shift_with_bitstring_round_trip():
     """A 32-bit Shift goes out, a 32-bit BitString comes back."""
     root = Node("root")
     iface = _LoopbackJtag()
-    root._child_attach(iface)
+    root.child_add(iface)
     app = make_app(root)
 
     async with TestClient(TestServer(app)) as cli:
@@ -82,7 +82,7 @@ async def test_remote_jtag_full_op_set():
     """Each op type round-trips through the wire."""
     root = Node("root")
     iface = _LoopbackJtag()
-    root._child_attach(iface)
+    root.child_add(iface)
     app = make_app(root)
 
     async with TestClient(TestServer(app)) as cli:
@@ -126,7 +126,7 @@ async def test_remote_jtag_shift_with_arbitrary_bit_length():
     """Non-byte-aligned shifts: 13 bits in, 13 bits back."""
     root = Node("root")
     iface = _LoopbackJtag()
-    root._child_attach(iface)
+    root.child_add(iface)
     app = make_app(root)
 
     async with TestClient(TestServer(app)) as cli:

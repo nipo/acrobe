@@ -226,7 +226,7 @@ class XvcClient(jtag.JtagInterface):
         return result
 
     def __repr__(self) -> str:
-        return (f"<XvcClient {self._name} {self.__host}:{self.__port} "
+        return (f"<XvcClient {self.name} {self.__host}:{self.__port} "
                 f"server={self.__server_version!r}>")
 
 

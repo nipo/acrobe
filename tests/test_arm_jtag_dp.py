@@ -72,7 +72,7 @@ def _make_dp(jtag_protocol_version: int = 0) -> tuple[RecordingDpTap, JtagDp]:
     directly to exercise flush_ops in isolation."""
     tap = RecordingDpTap()
     dp = JtagDp(jtag_protocol_version=jtag_protocol_version)
-    tap._child_attach(dp)
+    tap.child_add(dp)
     return tap, dp
 
 

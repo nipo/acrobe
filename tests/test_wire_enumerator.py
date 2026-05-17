@@ -27,7 +27,7 @@ class _RemoteThing(Node):
     def __init__(self, name, children=()):
         super().__init__(name)
         for c in children:
-            self._child_attach(c)
+            self.child_add(c)
 
 
 class _RemoteBatcher(Node, Batcher):

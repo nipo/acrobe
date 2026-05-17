@@ -462,11 +462,11 @@ class Tap(Batcher, Node, InstructionRegistry):
         add_done_callback registrations and ``len(batch)`` separate
         event-loop schedulings on resolution.
         """
-        if self._parent is None:
+        if self.parent is None:
             raise RuntimeError(f"Tap {self.name!r} has no parent to forward to")
 
-        if isinstance(self._parent, Chain):
-            ctx = self._parent.contexts.get(self)
+        if isinstance(self.parent, Chain):
+            ctx = self.parent.contexts.get(self)
             if (ctx is not None and not ctx.enabled
                     and ctx.controller is not None):
                 # Auto-wake. The controller knows how to put us back
@@ -476,7 +476,7 @@ class Tap(Batcher, Node, InstructionRegistry):
 
         forwarded = []
         for op, future in batch:
-            parent_future = self._parent.post(TapOp(self, op))
+            parent_future = self.parent.post(TapOp(self, op))
             forwarded.append((future, parent_future))
 
         if forwarded:
@@ -504,7 +504,7 @@ class Tap(Batcher, Node, InstructionRegistry):
                 future.set_exception(exc)
 
     def __repr__(self):
-        return f"<Tap {self._name} irlen={self.irlen}>"
+        return f"<Tap {self.name} irlen={self.irlen}>"
 
 
 # JTAG Interface
@@ -687,11 +687,11 @@ class Chain(Batcher, Node):
         Discovery in turn requires every TAP to be in IDCODE/BYPASS
         (i.e. *just* after a TAP reset), so the whole chain has to
         be batched into a single uninterrupted post sequence."""
-        self._parent.post(Reset(count=50))
-        self._parent.post(SwdToJtag())
+        self.parent.post(Reset(count=50))
+        self.parent.post(SwdToJtag())
         self.__tlr_reset_and_unlock()
         await self.discover()
-        for tap in list(self._children):
+        for tap in list(self.children):
             await tap.post_tlr()
 
     def __tlr_reset_and_unlock(self):
@@ -716,16 +716,16 @@ class Chain(Batcher, Node):
         without an intervening TAP reset — TLR re-arms the cJTAG
         side and undoes the unlock.
         """
-        self._parent.post(Reset(count=50))
-        self._parent.post(Run(500))
+        self.parent.post(Reset(count=50))
+        self.parent.post(Run(500))
         self.cjtag_set([0, 0, 1, 2, 9, 0, 1])
 
     def cjtag_set(self, lens: list[int]) -> asyncio.Future:
-        self._parent.post(Run(1))
+        self.parent.post(Run(1))
         for val in lens:
-            self._parent.post(CaptureDr())
-            self._parent.post(Shift(BitString(-1, val), read_tdo = False))
-        return self._parent.post(Run(1))
+            self.parent.post(CaptureDr())
+            self.parent.post(Shift(BitString(-1, val), read_tdo = False))
+        return self.parent.post(Run(1))
 
     def children_changed(self):
         try:
@@ -745,7 +745,7 @@ class Chain(Batcher, Node):
         marker = 0xc05a5a03
         tdi = BitString(marker, 32) + BitString(0, max_length + 4)
         shift = Shift(tdi, read_tdo=True)
-        captured = await self._parent.post(shift)
+        captured = await self.parent.post(shift)
         tdo = captured[:max_length + 32]
 
         if not int(tdo):
@@ -764,8 +764,8 @@ class Chain(Batcher, Node):
         if shift_in is not None:
             back = BitString(shift_in, len(register))
             shift_back = Shift(back, read_tdo=False)
-            await self._parent.post(shift_back)
-            await self._parent.post(Run(1))
+            await self.parent.post(shift_back)
+            await self.parent.post(Run(1))
 
         return register
 
@@ -785,8 +785,8 @@ class Chain(Batcher, Node):
         slots = await self.__probe_chain_in_reset_state()
         for idcode, irlen in slots:
             tap = self.tap_add(idcode, irlen)
-            self.logger.note("TAP: %s (irlen=%d)", tap._name, irlen)
-        await self._parent.post(Run(1))
+            self.logger.note("TAP: %s (irlen=%d)", tap.name, irlen)
+        await self.parent.post(Run(1))
 
     async def __probe_chain_in_reset_state(self):
         """Blind chain probe: identify (idcode, irlen) for each TAP
@@ -802,16 +802,16 @@ class Chain(Batcher, Node):
         :meth:`tlr_and_refresh`.
         """
         self.logger.trace("Probing chain in reset state...")
-        self._parent.post(CaptureDr())
+        self.parent.post(CaptureDr())
         reset_dr = await self.shift_discover()
         self.logger.trace("DR after reset: %d bits", len(reset_dr))
 
-        self._parent.post(CaptureIr())
+        self.parent.post(CaptureIr())
         captured_ir = await self.shift_discover(shift_in=-1)
         captured_ir_length = len(captured_ir)
         self.logger.trace("IR captured: %d bits", captured_ir_length)
 
-        self._parent.post(CaptureDr())
+        self.parent.post(CaptureDr())
         bypass_dr = await self.shift_discover(
             max_length=captured_ir_length // 2)
         device_count = len(bypass_dr)
@@ -1130,7 +1130,7 @@ class Chain(Batcher, Node):
         """
         iface = self.parent_of_class(JtagInterface)
         # Snapshot taps so we can iterate while the chain mutates.
-        existing = list(self._children)
+        existing = list(self.children)
 
         self.logger.trace("Refresh: %d existing TAPs (%d enabled)",
                           len(existing),
@@ -1156,7 +1156,7 @@ class Chain(Batcher, Node):
         # post_tlr (e.g. IcePick reattaching sub-TAPs) extend the
         # children list as we iterate; we honour those by snapshotting
         # *after* mutations apply.
-        for tap in list(self._children):
+        for tap in list(self.children):
             ctx = self.contexts.get(tap)
             if ctx is not None and ctx.enabled:
                 await tap.post_tlr()
@@ -1271,7 +1271,7 @@ class Chain(Batcher, Node):
         last fires every earlier anchor is already settled — the
         single callback can synchronously read every op's TDO.
         """
-        if self._parent is None:
+        if self.parent is None:
             raise RuntimeError(f"Chain {self.name!r} has no parent to forward to")
 
         # Each entry: (top_future, anchor_future_or_None, slice_or_None).
@@ -1306,11 +1306,11 @@ class Chain(Batcher, Node):
             bypass_val = (1 << tap.irlen) - 1
 
             if isinstance(op, _TapIrStatus):
-                self._parent.post(CaptureIr())
+                self.parent.post(CaptureIr())
                 tdi = self.__pad_with(self.__pad_ones, ctx.ir_pre,
                                      BitString(bypass_val, tap.irlen),
                                      ctx.ir_post)
-                shift_future = self._parent.post(Shift(tdi, read_tdo=True))
+                shift_future = self.parent.post(Shift(tdi, read_tdo=True))
                 self.__invalidate_ir_cache_for_shift(tap, bypass_val)
                 resolutions.append(
                     (top_future, shift_future, (ctx.ir_pre, tap.irlen)))
@@ -1322,8 +1322,8 @@ class Chain(Batcher, Node):
                     ir_tdi = self.__pad_with(self.__pad_ones, ctx.ir_pre,
                                             BitString(op.ir_value, tap.irlen),
                                             ctx.ir_post)
-                    self._parent.post(CaptureIr())
-                    ir_done = self._parent.post(Shift(ir_tdi, read_tdo=False))
+                    self.parent.post(CaptureIr())
+                    ir_done = self.parent.post(Shift(ir_tdi, read_tdo=False))
                     self.__invalidate_ir_cache_for_shift(tap, op.ir_value)
 
                 # pre_dr_run: idle TCKs in RTI before DR selection.
@@ -1331,17 +1331,17 @@ class Chain(Batcher, Node):
                 # even when the op carries no DR shift.
                 pre_run_future = None
                 if op.pre_dr_run:
-                    pre_run_future = self._parent.post(Run(op.pre_dr_run))
+                    pre_run_future = self.parent.post(Run(op.pre_dr_run))
 
                 if op.tdi is not None:
-                    self._parent.post(CaptureDr())
+                    self.parent.post(CaptureDr())
                     dr_tdi = self.__pad_with(self.__pad_zeros, ctx.dr_pre,
                                             op.tdi, ctx.dr_post)
                     # post_dr_run is baked into the Shift itself so the
                     # adapter can fold the trailing idle into the shift's
                     # MPSSE submission — no separate Run op cascading
                     # through the layers.
-                    shift_future = self._parent.post(
+                    shift_future = self.parent.post(
                         Shift(dr_tdi,
                               read_tdo=op.read_tdo,
                               post_run=op.post_dr_run))
@@ -1355,7 +1355,7 @@ class Chain(Batcher, Node):
                 elif op.post_dr_run:
                     # No DR shift but caller still asked for trailing
                     # idle — emit it as a standalone Run.
-                    run_future = self._parent.post(Run(op.post_dr_run))
+                    run_future = self.parent.post(Run(op.post_dr_run))
                     resolutions.append((top_future, run_future, None))
                     last_anchor = run_future
                 elif pre_run_future is not None:
@@ -1370,7 +1370,7 @@ class Chain(Batcher, Node):
                         top_future.set_result(None)
 
             elif isinstance(op, _TapRun):
-                run_future = self._parent.post(Run(op.cycles))
+                run_future = self.parent.post(Run(op.cycles))
                 resolutions.append((top_future, run_future, None))
                 last_anchor = run_future
 
@@ -1433,12 +1433,12 @@ class Chain(Batcher, Node):
 
     async def child_spawn(self, name):
         """Delegate to single TAP when chain has exactly one device."""
-        if len(self._children) == 1:
-            return await self._children[0].child_summon(name)
+        if len(self.children) == 1:
+            return await self.children[0].child_summon(name)
         raise NoMatch("child", name)
 
     def __repr__(self):
-        return f"<Chain {self._name} taps={len(self._children)}>"
+        return f"<Chain {self.name} taps={len(self.children)}>"
 
 
 @JtagInterface.db.register("chain")

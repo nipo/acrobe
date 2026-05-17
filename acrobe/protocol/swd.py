@@ -200,4 +200,4 @@ class Interface(Batcher, FreqCapper, Node):
         # get here registrations have fired.
         from ..component.arm.dp import Dp  # noqa: F401  (forces module load)
         dp = await self.db.acall(dpidr, self, dpidr=dpidr)
-        self._child_attach(dp)
+        self.child_add(dp)

@@ -317,7 +317,7 @@ class Nrf52Loadable(Loadable):
             await core.reset(stop=True)
 
     def __core(self):
-        target = self._parent
+        target = self.parent
         if target is None:
             return None
         debuggables = target.children_of_class(Debuggable)

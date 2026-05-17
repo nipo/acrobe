@@ -114,14 +114,14 @@ class Uf2(FormatNode):
 
         region_container = Node("region")
         for i, (addr, data) in enumerate(regions):
-            region_container._child_attach(Uf2Region(str(i), addr, data))
-        self._child_attach(region_container)
+            region_container.child_add(Uf2Region(str(i), addr, data))
+        self.child_add(region_container)
 
-        self._metadata["block_count"] = len(raw) // UF2_BLOCK_SIZE
-        self._metadata["min_address"] = min(a for a, _ in regions)
-        self._metadata["max_address"] = max(
+        self.metadata["block_count"] = len(raw) // UF2_BLOCK_SIZE
+        self.metadata["min_address"] = min(a for a, _ in regions)
+        self.metadata["max_address"] = max(
             a + len(d) for a, d in regions)
-        self._metadata["family_ids"] = sorted(family_ids)
+        self.metadata["family_ids"] = sorted(family_ids)
 
     @staticmethod
     def __parse(raw: bytes):

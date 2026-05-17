@@ -96,12 +96,12 @@ class LatticeBit(FormatNode):
             blob = bitswap8(blob)
         payload = blob[sync_off:]
 
-        self._metadata.update(info)
-        self._metadata["swapped"] = swapped
-        self._metadata["sync_offset"] = sync_off
+        self.metadata.update(info)
+        self.metadata["swapped"] = swapped
+        self.metadata["sync_offset"] = sync_off
 
         view = LatticePayload("bitstream", payload)
-        self._child_attach(view)
+        self.child_add(view)
 
 
 @register_magic

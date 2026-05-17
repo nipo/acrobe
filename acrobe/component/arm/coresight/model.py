@@ -329,8 +329,8 @@ class MemoryMappedComponent(Node):
         or block their start. Matches the ARM-debug discovery
         philosophy: surface as much of the tree as possible, even
         when individual subtrees are unreachable."""
-        await self._ensure_started()
-        for child in self._children:
+        await self.ensure_started()
+        for child in self.children:
             try:
                 await child.start_tree()
             except Exception as exc:
@@ -340,7 +340,7 @@ class MemoryMappedComponent(Node):
 
     def __repr__(self):
         ids = self.ids
-        return (f"<{type(self).__name__} {self._name} "
+        return (f"<{type(self).__name__} {self.name} "
                 f"class={ids.cidr_class} {ids.partid}>")
 
 

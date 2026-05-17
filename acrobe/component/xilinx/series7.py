@@ -63,7 +63,7 @@ class Series7(Tap, JtagSramFpga, ConfigAccessPort):
         if len(blob) & 3:
             raise ValueError("Bitstream data length not 32-bit aligned")
 
-        meta = source._parent.metadata if source._parent else {}
+        meta = source.parent.metadata if source.parent else {}
         userid = meta.get("userid")
         if userid is not None and userid != 0xffffffff:
             hw_userid = int(await self.IR_USERCODE())

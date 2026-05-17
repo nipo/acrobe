@@ -80,7 +80,7 @@ class Stapl(FormatNode):
         notes = {}
         for note in program.notes:
             notes[note.key] = note.value
-        self._metadata.update({
+        self.metadata.update({
             "notes": notes,
             "actions": list(program.actions.keys()),
             "procedures": list(program.procedures.keys()),
@@ -95,8 +95,8 @@ class Stapl(FormatNode):
                 if isinstance(stmt, BooleanDecl) and \
                         isinstance(stmt.init, BooleanLiteral):
                     leaf = StaplBooleanArray(stmt.name, stmt.init)
-                    var_container._child_attach(leaf)
-        self._child_attach(var_container)
+                    var_container.child_add(leaf)
+        self.child_add(var_container)
 
 
 # STAPL files start with NOTE statements but also have lots of

@@ -100,7 +100,7 @@ def _make_root_with_node():
     """A non-Batcher root containing the echo node as 'echo'."""
     root = Node("root")
     echo = _WsEchoNode()
-    root._child_attach(echo)
+    root.child_add(echo)
     return root, echo
 
 

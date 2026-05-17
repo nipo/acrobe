@@ -194,7 +194,7 @@ class GowinFpga(Tap, JtagSramFpga):
 
     async def load(self, source):
         usercode = int(await self.USERCODE())
-        meta = source._parent.metadata if source._parent else {}
+        meta = source.parent.metadata if source.parent else {}
         exp = int(meta.get("UserCode", "0x0"), 16)
         self.logger.note("Usercode 0x%08x, expected 0x%08x", usercode, exp)
         status = await self.status_read()

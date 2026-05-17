@@ -55,11 +55,11 @@ def find_bitstream(node: Node) -> Readable:
        children, treat `node` as the payload (raw-bytes case).
     3. Otherwise raise ValueError.
     """
-    for c in node._children:
+    for c in node.children:
         if c.name == "bitstream" and isinstance(c, Readable):
             return c
     if isinstance(node, Readable):
-        readable_kids = [c for c in node._children if isinstance(c, Readable)]
+        readable_kids = [c for c in node.children if isinstance(c, Readable)]
         if not readable_kids:
             return node
     raise ValueError(

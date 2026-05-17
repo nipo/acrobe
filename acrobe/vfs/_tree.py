@@ -33,13 +33,13 @@ def build_archive_tree(target: Node, entries):
         cur = target
         for part in parts[:-1]:
             existing = None
-            for c in cur._children:
-                if c._name == part:
+            for c in cur.children:
+                if c.name == part:
                     existing = c
                     break
             if existing is None:
                 d = DirectoryNode(part)
-                cur._child_attach(d)
+                cur.child_add(d)
                 cur = d
             else:
                 if not isinstance(existing, DirectoryNode):
@@ -48,4 +48,4 @@ def build_archive_tree(target: Node, entries):
                         f"existing non-directory child {part!r}")
                 cur = existing
         leaf = factory(parts[-1])
-        cur._child_attach(leaf)
+        cur.child_add(leaf)

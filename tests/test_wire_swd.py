@@ -70,7 +70,7 @@ async def test_remote_swd_read_round_trip():
     """A Read goes out, the int comes back."""
     root = Node("root")
     iface = _LoopbackSwd()
-    root._child_attach(iface)
+    root.child_add(iface)
     app = make_app(root)
 
     async with TestClient(TestServer(app)) as cli:
@@ -92,7 +92,7 @@ async def test_remote_swd_full_op_set():
     """Each op type round-trips through the wire."""
     root = Node("root")
     iface = _LoopbackSwd()
-    root._child_attach(iface)
+    root.child_add(iface)
     app = make_app(root)
 
     async with TestClient(TestServer(app)) as cli:
@@ -131,7 +131,7 @@ async def test_remote_swd_error_round_trip():
     """
     root = Node("root")
     iface = _LoopbackSwd(fault_addr=0x20, wait_addr=0x24)
-    root._child_attach(iface)
+    root.child_add(iface)
     app = make_app(root)
 
     async with TestClient(TestServer(app)) as cli:

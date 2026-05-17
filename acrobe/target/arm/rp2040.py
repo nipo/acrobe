@@ -142,7 +142,7 @@ class PicobootLoadable(Loadable):
         Falls back to the default per-region erase loop if the SPI
         path is unavailable for any reason.
         """
-        target = self._parent
+        target = self.parent
         spi_ok = False
         try:
             flash = await target.child_summon("spi", "cs0", "flash")
@@ -232,7 +232,7 @@ async def rp2040_picoboot_probe(picoboot: Picoboot):
     wire here is RP2040. Future RP2350 support belongs in a sibling
     probe (different SRAM size, dual M33, different bootrom).
     """
-    adapter = picoboot._parent
+    adapter = picoboot.parent
     suffix = (adapter.name.removeprefix("rp2040-bootsel-")
               if adapter is not None else "")
     name = f"rp2040-{suffix}" if suffix else "rp2040"

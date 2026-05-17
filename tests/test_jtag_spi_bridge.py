@@ -453,7 +453,7 @@ class TestGowinChildSpawn:
         chain = Chain()
         iface.child_add(chain)
         tap = chain.tap_add(0x0001281b, irlen=8, base=GowinFpga)
-        result = await tap._child_spawn_mro("spi")
+        result = await tap._Node__child_spawn_mro("spi")
         assert isinstance(result, SpiInterface)
 
     @pytest.mark.asyncio
@@ -468,7 +468,7 @@ class TestGowinChildSpawn:
         iface.child_add(chain)
         tap = chain.tap_add(0x0000081b, irlen=8, base=GowinFpga)
         with pytest.raises(NoMatch):
-            await tap._child_spawn_mro("spi")
+            await tap._Node__child_spawn_mro("spi")
 
     @pytest.mark.asyncio
     async def test_child_summon_spi(self):
@@ -496,4 +496,4 @@ class TestGowinChildSpawn:
         iface.child_add(chain)
         tap = chain.tap_add(0x0001281b, irlen=8, base=GowinFpga)
         with pytest.raises(NoMatch):
-            await tap._child_spawn_mro("unknown")
+            await tap._Node__child_spawn_mro("unknown")

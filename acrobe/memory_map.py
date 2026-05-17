@@ -27,7 +27,7 @@ def addressable_descendants(root: Node):
             yield node
         # Visit children regardless — an addressable parent may
         # have addressable descendants (e.g. ELF section + symbol).
-        stack.extend(reversed(node._children))
+        stack.extend(reversed(node.children))
 
 
 class MemoryMap:

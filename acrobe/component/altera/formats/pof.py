@@ -125,7 +125,7 @@ class Pof(FormatNode):
         if config_offset is None:
             raise ValueError(f"{self.fqdn}: POF has no CONFIG_DATA section")
 
-        self._metadata.update({
+        self.metadata.update({
             "tool": self.tool,
             "flash": self.flash,
             "design": self.design,
@@ -140,7 +140,7 @@ class Pof(FormatNode):
                 size=config_size - 12,
             )
             container = self.__make_partition_container([partition])
-            self._child_attach(container)
+            self.child_add(container)
             return
 
         sorted_bi = sorted(boot_info, key=lambda p: p[1])
@@ -158,19 +158,19 @@ class Pof(FormatNode):
                 flash_address=config_offset + paddr,
                 size=region_size,
             )
-            partition._metadata["partition_name"] = pname
+            partition.metadata["partition_name"] = pname
             partitions.append(partition)
 
         if not partitions:
             raise ValueError(f"{self.fqdn}: POF BOOT_INFO has no partitions")
 
         container = self.__make_partition_container(partitions)
-        self._child_attach(container)
+        self.child_add(container)
 
     def __make_partition_container(self, partitions):
         container = Node("partition")
         for p in partitions:
-            container._child_attach(p)
+            container.child_add(p)
         return container
 
 

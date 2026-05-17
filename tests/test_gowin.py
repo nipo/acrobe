@@ -31,9 +31,9 @@ class _Bitstream(Node, Readable):
 
 def make_bitstream(data, **metadata):
     parent = Node("file")
-    parent._metadata.update(metadata)
+    parent.metadata.update(metadata)
     leaf = _Bitstream("bitstream", data)
-    parent._child_attach(leaf)
+    parent.child_add(leaf)
     return leaf
 
 

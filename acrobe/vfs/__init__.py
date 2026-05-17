@@ -21,7 +21,7 @@ from ..node import Node, Readable
 
 # format_db: format name → Node class.
 # The class must accept (name: str, source: Readable) in its
-# constructor and populate self._children in start().
+# constructor and populate children in start().
 format_db = Db("format")
 
 # ext_db: extension (lowercase, no dot) → format name string.
@@ -42,7 +42,7 @@ def register_format(format_name, *, exts=(), mimes=()):
 
     The decorated class must be a Node subclass whose constructor
     accepts (name: str, source: Readable). Its start() should
-    populate self._children with structural children.
+    populate children with structural children.
 
     Optional `exts` / `mimes` register the format for auto-detection.
     """
@@ -178,21 +178,18 @@ async def populate_format(target, format_name, source, *, parser_opts=None):
     if parser_opts:
         for k, v in parser_opts.items():
             parser.option_set(k, v)
-    await parser.start()
-    parser._started = True
+    await parser.ensure_started()
 
-    for child in list(parser._children):
-        parser._children.remove(child)
-        child._parent = target
-        target._children.append(child)
-    target.children_changed()
-
+    parser.child_transplant_to(target)
+    # Write to the protected base store, not target.metadata: subclasses
+    # like FileNode override the metadata property to return a fresh
+    # merged view that mutation would not flow back into.
     target._metadata.update(parser.metadata)
 
     # The parser instance is kept accessible on `target` for code
     # that wants typed methods (e.g. Elf.symbol_at). Methods that
     # walk children must use parser.target (set here) — parser's
-    # own ._children was emptied by the transplant.
+    # own children were transplanted onto target above.
     parser.target = target
 
     if not hasattr(target, "format_parsers"):
@@ -205,7 +202,7 @@ class FormatNode(Node):
 
     Constructed with (name, source: Readable). `source` is the byte
     stream to parse. Subclasses override start() to parse `source`
-    and populate self._children.
+    and populate children.
     """
 
     def __init__(self, name, source):
@@ -251,11 +248,11 @@ class AsNode(Node):
         if self.__format_name is None:
             raise ValueError(
                 f"{self.fqdn}: as() requires type= or mime-type= option")
-        if not isinstance(self._parent, Readable):
+        if not isinstance(self.parent, Readable):
             raise TypeError(
                 f"{self.fqdn}: as() parent must be Readable")
         await populate_format(
-            self, self.__format_name, self._parent,
+            self, self.__format_name, self.parent,
             parser_opts=self.__parser_opts)
 
 

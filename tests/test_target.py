@@ -347,7 +347,7 @@ class TestDiscovery:
     async def test_basic_spawn(self):
         root = Node("root")
         src = _PrimarySource("src")
-        root._child_attach(src)
+        root.child_add(src)
 
         disc = TargetDiscovery()
         spawned = await disc.run(root)
@@ -363,7 +363,7 @@ class TestDiscovery:
     async def test_dedup_no_double_spawn(self):
         root = Node("root")
         src = _PrimarySource("src")
-        root._child_attach(src)
+        root.child_add(src)
 
         disc = TargetDiscovery()
         first = await disc.run(root)
@@ -376,7 +376,7 @@ class TestDiscovery:
     @pytest.mark.asyncio
     async def test_unmatched_component_ignored(self):
         root = Node("root")
-        root._child_attach(Node("orphan"))
+        root.child_add(Node("orphan"))
         disc = TargetDiscovery()
         spawned = await disc.run(root)
         assert spawned == []

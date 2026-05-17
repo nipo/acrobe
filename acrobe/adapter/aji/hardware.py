@@ -171,7 +171,7 @@ class AjiHardware(Batcher, FreqCapper, Node):
             tap = _make_tap_for(device, position)
             # Disambiguate two same-idcode taps on the same chain.
             if tap.name in seen_names:
-                tap._name = f"{tap.name}-{position}"
+                tap.name = f"{tap.name}-{position}"
             seen_names.add(tap.name)
             try:
                 open_id = await client.open_device(
@@ -310,5 +310,5 @@ class AjiHardware(Batcher, FreqCapper, Node):
         raise TypeError(f"Unknown tap op: {type(op).__name__}")
 
     def __repr__(self) -> str:
-        return (f"<AjiHardware {self._name} chain_id={self.__hw.chain_id} "
+        return (f"<AjiHardware {self.name} chain_id={self.__hw.chain_id} "
                 f"port={self.__hw.port!r} taps={len(self.open_id_of)}>")

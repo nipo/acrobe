@@ -177,7 +177,7 @@ class Interface(Batcher, Node):
             mf.set_result(result[0] if single else result)
 
     def __repr__(self):
-        return f"<i2c.Interface {self._name}>"
+        return f"<i2c.Interface {self.name}>"
 
 
 # ---- Slave ----

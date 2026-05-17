@@ -117,10 +117,10 @@ class RemoteServerRoot(Node):
         self.__client = EnumerationClient(self.__base_url)
         await self.__client.__aenter__()
         self.__info = await self.__client.enumerate("")
-        self._metadata = self.__info.get("metadata", {})
+        self.metadata = self.__info.get("metadata", {})
         for child_info in self.__info.get("children", []):
             child = _build_remote_child(self, child_info)
-            self._child_attach(child)
+            self.child_add(child)
         # Catch the case where stop_tree() never gets called (CLI exit,
         # crash, …): the lifecycle drains us at process shutdown.
         from ..lifecycle import on_shutdown
@@ -159,11 +159,9 @@ class RemoteServerRoot(Node):
         proxy = await self.__open_proxy(cutoff)
         # Hook into the local tree under self so the proxy has a
         # parent and is reachable for stop_tree.
-        if proxy._parent is None:
-            self._child_attach(proxy)
-        if not proxy._started:
-            await proxy.start()
-            proxy._started = True
+        if proxy.parent is None:
+            self.child_add(proxy)
+        await proxy.ensure_started()
 
         remaining = parts[cutoff.depth + 1:]
         if not remaining:
@@ -228,7 +226,7 @@ class RemoteServerRoot(Node):
     async def __fetch(self, remote_path: str) -> dict:
         if self.__client is None:
             raise RuntimeError(
-                f"RemoteServerRoot {self._name!r}: client not started")
+                f"RemoteServerRoot {self.name!r}: client not started")
         return await self.__client.enumerate(remote_path)
 
 
@@ -246,7 +244,7 @@ class RemoteProxyNode(Node):
         self.__server = server
         self.__remote_path = remote_path
         self.__info = info
-        self._metadata = dict(info.get("metadata", {}))
+        self.metadata = dict(info.get("metadata", {}))
 
     @property
     def remote_path(self) -> str:
@@ -265,10 +263,10 @@ class RemoteProxyNode(Node):
         # Pre-populate children from the cached info so users can
         # immediately walk `.children` without an extra round trip.
         for child_info in self.__info.get("children", []):
-            if any(c._name == child_info["name"] for c in self._children):
+            if any(c.name == child_info["name"] for c in self.children):
                 continue
             child = _build_remote_child(self.__server, child_info)
-            self._child_attach(child)
+            self.child_add(child)
 
     async def child_spawn(self, name: str):
         child_path = (f"{self.__remote_path}/{name}"

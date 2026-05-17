@@ -170,8 +170,8 @@ class TestChipId:
         )
         rom = RomTable(bus=None, base=0x80000000, ids=ids)
         ap = Ap(dp=d, base=1 << 24, idr=0x04770002)
-        ap._child_attach(rom)
-        d._child_attach(ap)
+        ap.child_add(rom)
+        d.child_add(ap)
 
         chip = d.chip_id()
         assert chip is not None
@@ -201,7 +201,7 @@ class TestChipId:
             devarch=None, devtype=None, devid=0,
         )
         rom = RomTable(bus=None, base=0, ids=ids)
-        d._child_attach(rom)
+        d.child_add(rom)
 
         chip = d.chip_id()
         assert chip is not None
@@ -228,8 +228,8 @@ class TestChipId:
         )
         rom = RomTable(bus=None, base=0x80000000, ids=ids)
         ap = Ap(dp=d, base=0)
-        ap._child_attach(rom)
-        d._child_attach(ap)
+        ap.child_add(rom)
+        d.child_add(ap)
 
         chip = d.chip_id()
         assert chip.source == "TARGETID"
@@ -252,7 +252,7 @@ class TestSystemMemap:
         for name, idr, base_addr in ap_specs:
             ap = MemAp(dp=d, base=0, idr=idr, name=name)
             ap.base_addr = base_addr
-            d._child_attach(ap)
+            d.child_add(ap)
         return d
 
     def test_no_aps_returns_none(self):

@@ -103,10 +103,10 @@ def _wr_target_up(bus, ud, wroff, payload):
 def _make_rtt(bus, *, cb_addr=None, up_buf_size=64, down_buf_size=64):
     """Build a working Rtt instance wired to MockBus + BusRam."""
     sram = BusRam("sram", bus.base, len(bus.memory), bus)
-    Node._child_attach(Memory(bus), sram) if False else None
+    Node.child_add(Memory(bus), sram) if False else None
     # Attach sram under a Memory so the Rtt's parent ref chain has a bus.
     mem = Memory(bus)
-    mem._child_attach(sram)
+    mem.child_add(sram)
     rtt = Rtt(sram)
     if cb_addr is not None:
         rtt.cb_addr = cb_addr
@@ -542,7 +542,7 @@ class TestRamSpawn:
         _stage_control_block(bus, cb_addr=0x20000400)
         sram = BusRam("sram", bus.base, len(bus.memory), bus)
         mem = Memory(bus)
-        mem._child_attach(sram)
+        mem.child_add(sram)
         rtt = await sram.child_spawn("rtt")
         assert isinstance(rtt, Rtt)
         assert rtt.ram is sram

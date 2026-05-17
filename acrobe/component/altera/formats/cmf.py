@@ -269,10 +269,10 @@ class Cmf(FormatNode):
                     "no recognised sync word in first 4KiB")
             swapped = best[1]
             sync_family = best[2].hex()
-        self._metadata["sync_family"] = sync_family
+        self.metadata["sync_family"] = sync_family
 
         view = CmfBitstream("bitstream", self._source, swapped)
-        self._child_attach(view)
+        self.child_add(view)
 
         blob = await view.read(0, view.size)
         entries = list(_walk_sections(blob))
@@ -283,17 +283,17 @@ class Cmf(FormatNode):
         for entry in entries:
             section = CmfSection(
                 str(entry["index"]), view, entry["offset"], entry["size"])
-            section._metadata.update({
+            section.metadata.update({
                 k: v for k, v in entry.items()
                 if k not in ("index", "offset", "size")
             })
-            container._child_attach(section)
+            container.child_add(section)
             if family is None and entry.get("family") is not None:
                 family = entry["family"]
                 variant = entry.get("variant")
-        self._child_attach(container)
+        self.child_add(container)
 
-        self._metadata.update({
+        self.metadata.update({
             "family": family,
             "variant": variant,
             "section_count": len(entries),

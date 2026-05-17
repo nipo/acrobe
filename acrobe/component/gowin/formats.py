@@ -55,7 +55,7 @@ class GowinFs(FormatNode):
         # Detect gzip wrapper
         if raw[:2] == b"\x1f\x8b":
             text = gzip.decompress(raw).decode("utf-8", errors="ignore")
-            self._metadata["gzipped"] = True
+            self.metadata["gzipped"] = True
         else:
             text = raw.decode("utf-8", errors="ignore")
 
@@ -77,10 +77,10 @@ class GowinFs(FormatNode):
         # Pack bits, MSB-first, then byte-reverse (matches loader).
         data = BitString(int(stream, 2), len(stream))
         raw_bytes = bytes(data)[::-1]
-        self._metadata.update(info)
+        self.metadata.update(info)
 
         view = GowinPayload("bitstream", raw_bytes)
-        self._child_attach(view)
+        self.child_add(view)
 
 
 # Gowin .fs files are text-based; their "magic" is the leading "//"

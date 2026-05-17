@@ -337,9 +337,9 @@ def _make_rom_table_with_scs(ap):
     """Build a ROM-Table-shaped subtree containing an SCS under `ap`."""
     from acrobe.component.arm.coresight.rom_table import RomTable
     rt = RomTable(ap, 0xE00FF000, ComponentIds.empty())
-    ap._child_attach(rt)
+    ap.child_add(rt)
     scs = Scs(ap, 0xE000E000, ComponentIds.empty())
-    rt._child_attach(scs)
+    rt.child_add(scs)
     return rt
 
 
@@ -348,7 +348,7 @@ class TestNrf52Probe:
     async def test_known_part_spawns_target(self):
         dp = FakeDp()
         ap = MockAp(part=0x52840, flash_size=0x100000, page_size=0x1000)
-        dp._child_attach(ap)
+        dp.child_add(ap)
         _make_rom_table_with_scs(ap)
         target = await nrf52_probe(dp)
         assert isinstance(target, Nrf52Target)
@@ -376,7 +376,7 @@ class TestNrf52Probe:
 
         dp = FakeDp()
         ap = MockAp(part=0x52840)
-        dp._child_attach(ap)
+        dp.child_add(ap)
         _make_rom_table_with_scs(ap)
         target = await nrf52_probe(dp)
         debug = target.children_of_class(CortexMDebuggable)[0]
@@ -392,7 +392,7 @@ class TestNrf52Probe:
     async def test_unknown_part_declines(self):
         dp = FakeDp()
         ap = MockAp(part=0xDEADBEEF)
-        dp._child_attach(ap)
+        dp.child_add(ap)
         _make_rom_table_with_scs(ap)
         with pytest.raises(NoMatch):
             await nrf52_probe(dp)
@@ -402,7 +402,7 @@ class TestNrf52Probe:
         dp = FakeDp()
         ap = MockAp()
         ap.ficr_part_fails = True
-        dp._child_attach(ap)
+        dp.child_add(ap)
         _make_rom_table_with_scs(ap)
         with pytest.raises(NoMatch):
             await nrf52_probe(dp)
@@ -417,7 +417,7 @@ class TestNrf52Probe:
     async def test_no_scs_under_memap_declines(self):
         dp = FakeDp()
         ap = MockAp()
-        dp._child_attach(ap)
+        dp.child_add(ap)
         # No ROM table; no SCS.
         with pytest.raises(NoMatch):
             await nrf52_probe(dp)
@@ -477,12 +477,12 @@ class _FakeTarget(Node):
         super().__init__(name)
         from acrobe.target.debuggable import Debuggable
         self.debuggable = Debuggable("debug")
-        self._child_attach(self.debuggable)
+        self.child_add(self.debuggable)
         from acrobe.target.debuggable import Core
         # Hot-patch the Debuggable to expose .cores attribute.
         # Real Debuggable .cores walks children; we attach `core`
         # as a real Node child of the Debuggable.
-        self.debuggable._child_attach(core)
+        self.debuggable.child_add(core)
 
 
 class HaltableCore(Node):
@@ -625,7 +625,7 @@ class TestApprotect:
         dp = FakeDp()
         ctrl_ap = FakeCtrlAp()
         ctrl_ap.locked = True
-        dp._child_attach(ctrl_ap)
+        dp.child_add(ctrl_ap)
         # No Mem-AP attached at all — the locked path mustn't touch it.
         target = await nrf52_probe(dp)
         assert isinstance(target, Nrf52Target)
@@ -671,9 +671,9 @@ class TestApprotect:
         dp = FakeDp()
         ctrl_ap = FakeCtrlAp()
         ctrl_ap.locked = False
-        dp._child_attach(ctrl_ap)
+        dp.child_add(ctrl_ap)
         ap = MockAp(part=0x52840, flash_size=0x10000, page_size=0x1000)
-        dp._child_attach(ap)
+        dp.child_add(ap)
         _make_rom_table_with_scs(ap)
         target = await nrf52_probe(dp)
         # Normal target — has Debuggable + Flash regions.
@@ -694,9 +694,9 @@ class TestApprotect:
             raise DpAccessFailure("transient")
         ctrl_ap.is_protected = boom
 
-        dp._child_attach(ctrl_ap)
+        dp.child_add(ctrl_ap)
         ap = MockAp(part=0x52840)
-        dp._child_attach(ap)
+        dp.child_add(ap)
         _make_rom_table_with_scs(ap)
         target = await nrf52_probe(dp)
         assert target.children_of_class(Debuggable) != []

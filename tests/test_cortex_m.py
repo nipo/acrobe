@@ -663,9 +663,9 @@ class TestCortexMDebuggable:
         bus.memory[0xE0001000 + Dwt.CTRL_OFFSET] = (
             4 << Dwt.CTRL_NUMCOMP_SHIFT)
         dwt = Dwt(bus, 0xE0001000, ComponentIds.empty())
-        rom_table._child_attach(scs)
-        rom_table._child_attach(fpb)
-        rom_table._child_attach(dwt)
+        rom_table.child_add(scs)
+        rom_table.child_add(fpb)
+        rom_table.child_add(dwt)
         debug = CortexMDebuggable.from_romtable(rom_table, bus)
         assert len(debug.cores) == 1
         assert debug.cores[0].scs is scs

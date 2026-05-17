@@ -91,7 +91,7 @@ class Region(Node):
         return self.address < other.address
 
     def __repr__(self):
-        return (f"<{self.__class__.__name__} '{self._name}' "
+        return (f"<{self.__class__.__name__} '{self.name}' "
                 f"0x{self.address:08x}-0x{self.end:08x}>")
 
 
@@ -172,7 +172,7 @@ class Flash(Region):
             await self.erase(p, erase_page)
 
     def __repr__(self):
-        return (f"<{self.__class__.__name__} '{self._name}' "
+        return (f"<{self.__class__.__name__} '{self.name}' "
                 f"0x{self.address:08x}-0x{self.end:08x} "
                 f"wp={self.write_page_size} ep={self.erase_page_sizes}>")
 

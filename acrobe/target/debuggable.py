@@ -153,12 +153,12 @@ class Debuggable(Node):
         the Target carries several.
         """
         from .loadable import Loadable
-        siblings = self._parent.children_of_class(Loadable) if self._parent else []
+        siblings = self.parent.children_of_class(Loadable) if self.parent else []
         return siblings[0] if siblings else None
 
     async def attach(self):
         from .debug_auth import DebugAuth
-        auths = self._parent.children_of_class(DebugAuth) if self._parent else []
+        auths = self.parent.children_of_class(DebugAuth) if self.parent else []
         for auth in auths:
             await auth.authorize(self)
 

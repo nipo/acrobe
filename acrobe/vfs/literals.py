@@ -66,7 +66,7 @@ class Literal(FormatNode):
             raise ValueError(
                 f"{self.fqdn}: literal requires value=...")
         data = bytes.fromhex(self.__hex_value)
-        self._child_attach(_LiteralBytes("data", data))
+        self.child_add(_LiteralBytes("data", data))
 
 
 def _parse_size(text):
@@ -93,7 +93,7 @@ class Random(FormatNode):
             raise ValueError(
                 f"{self.fqdn}: random requires size=...")
         n = _parse_size(self.__size_str)
-        self._child_attach(_LiteralBytes("data", os.urandom(n)))
+        self.child_add(_LiteralBytes("data", os.urandom(n)))
 
 
 @register_format("zero")
@@ -115,7 +115,7 @@ class Zero(FormatNode):
             raise ValueError(
                 f"{self.fqdn}: zero requires size=...")
         n = _parse_size(self.__size_str)
-        self._child_attach(_LiteralBytes("data", b"\x00" * n))
+        self.child_add(_LiteralBytes("data", b"\x00" * n))
 
 
 @register_format("one")
@@ -137,4 +137,4 @@ class One(FormatNode):
             raise ValueError(
                 f"{self.fqdn}: one requires size=...")
         n = _parse_size(self.__size_str)
-        self._child_attach(_LiteralBytes("data", b"\xff" * n))
+        self.child_add(_LiteralBytes("data", b"\xff" * n))

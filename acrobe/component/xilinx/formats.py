@@ -79,7 +79,7 @@ class XilinxBit(FormatNode):
         if raw[:2] == b"\x1f\x8b":
             blob = gzip.decompress(raw)
             backing = _BytesReadable(blob)
-            self._metadata["gzipped"] = True
+            self.metadata["gzipped"] = True
             backing_offset = 0
         else:
             blob = raw
@@ -132,7 +132,7 @@ class XilinxBit(FormatNode):
         # Promote info into metadata
         if b"a" in info:
             parts = info[b"a"].split(";")
-            self._metadata["project"] = parts[0]
+            self.metadata["project"] = parts[0]
             for p in parts[1:]:
                 if "=" not in p:
                     continue
@@ -144,15 +144,15 @@ class XilinxBit(FormatNode):
                         v = int(v, 16)
                     except ValueError:
                         pass
-                self._metadata[k] = v
+                self.metadata[k] = v
         if b"b" in info:
-            self._metadata["device"] = info[b"b"]
+            self.metadata["device"] = info[b"b"]
         if b"c" in info and b"d" in info:
-            self._metadata["build_date"] = (
+            self.metadata["build_date"] = (
                 info[b"c"].strip() + " " + info[b"d"].strip())
 
         view = XilinxPayload("bitstream", backing, payload_offset, payload_size)
-        self._child_attach(view)
+        self.child_add(view)
 
 
 @register_magic

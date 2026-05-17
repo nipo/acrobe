@@ -44,9 +44,9 @@ def make_bitstream(data: bytes, **metadata) -> _Bitstream:
     bitstream whose parent carries `metadata` — matches the shape
     FPGA.load() expects (source.parent.metadata for hints)."""
     parent = Node("file")
-    parent._metadata.update(metadata)
+    parent.metadata.update(metadata)
     leaf = _Bitstream("bitstream", data)
-    parent._child_attach(leaf)
+    parent.child_add(leaf)
     return leaf
 
 

@@ -13,7 +13,7 @@ def _tap_annotation(tap):
     which TAP gates it. Empty string for taps not in a Chain or for
     bare chain-owned attached TAPs (the default, doesn't need
     noise)."""
-    parent = tap._parent
+    parent = tap.parent
     if not isinstance(parent, Chain):
         return ""
     ctx = parent.contexts.get(tap)

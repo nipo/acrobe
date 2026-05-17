@@ -94,7 +94,7 @@ class ProbyAdapter(Adapter):
         name_lower = name.lower()
 
         if name_lower == "jtag":
-            self.__jtag._name = "jtag"
+            self.__jtag.name = "jtag"
             return self.__jtag
 
         if name_lower == "jtag-pt":
@@ -103,7 +103,7 @@ class ProbyAdapter(Adapter):
                 await self.__reprogram("jtag_swd_raw")
                 jtag = await self.__open_channel_a(
                     gpio_oe=0x0710, gpio_val=0x0310)
-                jtag._name = "jtag-pt"
+                jtag.name = "jtag-pt"
                 return jtag
 
         raise NoMatch("interface", name)

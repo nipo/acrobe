@@ -81,7 +81,7 @@ class TestChildSpawnMro:
     async def test_base_raises_nomatch(self):
         c = Node("root")
         with pytest.raises(NoMatch):
-            await c._child_spawn_mro("anything")
+            await c._Node__child_spawn_mro("anything")
 
     @pytest.mark.asyncio
     async def test_single_override(self):
@@ -92,7 +92,7 @@ class TestChildSpawnMro:
                 raise NoMatch("child", name)
 
         p = Parent("p")
-        child = await p._child_spawn_mro("x")
+        child = await p._Node__child_spawn_mro("x")
         assert child.name == "x"
 
     @pytest.mark.asyncio
@@ -112,10 +112,10 @@ class TestChildSpawnMro:
 
         s = Sub("s")
         # Sub handles "sub"
-        child = await s._child_spawn_mro("sub")
+        child = await s._Node__child_spawn_mro("sub")
         assert child.name == "from-sub"
         # Base handles "base" via MRO fallback
-        child = await s._child_spawn_mro("base")
+        child = await s._Node__child_spawn_mro("base")
         assert child.name == "from-base"
 
     @pytest.mark.asyncio
@@ -130,7 +130,7 @@ class TestChildSpawnMro:
 
         s = Sub("s")
         with pytest.raises(NoMatch):
-            await s._child_spawn_mro("nope")
+            await s._Node__child_spawn_mro("nope")
 
     @pytest.mark.asyncio
     async def test_child_summon_uses_mro(self):
@@ -162,7 +162,7 @@ class TestChildSpawnMro:
             pass
 
         s = Sub("s")
-        child = await s._child_spawn_mro("x")
+        child = await s._Node__child_spawn_mro("x")
         assert child.name == "x"
 
 
@@ -209,7 +209,7 @@ class TestSramFpgaApplicationDb:
 
         fpga = FpgaChild.__new__(FpgaChild)
         Node.__init__(fpga, "test-fpga")
-        child = await fpga._child_spawn_mro("app")
+        child = await fpga._Node__child_spawn_mro("app")
         assert child.name == "test-app"
 
     @pytest.mark.asyncio
@@ -231,7 +231,7 @@ class TestSramFpgaApplicationDb:
 
         fpga = FpgaChild.__new__(FpgaChild)
         Node.__init__(fpga, "test-fpga")
-        child = await fpga._child_spawn_mro("app")
+        child = await fpga._Node__child_spawn_mro("app")
         assert child.name == "from-child"
 
     @pytest.mark.asyncio
@@ -242,7 +242,7 @@ class TestSramFpgaApplicationDb:
         fpga = FpgaX.__new__(FpgaX)
         Node.__init__(fpga, "test-fpga")
         with pytest.raises(NoMatch):
-            await fpga._child_spawn_mro("nonexistent")
+            await fpga._Node__child_spawn_mro("nonexistent")
 
     @pytest.mark.asyncio
     async def test_jtag_sram_fpga_inherits(self):
@@ -340,8 +340,7 @@ class TestChildSummonStart:
         child = Tracked("child")
         root.child_add(child)
 
-        await child.start()
-        child._started = True
+        await child.ensure_started()
         assert start_count == 1
 
         await root.child_summon("child")
@@ -388,8 +387,7 @@ class TestStartTreeIdempotent:
                 start_count += 1
 
         root = Tracked("root")
-        await root.start()
-        root._started = True
+        await root.ensure_started()
         assert start_count == 1
 
         await root.start_tree()

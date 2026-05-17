@@ -87,5 +87,5 @@ class PowerGate(Node):
         return child
 
     def __repr__(self):
-        return (f"<PowerGate {self._name} address=0x{self.address:08x} "
+        return (f"<PowerGate {self.name} address=0x{self.address:08x} "
                 f"kind={self.failure_kind.name}>")

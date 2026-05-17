@@ -127,7 +127,7 @@ class PicobootSpiInterface(spi.Interface):
         # Defensive: if a caller posted ops before start() ran (e.g.
         # constructed the interface and called .post() directly),
         # we still want SSI in manual mode before the stub fires.
-        if not self._started:
+        if not self.started:
             await self.__setup_ssi()
 
         # Partition into (kind, op, future) — Cs / Shift only.

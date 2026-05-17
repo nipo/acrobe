@@ -291,7 +291,7 @@ class ElfSymbols(Node):
             raise NoMatch("symbol", name)
         # Re-attach an existing Node into this parent. The on-demand
         # path attaches it as a child the first time it's looked up.
-        if sym._parent is None:
+        if sym.parent is None:
             return sym
         # Already attached (looked up before); return it directly.
         return sym
@@ -343,7 +343,7 @@ class Elf(FormatNode):
          e_flags, e_ehsize, e_phentsize, e_phnum, e_shentsize,
          e_shnum, e_shstrndx) = ehdr
 
-        self._metadata.update({
+        self.metadata.update({
             "class": "ELF64" if is_64 else "ELF32",
             "endian": "little" if endian == "<" else "big",
             "type": e_type,
@@ -376,9 +376,9 @@ class Elf(FormatNode):
                 file_offset=p_offset, file_size=p_filesz,
                 vaddr=p_vaddr, paddr=p_paddr, mem_size=p_memsz,
                 flags=p_flags)
-            program_container._child_attach(seg)
+            program_container.child_add(seg)
             ph_idx += 1
-        self._child_attach(program_container)
+        self.child_add(program_container)
 
         # --- Section headers ---
         section_container = Node("section")
@@ -426,13 +426,13 @@ class Elf(FormatNode):
                     vaddr=sh_addr, lma=sh_addr,
                     flags=_section_flags(sh_flags),
                     sh_type=sh_type)
-                section_container._child_attach(section)
+                section_container.child_add(section)
                 sections.append({
                     "index": i, "name": name, "sh_type": sh_type,
                     "sh_offset": sh_offset, "sh_size": sh_size,
                     "sh_link": sh_link, "sh_entsize": sh_entsize,
                 })
-            self._child_attach(section_container)
+            self.child_add(section_container)
 
             # --- Symbol table ---
             sym_table = {}
@@ -493,15 +493,15 @@ class Elf(FormatNode):
                     elif st_shndx == SHN_COMMON:
                         section_name = "COMMON"
                     elif 0 < st_shndx < len(raw_shdrs):
-                        sec_node = section_container._children[st_shndx - 1] \
-                            if st_shndx - 1 < len(section_container._children) else None
+                        sec_node = section_container.children[st_shndx - 1] \
+                            if st_shndx - 1 < len(section_container.children) else None
                         section_name = sec_node.name if sec_node else f"shdr{st_shndx}"
                     sym_table[name] = ElfSymbol(
                         name, st_value, st_size, sym_type, binding,
                         section_name)
 
             symbols_container = ElfSymbols("symbol", sym_table)
-            self._child_attach(symbols_container)
+            self.child_add(symbols_container)
 
     # --- Reverse lookups ---
     # After populate_format, our children live on `target` (the

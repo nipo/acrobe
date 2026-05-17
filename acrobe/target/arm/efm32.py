@@ -412,7 +412,7 @@ class EfmLoadable(Loadable):
                 await core.reset(stop=False)
 
     def find_core(self):
-        target = self._parent
+        target = self.parent
         if target is None:
             return None
         debuggables = target.children_of_class(Debuggable)

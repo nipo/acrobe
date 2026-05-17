@@ -345,7 +345,7 @@ class JtagDp(dpmod.Dp):
         """Lower a DP/AP batch to JTAG-DP wire shifts."""
 
         try:
-            JtagDpLowerer(self.__jtag_protocol_version, self._parent).process(batch)
+            JtagDpLowerer(self.__jtag_protocol_version, self.parent).process(batch)
         except Exception as e:
             import traceback
             traceback.print_exc()

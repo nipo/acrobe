@@ -228,7 +228,7 @@ class Sof(FormatNode):
         raw = await self._source.read(0, self._source.size)
         if raw[:2] == b"\x1f\x8b":
             blob = gzip.decompress(raw)
-            self._metadata["gzipped"] = True
+            self.metadata["gzipped"] = True
             backing = _BytesReadable(blob)
         else:
             blob = raw
@@ -257,7 +257,7 @@ class Sof(FormatNode):
                 bootloader_bytes = _decode_bootloader_data(data)
             idx += 6 + len(data)
 
-        self._metadata.update({
+        self.metadata.update({
             "tool": self.tool,
             "device": self.device,
             "design": self.design,
@@ -265,12 +265,12 @@ class Sof(FormatNode):
         })
 
         if config_offset is not None:
-            self._child_attach(SofConfigData(
+            self.child_add(SofConfigData(
                 "config_data", backing, config_offset, config_size))
 
         if bootloader_bytes is not None:
-            self._metadata["bootloader_size"] = len(bootloader_bytes)
-            self._child_attach(SofBootloaderData("bootloader", bootloader_bytes))
+            self.metadata["bootloader_size"] = len(bootloader_bytes)
+            self.child_add(SofBootloaderData("bootloader", bootloader_bytes))
 
 
 @register_magic
