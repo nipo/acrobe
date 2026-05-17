@@ -174,61 +174,61 @@ class MessageBuilder:
     """
 
     def __init__(self) -> None:
-        self._buf = bytearray()
+        self.__buf = bytearray()
         # offset of the current open block's length field, or None if none
-        self._block_len_at: int | None = None
+        self.__block_len_at: int | None = None
 
-    def _close_block(self) -> None:
-        if self._block_len_at is None:
+    def __close_block(self) -> None:
+        if self.__block_len_at is None:
             return
-        block_start = self._block_len_at - 2
-        block_end = len(self._buf)
+        block_start = self.__block_len_at - 2
+        block_end = len(self.__buf)
         block_len = block_end - block_start
         if block_len > 0xFFFF:
             raise ValueError(f"block too large: {block_len}")
-        struct.pack_into(">H", self._buf, self._block_len_at, block_len)
-        self._block_len_at = None
+        struct.pack_into(">H", self.__buf, self.__block_len_at, block_len)
+        self.__block_len_at = None
 
     def add_command(self, cmd: Command) -> Self:
-        self._close_block()
-        self._buf.append(int(cmd))
-        self._buf.append(0)              # reserved
-        self._block_len_at = len(self._buf)
-        self._buf.extend(b"\x00\x00")    # total_len placeholder
+        self.__close_block()
+        self.__buf.append(int(cmd))
+        self.__buf.append(0)              # reserved
+        self.__block_len_at = len(self.__buf)
+        self.__buf.extend(b"\x00\x00")    # total_len placeholder
         return self
 
     def start_response(self, status: int) -> Self:
         """Begin a response block. ``status`` is an AJI error code."""
-        self._close_block()
-        self._buf.append(int(status))
-        self._buf.append(0)
-        self._block_len_at = len(self._buf)
-        self._buf.extend(b"\x00\x00")
+        self.__close_block()
+        self.__buf.append(int(status))
+        self.__buf.append(0)
+        self.__block_len_at = len(self.__buf)
+        self.__buf.extend(b"\x00\x00")
         return self
 
     def add_int(self, value: int) -> Self:
-        self._buf.extend(struct.pack(">I", value & 0xFFFFFFFF))
+        self.__buf.extend(struct.pack(">I", value & 0xFFFFFFFF))
         return self
 
     def add_long(self, value: int) -> Self:
-        self._buf.extend(struct.pack(">Q", value & 0xFFFFFFFFFFFFFFFF))
+        self.__buf.extend(struct.pack(">Q", value & 0xFFFFFFFFFFFFFFFF))
         return self
 
     def add_string(self, s: str) -> Self:
         data = s.encode("latin-1")
         if len(data) > 0xFF:
             raise ValueError(f"string too long: {len(data)} bytes")
-        self._buf.append(len(data))
-        self._buf.extend(data)
+        self.__buf.append(len(data))
+        self.__buf.extend(data)
         return self
 
     def add_raw(self, data: bytes) -> Self:
-        self._buf.extend(data)
+        self.__buf.extend(data)
         return self
 
     def build(self) -> bytes:
-        self._close_block()
-        return bytes(self._buf)
+        self.__close_block()
+        return bytes(self.__buf)
 
 
 class MessageReader:
@@ -241,71 +241,71 @@ class MessageReader:
     """
 
     def __init__(self, data: bytes) -> None:
-        self._data = data
-        self._pos = 0
-        self._block_end = 0  # end of the current block (exclusive)
+        self.__data = data
+        self.__pos = 0
+        self.__block_end = 0  # end of the current block (exclusive)
 
     @property
     def remaining(self) -> int:
         """Bytes remaining inside the current block."""
-        return self._block_end - self._pos
+        return self.__block_end - self.__pos
 
     @property
     def at_end(self) -> bool:
         """True if there are no more blocks to read."""
-        return self._block_end >= len(self._data)
+        return self.__block_end >= len(self.__data)
 
     def next_block(self) -> int:
         """Skip any unconsumed payload of the current block, then read
         the next block's 4-byte header. Returns the cmd/status byte.
         """
         # Skip past any unconsumed bytes of the current block.
-        self._pos = self._block_end
-        if self._pos + 4 > len(self._data):
+        self.__pos = self.__block_end
+        if self.__pos + 4 > len(self.__data):
             raise EOFError("truncated block header")
-        cmd = self._data[self._pos]
+        cmd = self.__data[self.__pos]
         # byte+1 is reserved; bytes+2..+4 are the BE total_len.
-        total_len = struct.unpack_from(">H", self._data, self._pos + 2)[0]
+        total_len = struct.unpack_from(">H", self.__data, self.__pos + 2)[0]
         if total_len < 4:
             raise ValueError(f"invalid block total_len {total_len}")
-        if self._pos + total_len > len(self._data):
+        if self.__pos + total_len > len(self.__data):
             raise ValueError(
                 f"block extends past buffer ({total_len} bytes asked, "
-                f"{len(self._data) - self._pos} available)")
-        self._block_end = self._pos + total_len
-        self._pos += 4
+                f"{len(self.__data) - self.__pos} available)")
+        self.__block_end = self.__pos + total_len
+        self.__pos += 4
         return cmd
 
     def read_int(self) -> int:
         if self.remaining < 4:
             raise EOFError("not enough data for int")
-        v = struct.unpack_from(">I", self._data, self._pos)[0]
-        self._pos += 4
+        v = struct.unpack_from(">I", self.__data, self.__pos)[0]
+        self.__pos += 4
         return v
 
     def read_long(self) -> int:
         if self.remaining < 8:
             raise EOFError("not enough data for long")
-        v = struct.unpack_from(">Q", self._data, self._pos)[0]
-        self._pos += 8
+        v = struct.unpack_from(">Q", self.__data, self.__pos)[0]
+        self.__pos += 8
         return v
 
     def read_string(self) -> str:
         if self.remaining < 1:
             raise EOFError("not enough data for string length")
-        n = self._data[self._pos]
+        n = self.__data[self.__pos]
         if self.remaining < 1 + n:
             raise EOFError("string runs past block end")
-        s = self._data[self._pos + 1:self._pos + 1 + n].decode(
+        s = self.__data[self.__pos + 1:self.__pos + 1 + n].decode(
             "latin-1", errors="replace")
-        self._pos += 1 + n
+        self.__pos += 1 + n
         return s
 
     def read_raw(self, n: int) -> bytes:
         if self.remaining < n:
             raise EOFError(f"not enough data for {n} raw bytes")
-        out = bytes(self._data[self._pos:self._pos + n])
-        self._pos += n
+        out = bytes(self.__data[self.__pos:self.__pos + n])
+        self.__pos += n
         return out
 
 

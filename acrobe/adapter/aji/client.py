@@ -122,15 +122,15 @@ class AjiClient:
     """High-level libaji client. Use :meth:`connect`."""
 
     def __init__(self, link: AjiLink) -> None:
-        self._link = link
+        self.__link = link
 
     @property
     def server_version(self) -> int:
-        return self._link.server_version
+        return self.__link.server_version
 
     @property
     def server_version_info(self) -> str:
-        return self._link.server_version_info
+        return self.__link.server_version_info
 
     @classmethod
     async def connect(
@@ -146,7 +146,7 @@ class AjiClient:
         return cls(link)
 
     async def close(self) -> None:
-        await self._link.close()
+        await self.__link.close()
 
     async def __aenter__(self) -> Self:
         return self
@@ -168,7 +168,7 @@ class AjiClient:
                    .add_command(Command.GET_HARDWARE)
                    .add_int(self.server_version)
                    .build())
-        response = await self._link.send_receive(request)
+        response = await self.__link.send_receive(request)
         rdr = MessageReader(response)
         status = rdr.next_block()
         _expect_ok(status, "GET_HARDWARE")
@@ -178,13 +178,13 @@ class AjiClient:
         if count == 0 or fifo_len == 0:
             return []
 
-        fifo_data = self._collect_fifo_bytes(fifo_len)
-        return self._parse_hardware_records(fifo_data, count)
+        fifo_data = self.__collect_fifo_bytes(fifo_len)
+        return self.__parse_hardware_records(fifo_data, count)
 
-    def _collect_fifo_bytes(self, expected: int) -> bytes:
+    def __collect_fifo_bytes(self, expected: int) -> bytes:
         """Concatenate FIFO frames until we have ``expected`` bytes."""
         out = bytearray()
-        for mux, payload in self._link.drain_fifos():
+        for mux, payload in self.__link.drain_fifos():
             if mux != MUX_FIFO_MIN:
                 _logger.warning("ignoring FIFO data on mux %d", mux)
                 continue
@@ -194,7 +194,7 @@ class AjiClient:
                            f"FIFO short: got {len(out)} of {expected} bytes")
         return bytes(out[:expected])
 
-    def _parse_hardware_records(
+    def __parse_hardware_records(
         self, data: bytes, count: int) -> list[Hardware]:
         """Parse ``count`` Hardware records from a FIFO blob.
 
@@ -235,7 +235,7 @@ class AjiClient:
                    .add_int(chain_id)
                    .add_int(timeout_ms)
                    .build())
-        rdr = MessageReader(await self._link.send_receive(request))
+        rdr = MessageReader(await self.__link.send_receive(request))
         _expect_ok(rdr.next_block(), "LOCK_CHAIN")
 
     async def unlock_chain(self, chain_id: int) -> None:
@@ -243,7 +243,7 @@ class AjiClient:
                    .add_command(Command.UNLOCK_CHAIN)
                    .add_int(chain_id)
                    .build())
-        rdr = MessageReader(await self._link.send_receive(request))
+        rdr = MessageReader(await self.__link.send_receive(request))
         _expect_ok(rdr.next_block(), "UNLOCK_CHAIN")
 
     # --- Chain parameters -------------------------------------------------
@@ -265,7 +265,7 @@ class AjiClient:
                    .add_string(name)
                    .add_int(value)
                    .build())
-        rdr = MessageReader(await self._link.send_receive(request))
+        rdr = MessageReader(await self.__link.send_receive(request))
         _expect_ok(rdr.next_block(), "SET_PARAMETER")
 
     async def get_parameter(self, chain_id: int, name: str) -> int:
@@ -275,7 +275,7 @@ class AjiClient:
                    .add_int(chain_id)
                    .add_string(name)
                    .build())
-        rdr = MessageReader(await self._link.send_receive(request))
+        rdr = MessageReader(await self.__link.send_receive(request))
         _expect_ok(rdr.next_block(), "GET_PARAMETER")
         return rdr.read_int()
 
@@ -292,7 +292,7 @@ class AjiClient:
                     .add_int(chain_id)
                     .add_int(timeout_ms)
                     .build())
-        rdr = MessageReader(await self._link.send_receive(scan_req))
+        rdr = MessageReader(await self.__link.send_receive(scan_req))
         _expect_ok(rdr.next_block(), "SCAN_CHAIN")
         # libaji optionally reads a scan_tag here; we don't keep it.
 
@@ -303,7 +303,7 @@ class AjiClient:
                     .add_int(0)  # scan_tag (0 = "give me the latest scan")
                     .add_int(1)  # pack_style
                     .build())
-        response = await self._link.send_receive(read_req)
+        response = await self.__link.send_receive(read_req)
         rdr = MessageReader(response)
         _expect_ok(rdr.next_block(), "READ_CHAIN")
         scan_tag = rdr.read_int()
@@ -313,10 +313,10 @@ class AjiClient:
         if device_count == 0 or fifo_len == 0:
             return []
 
-        return self._parse_device_records(
-            self._collect_fifo_bytes(fifo_len), device_count)
+        return self.__parse_device_records(
+            self.__collect_fifo_bytes(fifo_len), device_count)
 
-    def _parse_device_records(self, data: bytes, count: int) -> list[Device]:
+    def __parse_device_records(self, data: bytes, count: int) -> list[Device]:
         """Layout per device, from libaji's READ_CHAIN reply:
             int idcode, int irlen, int features, raw[8] reserved,
             string device_name
@@ -395,7 +395,7 @@ class AjiClient:
         builder.add_string(application_name)
 
         request = builder.build()
-        rdr = MessageReader(await self._link.send_receive(request))
+        rdr = MessageReader(await self.__link.send_receive(request))
         _expect_ok(rdr.next_block(), "OPEN_DEVICE")
         open_id = rdr.read_int()
         return open_id
@@ -405,7 +405,7 @@ class AjiClient:
                    .add_command(Command.CLOSE_DEVICE)
                    .add_int(open_id)
                    .build())
-        rdr = MessageReader(await self._link.send_receive(request))
+        rdr = MessageReader(await self.__link.send_receive(request))
         _expect_ok(rdr.next_block(), "CLOSE_DEVICE")
 
     async def lock_device(self, open_id: int, timeout_ms: int = 10000) -> None:
@@ -414,7 +414,7 @@ class AjiClient:
                    .add_int(open_id)
                    .add_int(timeout_ms)
                    .build())
-        rdr = MessageReader(await self._link.send_receive(request))
+        rdr = MessageReader(await self.__link.send_receive(request))
         _expect_ok(rdr.next_block(), "LOCK_DEVICE")
 
     async def unlock_device(self, open_id: int) -> None:
@@ -422,7 +422,7 @@ class AjiClient:
                    .add_command(Command.UNLOCK_DEVICE)
                    .add_int(open_id)
                    .build())
-        rdr = MessageReader(await self._link.send_receive(request))
+        rdr = MessageReader(await self.__link.send_receive(request))
         _expect_ok(rdr.next_block(), "UNLOCK_DEVICE")
 
     # --- JTAG ops ---
@@ -438,7 +438,7 @@ class AjiClient:
                    .add_int(instruction)
                    .add_int(flags)
                    .build())
-        rdr = MessageReader(await self._link.send_receive(request))
+        rdr = MessageReader(await self.__link.send_receive(request))
         _expect_ok(rdr.next_block(), "ACCESS_IR")
         if flags & IR_FLAG_CAPTURE:
             return rdr.read_int()
@@ -517,7 +517,7 @@ class AjiClient:
         # how many FIFO bytes to expect, and waits for them. Sending
         # FIFO before command makes jtagd block (the FIFO bytes have
         # nowhere to go since no ACCESS_DR is in flight yet).
-        response = await self._link.send_receive_with_fifo(
+        response = await self.__link.send_receive_with_fifo(
             request, fifo_after=write_bits)
         rdr = MessageReader(response)
         _expect_ok(rdr.next_block(), "ACCESS_DR")
@@ -527,7 +527,7 @@ class AjiClient:
 
         # Read response data from FIFO 0.
         nbytes = (read_length + 7) // 8
-        return self._collect_fifo_bytes(nbytes)
+        return self.__collect_fifo_bytes(nbytes)
 
     async def run_test_idle(self, open_id: int, num_clocks: int,
                             flags: int = 0) -> None:
@@ -540,7 +540,7 @@ class AjiClient:
         if self.server_version >= 5:
             builder.add_int(flags)
         request = builder.build()
-        rdr = MessageReader(await self._link.send_receive(request))
+        rdr = MessageReader(await self.__link.send_receive(request))
         _expect_ok(rdr.next_block(), "RUN_TEST_IDLE")
 
     async def test_logic_reset(self, open_id: int) -> None:
@@ -548,5 +548,5 @@ class AjiClient:
                    .add_command(Command.TEST_LOGIC_RESET)
                    .add_int(open_id)
                    .build())
-        rdr = MessageReader(await self._link.send_receive(request))
+        rdr = MessageReader(await self.__link.send_receive(request))
         _expect_ok(rdr.next_block(), "TEST_LOGIC_RESET")

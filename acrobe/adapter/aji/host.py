@@ -26,19 +26,19 @@ class AjiHost(Node):
 
     def __init__(self, name: str, *, host: str, port: int) -> None:
         super().__init__(name)
-        self._host_addr = host
-        self._port = port
-        self._client: AjiClient | None = None
+        self.__host_addr = host
+        self.__port = port
+        self.__client: AjiClient | None = None
 
     @property
     def server_address(self) -> tuple[str, int]:
-        return self._host_addr, self._port
+        return self.__host_addr, self.__port
 
     @property
     def client(self) -> AjiClient | None:
         """``AjiClient`` once :meth:`start` has connected, else ``None``.
         Used by child :class:`AjiHardware` nodes to make calls."""
-        return self._client
+        return self.__client
 
     # --- Lifecycle ---
 
@@ -48,13 +48,13 @@ class AjiHost(Node):
         children's own ``start()`` runs lazily during
         ``start_tree()`` or ``child_summon`` walks.
         """
-        self._client = await AjiClient.connect(self._host_addr, self._port)
+        self.__client = await AjiClient.connect(self.__host_addr, self.__port)
         _logger.info("connected to %s:%d (server v=%d, %r)",
-                     self._host_addr, self._port,
-                     self._client.server_version,
-                     self._client.server_version_info)
+                     self.__host_addr, self.__port,
+                     self.__client.server_version,
+                     self.__client.server_version_info)
 
-        for hw in await self._client.get_hardware():
+        for hw in await self.__client.get_hardware():
             name = hardware_name(hw)
             # Disambiguate duplicates by suffixing with chain_id.
             existing = {c._name for c in self._children}
@@ -68,7 +68,7 @@ class AjiHost(Node):
     async def stop(self) -> None:
         from ...lifecycle import cancel_shutdown
         cancel_shutdown(self.stop)
-        client = self._client
+        client = self.__client
         if client is None:
             return
         # Children's stop_tree handles their own unlock/close.
@@ -77,7 +77,7 @@ class AjiHost(Node):
             await client.close()
         except Exception:
             pass
-        self._client = None
+        self.__client = None
 
     # --- Path resolution ---
 
@@ -86,5 +86,5 @@ class AjiHost(Node):
         raise NoMatch("hardware", name)
 
     def __repr__(self) -> str:
-        return (f"<AjiHost {self._name} {self._host_addr}:{self._port} "
+        return (f"<AjiHost {self._name} {self.__host_addr}:{self.__port} "
                 f"hardwares={len(self._children)}>")

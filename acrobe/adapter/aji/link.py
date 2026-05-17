@@ -63,26 +63,26 @@ class MuxStream:
     def __init__(self,
                  reader: asyncio.StreamReader,
                  writer: asyncio.StreamWriter) -> None:
-        self._reader = reader
-        self._writer = writer
+        self.__reader = reader
+        self.__writer = writer
 
     @property
     def closed(self) -> bool:
-        return self._writer.is_closing()
+        return self.__writer.is_closing()
 
     async def read_packet(self) -> tuple[int, bytes]:
         """Read a single mux packet. Returns ``(mux, payload)``."""
-        header = await self._reader.readexactly(2)
+        header = await self.__reader.readexactly(2)
         mux, length = decode_mux_header(header)
-        payload = await self._reader.readexactly(length)
+        payload = await self.__reader.readexactly(length)
         return mux, payload
 
     async def write_packet(self, mux: int, payload: bytes) -> None:
         if not (1 <= len(payload) <= MUX_MAX_PAYLOAD):
             raise ValueError(
                 f"payload length {len(payload)} out of 1..{MUX_MAX_PAYLOAD}")
-        self._writer.write(encode_mux_header(mux, len(payload)) + payload)
-        await self._writer.drain()
+        self.__writer.write(encode_mux_header(mux, len(payload)) + payload)
+        await self.__writer.drain()
 
     async def write_chunked(self, mux: int, payload: bytes) -> None:
         """Write a payload of arbitrary size by splitting it into mux
@@ -95,15 +95,15 @@ class MuxStream:
         offset = 0
         while offset < len(payload):
             chunk = payload[offset:offset + MUX_MAX_PAYLOAD]
-            self._writer.write(
+            self.__writer.write(
                 encode_mux_header(mux, len(chunk)) + chunk)
             offset += len(chunk)
-        await self._writer.drain()
+        await self.__writer.drain()
 
     async def close(self) -> None:
         try:
-            self._writer.close()
-            await self._writer.wait_closed()
+            self.__writer.close()
+            await self.__writer.wait_closed()
         except Exception:
             pass
 
@@ -127,39 +127,39 @@ class AjiLink:
     """
 
     def __init__(self, mux: MuxStream) -> None:
-        self._mux = mux
-        self._lock = asyncio.Lock()
-        self._server_version: int = 0
-        self._server_flags: int = 0
-        self._server_version_info: str = ""
-        self._server_path: str = ""
-        self._pgmparts_version: int = 0
+        self.__mux = mux
+        self.__lock = asyncio.Lock()
+        self.__server_version: int = 0
+        self.__server_flags: int = 0
+        self.__server_version_info: str = ""
+        self.__server_path: str = ""
+        self.__pgmparts_version: int = 0
 
     # --- Properties populated after connect() ---
 
     @property
     def server_version(self) -> int:
-        return self._server_version
+        return self.__server_version
 
     @property
     def server_flags(self) -> int:
-        return self._server_flags
+        return self.__server_flags
 
     @property
     def server_version_info(self) -> str:
-        return self._server_version_info
+        return self.__server_version_info
 
     @property
     def server_path(self) -> str:
-        return self._server_path
+        return self.__server_path
 
     @property
     def pgmparts_version(self) -> int:
-        return self._pgmparts_version
+        return self.__pgmparts_version
 
     @property
     def closed(self) -> bool:
-        return self._mux.closed
+        return self.__mux.closed
 
     # --- Lifecycle ---
 
@@ -176,15 +176,15 @@ class AjiLink:
         mux = MuxStream(reader, writer)
         link = cls(mux)
         try:
-            await link._negotiate(password=password,
-                                  client_version=client_version)
+            await link.__negotiate(password=password,
+                                   client_version=client_version)
         except Exception:
             await mux.close()
             raise
         return link
 
     async def close(self) -> None:
-        await self._mux.close()
+        await self.__mux.close()
 
     async def __aenter__(self) -> Self:
         return self
@@ -208,10 +208,10 @@ class AjiLink:
         for GET_HARDWARE, READ_CHAIN and similar paginated commands.
         Returns just the bytes of the response packet on channel 0.
         """
-        async with self._lock:
-            self._fifo_buffer = []
-            await self._mux.write_packet(MUX_COMMAND, request_blocks)
-            return await self._read_until_command_channel()
+        async with self.__lock:
+            self.__fifo_buffer = []
+            await self.__mux.write_packet(MUX_COMMAND, request_blocks)
+            return await self.__read_until_command_channel()
 
     async def send_receive_with_fifo(
         self,
@@ -228,24 +228,24 @@ class AjiLink:
         first so the server learns the FIFO byte count, then the
         FIFO data follows.
         """
-        async with self._lock:
-            self._fifo_buffer = []
-            await self._mux.write_packet(MUX_COMMAND, request_blocks)
+        async with self.__lock:
+            self.__fifo_buffer = []
+            await self.__mux.write_packet(MUX_COMMAND, request_blocks)
             if fifo_after:
-                await self._mux.write_chunked(fifo_mux, fifo_after)
-            return await self._read_until_command_channel()
+                await self.__mux.write_chunked(fifo_mux, fifo_after)
+            return await self.__read_until_command_channel()
 
-    async def _read_until_command_channel(self) -> bytes:
+    async def __read_until_command_channel(self) -> bytes:
         """Read packets, stashing FIFO data until a command-channel
         packet arrives. Returns its payload.
         """
         while True:
-            mux, payload = await self._mux.read_packet()
+            mux, payload = await self.__mux.read_packet()
             if mux == MUX_COMMAND:
                 return payload
             if MUX_FIFO_MIN <= mux <= MUX_FIFO_MAX:
                 # FIFO frame; remember which channel it came on.
-                self._fifo_buffer.append((mux, payload))
+                self.__fifo_buffer.append((mux, payload))
                 continue
             _logger.warning("ignoring unsolicited packet on mux=%d (%d bytes)",
                             mux, len(payload))
@@ -254,15 +254,15 @@ class AjiLink:
         """Return the FIFO frames accumulated during the last
         send_receive() call, then clear the buffer.
         """
-        out, self._fifo_buffer = list(self._fifo_buffer), []
+        out, self.__fifo_buffer = list(self.__fifo_buffer), []
         return out
 
     # --- Greeting / negotiation ---
 
-    async def _negotiate(self, *, password: str | None,
-                         client_version: int) -> None:
+    async def __negotiate(self, *, password: str | None,
+                          client_version: int) -> None:
         # 1) Receive the greeting on channel 0.
-        mux, payload = await self._mux.read_packet()
+        mux, payload = await self.__mux.read_packet()
         if mux != MUX_COMMAND:
             raise ConnectionError(
                 f"expected greeting on mux 0, got mux={mux}")
@@ -276,7 +276,7 @@ class AjiLink:
                 raise PermissionError(
                     "server requires authentication but no password provided")
             assert greeting.challenge is not None
-            await self._md5_authenticate(greeting.challenge, password)
+            await self.__md5_authenticate(greeting.challenge, password)
 
         # 3) Pick a protocol version both sides understand. libaji
         #    clamps the server-advertised version to its own current
@@ -284,9 +284,9 @@ class AjiLink:
         version = min(greeting.server_version, client_version)
         if version < 2:
             # Legacy: no USE_PROTOCOL_VERSION exchange, just stop.
-            self._server_version = version
+            self.__server_version = version
             return
-        self._server_version = version
+        self.__server_version = version
 
         # 4) Version 2+: send USE_PROTOCOL_VERSION + GET_VERSION_INFO
         #    batched, expect two responses in one packet.
@@ -303,28 +303,28 @@ class AjiLink:
         if status1 != 0:
             raise ConnectionError(
                 f"USE_PROTOCOL_VERSION returned status {status1}")
-        self._server_flags = rdr.read_int()
+        self.__server_flags = rdr.read_int()
 
         # Second response: version_info string + pgmparts_version + server_path.
         status2 = rdr.next_block()
         if status2 != 0:
             raise ConnectionError(
                 f"GET_VERSION_INFO returned status {status2}")
-        self._server_version_info = rdr.read_string()
+        self.__server_version_info = rdr.read_string()
         # pgmparts_version is optional and ignored by libaji clients.
         if rdr.remaining >= 4:
-            self._pgmparts_version = rdr.read_int()
+            self.__pgmparts_version = rdr.read_int()
         if rdr.remaining >= 1:
             try:
-                self._server_path = rdr.read_string()
+                self.__server_path = rdr.read_string()
             except EOFError:
                 pass
 
         _logger.info("negotiated v=%d, flags=0x%x, info=%r",
-                     self._server_version, self._server_flags,
-                     self._server_version_info)
+                     self.__server_version, self.__server_flags,
+                     self.__server_version_info)
 
-    async def _md5_authenticate(self, challenge: bytes, password: str) -> None:
+    async def __md5_authenticate(self, challenge: bytes, password: str) -> None:
         import hashlib
         digest = hashlib.md5(challenge + password.encode("latin-1")).digest()
         request = (MessageBuilder()

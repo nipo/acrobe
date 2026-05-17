@@ -280,9 +280,9 @@ class TestJtagOps:
         new_open_id = await host.client.open_device(
             hw_node.chain_id, 0, application_name="acrobe-test")
         await host.client.lock_device(new_open_id, 5000)
-        hw_node._open_id_of[new_tap] = new_open_id
-        hw_node._last_ir[new_tap] = None
-        hw_node._locked_devices.add(new_open_id)
+        hw_node.open_id_of[new_tap] = new_open_id
+        hw_node.last_ir[new_tap] = None
+        hw_node.locked_devices.add(new_open_id)
         hw_node.child_add(new_tap)
 
         result = await new_tap.DATA(0xab)

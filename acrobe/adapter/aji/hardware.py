@@ -103,30 +103,30 @@ class AjiHardware(Batcher, FreqCapper, Node):
         Batcher.__init__(self)
         Node.__init__(self, name)
         FreqCapper.__init__(self)
-        self._hw = hw
+        self.__hw = hw
         # Tap → open_id (populated in start()).
-        self._open_id_of: dict[Tap, int] = {}
+        self.open_id_of: dict[Tap, int] = {}
         # Tap → cached current_ir, lets us skip redundant access_ir.
-        self._last_ir: dict[Tap, int | None] = {}
+        self.last_ir: dict[Tap, int | None] = {}
         # Records what we successfully locked, so stop() can be lazy.
-        self._locked_devices: set[int] = set()
+        self.locked_devices: set[int] = set()
 
     @property
     def chain_id(self) -> int:
-        return self._hw.chain_id
+        return self.__hw.chain_id
 
     @property
     def hw_name(self) -> str:
-        return self._hw.hw_name
+        return self.__hw.hw_name
 
     @property
     def port(self) -> str:
-        return self._hw.port
+        return self.__hw.port
 
     # --- Lifecycle ------------------------------------------------------
 
     @property
-    def _client(self) -> AjiClient:
+    def __client(self) -> AjiClient:
         from .host import AjiHost
         host = self.parent_of_class(AjiHost)
         client = host.client
@@ -137,8 +137,8 @@ class AjiHardware(Batcher, FreqCapper, Node):
         return client
 
     async def start(self) -> None:
-        client = self._client
-        chain_id = self._hw.chain_id
+        client = self.__client
+        chain_id = self.__hw.chain_id
 
         # Lock the chain so we can scan + open devices on it.
         try:
@@ -153,11 +153,11 @@ class AjiHardware(Batcher, FreqCapper, Node):
         except Exception as e:
             _logger.warning("scan_chain(%d) on %r failed: %s",
                             chain_id, self.name, e)
-            await self._safe_unlock_chain(client, chain_id)
+            await self.__safe_unlock_chain(client, chain_id)
             return
 
         if not devices:
-            await self._safe_unlock_chain(client, chain_id)
+            await self.__safe_unlock_chain(client, chain_id)
             return
 
         # Open every device first; only then unlock the chain.
@@ -197,7 +197,7 @@ class AjiHardware(Batcher, FreqCapper, Node):
                 _logger.warning("set_parameter(JtagClock=%d) on %r failed: %s",
                                 rate, self.name, e)
 
-        await self._safe_unlock_chain(client, chain_id)
+        await self.__safe_unlock_chain(client, chain_id)
 
         for tap, open_id in opened:
             try:
@@ -209,22 +209,22 @@ class AjiHardware(Batcher, FreqCapper, Node):
                 except Exception:
                     pass
                 continue
-            self._open_id_of[tap] = open_id
-            self._last_ir[tap] = None
-            self._locked_devices.add(open_id)
+            self.open_id_of[tap] = open_id
+            self.last_ir[tap] = None
+            self.locked_devices.add(open_id)
             self.child_add(tap)
 
     async def stop(self) -> None:
         try:
-            client = self._client
+            client = self.__client
         except RuntimeError:
             # Host already disconnected; nothing to release.
-            self._open_id_of.clear()
-            self._last_ir.clear()
-            self._locked_devices.clear()
+            self.open_id_of.clear()
+            self.last_ir.clear()
+            self.locked_devices.clear()
             return
-        for _tap, open_id in list(self._open_id_of.items()):
-            if open_id in self._locked_devices:
+        for _tap, open_id in list(self.open_id_of.items()):
+            if open_id in self.locked_devices:
                 try:
                     await client.unlock_device(open_id)
                 except Exception as e:
@@ -233,12 +233,12 @@ class AjiHardware(Batcher, FreqCapper, Node):
                 await client.close_device(open_id)
             except Exception as e:
                 _logger.debug("close_device(%d): %s", open_id, e)
-        self._open_id_of.clear()
-        self._last_ir.clear()
-        self._locked_devices.clear()
+        self.open_id_of.clear()
+        self.last_ir.clear()
+        self.locked_devices.clear()
 
     @staticmethod
-    async def _safe_unlock_chain(client: AjiClient, chain_id: int) -> None:
+    async def __safe_unlock_chain(client: AjiClient, chain_id: int) -> None:
         try:
             await client.unlock_chain(chain_id)
         except Exception as e:
@@ -253,7 +253,7 @@ class AjiHardware(Batcher, FreqCapper, Node):
     # --- TapOp dispatch -------------------------------------------------
 
     async def flush_ops(self, batch: list) -> None:
-        client = self._client
+        client = self.__client
         for top, future in batch:
             if not isinstance(top, TapOp):
                 future.set_exception(
@@ -261,14 +261,14 @@ class AjiHardware(Batcher, FreqCapper, Node):
                 continue
             tap = top.tap
             op = top.op
-            open_id = self._open_id_of.get(tap)
+            open_id = self.open_id_of.get(tap)
             if open_id is None:
                 future.set_exception(
                     ValueError(f"Tap {tap.name!r} not registered with hardware "
                                f"{self.name!r}"))
                 continue
             try:
-                value = await self._dispatch(client, tap, open_id, op)
+                value = await self.__dispatch(client, tap, open_id, op)
             except Exception as e:
                 if not future.done():
                     future.set_exception(e)
@@ -276,14 +276,14 @@ class AjiHardware(Batcher, FreqCapper, Node):
             if not future.done():
                 future.set_result(value)
 
-    async def _dispatch(self, client: AjiClient, tap: Tap,
-                        open_id: int, op):
+    async def __dispatch(self, client: AjiClient, tap: Tap,
+                         open_id: int, op):
         """Execute one TapOp, returning the captured BitString (for
         reading shifts and IR status) or None."""
         if isinstance(op, _TapShift):
-            if op.ir_value is not None and op.ir_value != self._last_ir.get(tap):
+            if op.ir_value is not None and op.ir_value != self.last_ir.get(tap):
                 await client.access_ir(open_id, op.ir_value)
-                self._last_ir[tap] = op.ir_value
+                self.last_ir[tap] = op.ir_value
             if op.tdi is not None:
                 length = len(op.tdi)
                 tdi_bytes = bytes(op.tdi) if length else b""
@@ -304,11 +304,11 @@ class AjiHardware(Batcher, FreqCapper, Node):
             captured = await client.access_ir(
                 open_id, instruction=(1 << tap.irlen) - 1,
                 flags=IR_FLAG_CAPTURE)
-            self._last_ir[tap] = (1 << tap.irlen) - 1
+            self.last_ir[tap] = (1 << tap.irlen) - 1
             return BitString(captured if captured is not None else 0,
                              tap.irlen)
         raise TypeError(f"Unknown tap op: {type(op).__name__}")
 
     def __repr__(self) -> str:
-        return (f"<AjiHardware {self._name} chain_id={self._hw.chain_id} "
-                f"port={self._hw.port!r} taps={len(self._open_id_of)}>")
+        return (f"<AjiHardware {self._name} chain_id={self.__hw.chain_id} "
+                f"port={self.__hw.port!r} taps={len(self.open_id_of)}>")
