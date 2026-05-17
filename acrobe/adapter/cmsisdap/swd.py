@@ -44,6 +44,41 @@ _DEFAULT_WAIT_RETRY  = 16
 _DEFAULT_MATCH_RETRY = 16
 
 
+def _int_bits(value: int, count: int) -> list[int]:
+    """LSB-first bit list of ``value`` over ``count`` bits."""
+    return [(value >> i) & 1 for i in range(count)]
+
+
+def _swd_cmd_byte(ap: bool, rnw: bool, addr: int) -> int:
+    """SWD request packet (LSB-first wire order):
+
+        bit 0: start (1)
+        bit 1: APnDP
+        bit 2: RnW
+        bit 3: A[2]
+        bit 4: A[3]
+        bit 5: parity (even over bits 1..4)
+        bit 6: stop (0)
+        bit 7: park (1)
+    """
+    a = (addr >> 2) & 0x3
+    parity = (int(ap) ^ (a & 1) ^ ((a >> 1) & 1) ^ int(rnw)) & 1
+    return (0x81 | (0x4 if rnw else 0)
+            | (int(ap) << 1)
+            | (a << 3)
+            | (parity << 5))
+
+
+def _data_parity(value: int) -> int:
+    x = value & 0xFFFFFFFF
+    x ^= x >> 16
+    x ^= x >> 8
+    x ^= x >> 4
+    x ^= x >> 2
+    x ^= x >> 1
+    return x & 1
+
+
 def _swj_chunks(bits: list[int]):
     """Yield (count, bytes) tuples for DAP_SWJ_Sequence, each
     capped at 256 bits per CMSIS-DAP spec (count=0 means 256)."""
@@ -93,7 +128,7 @@ class CmsisDapSwdInterface(swd.Interface):
         self.__connected = True
         await super().start()
 
-    async def flush_ops(self, batch):
+    async def flush_wire_ops(self, batch):
         # Two pass: first drain SWJ-style ops in order, accumulating
         # transfers; then issue DAP_Transfer for the transfer run.
         # We flush in groups so that an SWJ-sequence between two
@@ -149,6 +184,37 @@ class CmsisDapSwdInterface(swd.Interface):
                 bits.extend(_switch_bits())
                 bits.extend([1] * 200)
                 bits.extend([0] * 16)
+                continue
+
+            if isinstance(op, swd.SwdToDormant):
+                bits.extend([1] * 60)
+                bits.extend(_int_bits(0xE3BC, 16))
+                continue
+
+            if isinstance(op, swd.DormantToSwd):
+                bits.extend([1] * 8)
+                bits.extend(_int_bits(0x86852D956209F392, 64))
+                bits.extend(_int_bits(0x19BC0EA2E3DDAFE9, 64))
+                bits.extend([0] * 4)
+                bits.extend(_int_bits(0x1A, 8))
+                continue
+
+            if isinstance(op, swd.TargetSelWrite):
+                # Bit-bang the entire TARGETSEL transaction through
+                # the SWJ sequencer (host-driven throughout, ACK
+                # bits ignored). Per spec no DP responds with an
+                # ACK on this transaction, so driving SWDIO across
+                # the ACK window is safe.
+                cmd = _swd_cmd_byte(False, False, 0x0c)
+                bits.extend(_int_bits(cmd, 8))
+                # TRN(1) + ACK(3) + TRN(1) — clock past with SWDIO
+                # high (pull-up state) since we don't sample.
+                bits.extend([1] * 5)
+                data = op.target & 0xFFFFFFFF
+                bits.extend(_int_bits(data, 32))
+                bits.extend([_data_parity(data)])
+                # Idle.
+                bits.extend([0] * 8)
                 continue
 
             _future.set_exception(TypeError(

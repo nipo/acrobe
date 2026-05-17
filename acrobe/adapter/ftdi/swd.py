@@ -55,6 +55,10 @@ _TRN_CYCLES = 1
 
 _RDBUFF_REG = 0x0c
 
+# TARGETSEL is at the same byte offset as RDBUFF (the address space
+# overloads the W direction); the spec disambiguates by RnW.
+_TARGETSEL_REG = 0x0c
+
 _ACK_OK    = swd.Ack.OK
 _ACK_WAIT  = swd.Ack.WAIT
 _ACK_FAULT = swd.Ack.FAULT
@@ -286,9 +290,31 @@ class SwdMpsse(swd.Interface):
         mpsse_ops.append(ShiftBits(_data_parity(data), 1))
         return ack_op
 
+    def __emit_targetsel_write(self, mpsse_ops, target: int):
+        """Wire-level TARGETSEL write. Per ADIv5/v6 spec, no DP
+        responds with an ACK on this transaction — the addressed DP
+        latches the value silently and the others go untouched. The
+        bit framing mirrors a normal write, but we don't capture the
+        ACK bits (any value is acceptable, including the all-high
+        "no driver / pull-up" state)."""
+        cmd = _swd_cmd_byte(False, False, _TARGETSEL_REG)
+        self.__set_side(mpsse_ops, self.SIDE_HOST)
+        mpsse_ops.append(ShiftBits(cmd, 8))
+        # Hand the line to the target for the TRN+ACK window; we
+        # discard whatever appears there.
+        self.__set_side(mpsse_ops, self.SIDE_TARGET)
+        mpsse_ops.append(ShiftBits(0, _TRN_CYCLES, read=True))
+        mpsse_ops.append(ShiftBits(0, 3, read=True))
+        # Host drives the second TRN, data, and parity.
+        self.__set_side(mpsse_ops, self.SIDE_HOST)
+        mpsse_ops.append(ShiftBits(0, _TRN_CYCLES))
+        data = target & 0xFFFFFFFF
+        mpsse_ops.append(ShiftBytes(data.to_bytes(4, "little")))
+        mpsse_ops.append(ShiftBits(_data_parity(data), 1))
+
     # --- Batch execution --------------------------------------------
 
-    async def flush_ops(self, batch):
+    async def flush_wire_ops(self, batch):
         mpsse_ops = []
         # Per-record: [user_future, kind, ack_op, data_op_or_None,
         #              parity_op_or_None].
@@ -334,6 +360,38 @@ class SwdMpsse(swd.Interface):
                 self.__shift_word(mpsse_ops, 0xE79E, 16)
                 self.__shift_run(mpsse_ops, 60, 1)
                 self.__shift_run(mpsse_ops, 8, 0)
+                future.set_result(None)
+                continue
+
+            if isinstance(op, swd.SwdToDormant):
+                self.__set_side(mpsse_ops, self.SIDE_HOST)
+                # ≥50 cycles SWDIO=1 then the 16-bit 0xE3BC pattern
+                # (LSB-first on the wire matches the spec's wire-order
+                # listing of the bit stream).
+                self.__shift_run(mpsse_ops, 60, 1)
+                self.__shift_word(mpsse_ops, 0xE3BC, 16)
+                future.set_result(None)
+                continue
+
+            if isinstance(op, swd.DormantToSwd):
+                self.__set_side(mpsse_ops, self.SIDE_HOST)
+                # 8 cycles SWDIO=1 + 128-bit selection alert +
+                # 4 cycles of 0 + 8-bit SWD activation 0x1A.
+                # ARM IHI0031F section B5.3.2 / Table B5-3.
+                self.__shift_run(mpsse_ops, 8, 1)
+                # Selection alert sequence, 128 bits, defined as
+                # 0x49CF9046A9B4A161 0x97F5BBC719B40F38 when read
+                # MSB-first; on the LSB-first wire we shift the
+                # bit-reversed words.
+                self.__shift_word(mpsse_ops, 0x86852D956209F392, 64)
+                self.__shift_word(mpsse_ops, 0x19BC0EA2E3DDAFE9, 64)
+                self.__shift_run(mpsse_ops, 4, 0)
+                self.__shift_word(mpsse_ops, 0x1A, 8)
+                future.set_result(None)
+                continue
+
+            if isinstance(op, swd.TargetSelWrite):
+                self.__emit_targetsel_write(mpsse_ops, op.target)
                 future.set_result(None)
                 continue
 

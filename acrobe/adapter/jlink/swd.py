@@ -91,6 +91,20 @@ def _data_parity(data: int) -> int:
     return x & 1
 
 
+def _emit_const(direction, out, count: int, value: int) -> None:
+    """Append ``count`` host-driven bits all equal to ``value``."""
+    for _ in range(count):
+        direction.append(1)
+        out.append(value)
+
+
+def _emit_int(direction, out, value: int, count: int) -> None:
+    """Append ``count`` host-driven bits of ``value`` LSB-first."""
+    for i in range(count):
+        direction.append(1)
+        out.append((value >> i) & 1)
+
+
 def _emit_swd_read(direction, out, ap: bool, addr: int) -> int:
     """Append a 46-bit SWD read packet. Returns its bit offset.
 
@@ -164,7 +178,7 @@ class JLinkSwdInterface(swd.Interface):
     # idle cycles between chunks.
     MAX_CHUNK_BITS = 8192
 
-    async def flush_ops(self, batch):
+    async def flush_wire_ops(self, batch):
         direction: list[int] = []
         out: list[int] = []
         # Per-packet record: [user_future, kind, ack_offset,
@@ -241,6 +255,35 @@ class JLinkSwdInterface(swd.Interface):
 
             if isinstance(op, swd.JtagToSwd):
                 self.__emit_jtag_to_swd(direction, out)
+                future.set_result(None)
+                continue
+
+            if isinstance(op, swd.SwdToDormant):
+                _emit_const(direction, out, 60, 1)
+                _emit_int(direction, out, 0xE3BC, 16)
+                future.set_result(None)
+                continue
+
+            if isinstance(op, swd.DormantToSwd):
+                _emit_const(direction, out, 8, 1)
+                _emit_int(direction, out, 0x86852D956209F392, 64)
+                _emit_int(direction, out, 0x19BC0EA2E3DDAFE9, 64)
+                _emit_const(direction, out, 4, 0)
+                _emit_int(direction, out, 0x1A, 8)
+                future.set_result(None)
+                continue
+
+            if isinstance(op, swd.TargetSelWrite):
+                # Bit-bang the entire transaction (no ACK capture):
+                # cmd + TRN + 3 ACK cycles (host high) + TRN + data +
+                # parity + 8 idle. Per spec no DP responds.
+                cmd = _swd_cmd_byte(False, False, 0x0c)
+                _emit_int(direction, out, cmd, 8)
+                _emit_const(direction, out, 5, 1)
+                data = op.target & 0xFFFFFFFF
+                _emit_int(direction, out, data, 32)
+                _emit_int(direction, out, _data_parity(data), 1)
+                _emit_const(direction, out, 8, 0)
                 future.set_result(None)
                 continue
 
