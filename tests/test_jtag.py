@@ -495,7 +495,7 @@ class TestChain:
             assert isinstance(tap, SpecialTap)
             assert isinstance(tap.IDCODE, TapInstruction)
         finally:
-            Tap.db._registry.clear()
+            Tap.db.registry.clear()
 
     def test_repr(self):
         chain = Chain()
@@ -1048,7 +1048,7 @@ class TestChainDiscover:
             await chain.discover()
             assert isinstance(chain.children[0], KnownTap)
         finally:
-            Tap.db._registry.clear()
+            Tap.db.registry.clear()
 
     @pytest.mark.asyncio
     async def test_open_chain_stuck_low(self):

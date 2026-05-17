@@ -237,7 +237,7 @@ class TestDiscover:
             comp = await MemoryMappedComponent.discover(bus, 0)
             assert isinstance(comp, FakePartIdMatch)
         finally:
-            MemoryMappedComponent.db._registry.pop(partid, None)
+            MemoryMappedComponent.db.registry.pop(partid, None)
 
     @pytest.mark.asyncio
     async def test_devarch_registry(self):
@@ -263,7 +263,7 @@ class TestDiscover:
             comp = await MemoryMappedComponent.discover(bus, 0)
             assert isinstance(comp, FakeDevArchMatch)
         finally:
-            MemoryMappedComponent.devarch_db._registry.pop(key, None)
+            MemoryMappedComponent.devarch_db.registry.pop(key, None)
 
     @pytest.mark.asyncio
     async def test_devtype_registry(self):
@@ -282,7 +282,7 @@ class TestDiscover:
             comp = await MemoryMappedComponent.discover(bus, 0)
             assert isinstance(comp, FakeDevTypeMatch)
         finally:
-            CoresightComponent.db._registry.pop(devtype, None)
+            CoresightComponent.db.registry.pop(devtype, None)
 
     @pytest.mark.asyncio
     async def test_lookup_precedence_devarch_beats_partid(self):
@@ -310,8 +310,8 @@ class TestDiscover:
             comp = await MemoryMappedComponent.discover(bus, 0)
             assert isinstance(comp, DevArchWinner)
         finally:
-            MemoryMappedComponent.devarch_db._registry.pop(key, None)
-            MemoryMappedComponent.db._registry.pop(partid, None)
+            MemoryMappedComponent.devarch_db.registry.pop(key, None)
+            MemoryMappedComponent.db.registry.pop(partid, None)
 
     @pytest.mark.asyncio
     async def test_lookup_precedence_partid_beats_devtype(self):
@@ -335,8 +335,8 @@ class TestDiscover:
             comp = await MemoryMappedComponent.discover(bus, 0)
             assert isinstance(comp, PartIdWinner)
         finally:
-            MemoryMappedComponent.db._registry.pop(partid, None)
-            CoresightComponent.db._registry.pop(devtype, None)
+            MemoryMappedComponent.db.registry.pop(partid, None)
+            CoresightComponent.db.registry.pop(devtype, None)
 
     @pytest.mark.asyncio
     async def test_devarch_present_zero_skips_devarch_lookup(self):
@@ -359,7 +359,7 @@ class TestDiscover:
             comp = await MemoryMappedComponent.discover(bus, 0)
             assert type(comp) is MemoryMappedComponent
         finally:
-            MemoryMappedComponent.devarch_db._registry.pop(key, None)
+            MemoryMappedComponent.devarch_db.registry.pop(key, None)
 
     @pytest.mark.asyncio
     async def test_size_bytes_property(self):

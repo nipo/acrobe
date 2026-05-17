@@ -40,10 +40,10 @@ AGILEX_IDCODE = 0x0362c0dd  # known Agilex5E IDCODE → "A5EA013BB23B"
 
 @pytest.fixture(autouse=True)
 def _ensure_agilex_registration():
-    """test_jtag.py clears Tap.db._registry in some teardowns. Re-register
+    """test_jtag.py clears Tap.db.registry in some teardowns. Re-register
     Agilex5E so Chain.tap_add finds it regardless of test order."""
     if not any(Agilex5E in handlers
-               for handlers in Tap.db._registry.values()):
+               for handlers in Tap.db.registry.values()):
         Tap.db.register(AGILEX_IDCODE)(Agilex5E)
     yield
 

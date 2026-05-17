@@ -102,7 +102,7 @@ class UsbEnumerator:
         """Yield (AdapterInfo, adapter_cls, descriptor) for static descriptor matches."""
         self.__ensure_ctx()
         for desc in self.__ctx.device_filter():
-            for info, adapters in adapter_db._registry.items():
+            for info, adapters in adapter_db.registry.items():
                 if info.matches(desc):
                     for adapter_cls in adapters:
                         yield info, adapter_cls, desc

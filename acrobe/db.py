@@ -14,30 +14,30 @@ class NoMatch(Exception):
 class Db:
     def __init__(self, name, eq_func=operator.eq):
         self.name = name
-        self._registry = {}
-        self._eq_func = eq_func
-        self._default = None
+        self.registry = {}
+        self.__eq_func = eq_func
+        self.__default = None
 
     def register(self, *ids):
         """Decorator: register a handler under one or more IDs."""
         def decorator(obj):
             for id in ids:
-                self._registry.setdefault(id, []).append(obj)
+                self.registry.setdefault(id, []).append(obj)
             return obj
         return decorator
 
     def register_default(self, obj):
         """Decorator: register a default/fallback handler."""
-        self._default = obj
+        self.__default = obj
         return obj
 
     def get(self, id, allow_default=True):
         """Return list of handlers matching id. Raises NoMatch if none found."""
-        for key in self._registry:
-            if self._eq_func(key, id):
-                return self._registry[key]
-        if self._default is not None and allow_default:
-            return [self._default]
+        for key in self.registry:
+            if self.__eq_func(key, id):
+                return self.registry[key]
+        if self.__default is not None and allow_default:
+            return [self.__default]
         raise NoMatch(self.name, id)
 
     def call(self, id, *args, allow_default=True, **kwargs):

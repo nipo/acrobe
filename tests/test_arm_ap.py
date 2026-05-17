@@ -203,7 +203,7 @@ class TestApDiscover:
             assert isinstance(ap, MyAp)
             assert ap.idr == idr_match
         finally:
-            Ap.db._registry.pop(idr_match, None)
+            Ap.db.registry.pop(idr_match, None)
 
     @pytest.mark.asyncio
     async def test_revision_and_variant_masked_in_lookup(self):
@@ -230,7 +230,7 @@ class TestApDiscover:
             assert ap.revision == 0x1
             assert ap.variant == 0x5
         finally:
-            Ap.db._registry.pop(idr_registered, None)
+            Ap.db.registry.pop(idr_registered, None)
 
     @pytest.mark.asyncio
     async def test_dp_access_failure_returns_none(self):
@@ -259,4 +259,4 @@ class TestApDiscover:
             assert type(ap) is Ap
             assert ap.idr == idr_registered
         finally:
-            Ap.db._registry.pop(idr_registered, None)
+            Ap.db.registry.pop(idr_registered, None)

@@ -672,7 +672,7 @@ class TestEndToEnd:
             bases = sorted(ap.base for ap in ap_children)
             assert bases == [0x00000000, 0x01000000]
         finally:
-            Ap.db._registry.pop(broken_idr, None)
+            Ap.db.registry.pop(broken_idr, None)
 
     @pytest.mark.asyncio
     async def test_ap_reg_read_addresses_correctly(self):

@@ -87,7 +87,7 @@ async def test_pipe_db_dispatch_via_child_spawn():
             server.close()
             await server.wait_closed()
     finally:
-        Pipe.db._registry.pop("wrapped", None)
+        Pipe.db.registry.pop("wrapped", None)
 
 
 # ---------------------------------------------------------------------------
@@ -165,4 +165,4 @@ async def test_datagram_db_dispatch_via_child_spawn():
         finally:
             transport.close()
     finally:
-        Datagram.db._registry.pop("wrapped", None)
+        Datagram.db.registry.pop("wrapped", None)

@@ -335,7 +335,7 @@ class TestSocDbOverride:
             assert len(rom.children) == 1
             assert isinstance(rom.children[0], SpecificDriver)
         finally:
-            RomTable.soc_db._registry.pop((rom_partid, child_addr), None)
+            RomTable.soc_db.registry.pop((rom_partid, child_addr), None)
 
 
 # -- Class 0x9 ROM 64-bit entries -----------------------------------
