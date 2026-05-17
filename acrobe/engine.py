@@ -17,9 +17,9 @@ class Batcher:
     """
 
     def __init__(self):
-        self._pending = deque()
-        self._flush_task: asyncio.Task | None = None
-        self._lock = asyncio.Lock()
+        self.__pending = deque()
+        self.__flush_task: asyncio.Task | None = None
+        self.__lock = asyncio.Lock()
 
     def post(self, op) -> asyncio.Future:
         """
@@ -29,8 +29,8 @@ class Batcher:
         """
         loop = asyncio.get_running_loop()
         future = loop.create_future()
-        self._pending.append((op, future))
-        self._ensure_flush()
+        self.__pending.append((op, future))
+        self.__ensure_flush()
         return future
 
     def post_no_wait(self, op) -> None:
@@ -45,22 +45,22 @@ class Batcher:
         set_result on resolution; both are nontrivial in tight inner
         loops with thousands of ops per chunk.
         """
-        self._pending.append((op, None))
-        self._ensure_flush()
+        self.__pending.append((op, None))
+        self.__ensure_flush()
 
-    def _ensure_flush(self):
+    def __ensure_flush(self):
         """Schedule a flush task if one isn't already running."""
-        if self._flush_task is None or self._flush_task.done():
-            self._flush_task = asyncio.create_task(self._run_flush())
+        if self.__flush_task is None or self.__flush_task.done():
+            self.__flush_task = asyncio.create_task(self.__run_flush())
 
-    async def _run_flush(self):
+    async def __run_flush(self):
         """
         Drain and process pending ops. Decouple from future
         iterations (they will spawn another task.
         """
-        async with self._lock:
-            self._pending, batch = deque(), list(self._pending)
-            self._flush_task = None
+        async with self.__lock:
+            self.__pending, batch = deque(), list(self.__pending)
+            self.__flush_task = None
 
             try:
                 # Skip building the per-op list when PROTOCOL logging
@@ -89,7 +89,7 @@ class Batcher:
           3. Await lower futures
           4. Extract results, resolve own futures
 
-        If this method raises, _run_flush will reject all unresolved futures
-        with the exception.
+        If this method raises, the flush loop will reject all unresolved
+        futures with the exception.
         """
         raise NotImplementedError
