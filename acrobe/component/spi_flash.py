@@ -70,7 +70,7 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
 
     def __init__(self, target, name: str = "flash"):
         super().__init__(name)
-        self._target = target
+        self.__target = target
         self.jedec_id = 0
         self.total_size = 0
         self.page_size = 256
@@ -101,7 +101,7 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
                 f"flash range [0, {self.total_size})")
         await self.program(offset, data)
 
-    async def _command(self, cmd: bytes, addr: bytes = b"",
+    async def __command(self, cmd: bytes, addr: bytes = b"",
                        wdata: bytes = b"", rsize: int = 0,
                        dummy: int = 0) -> bytes:
         """Execute a flash command as an atomic CS-held transaction."""
@@ -121,24 +121,24 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
         if rsize:
             read_shift = Shift(rsize, read_miso=True)
             shifts.append(read_shift)
-        await self._target.transaction(*shifts)
+        await self.__target.transaction(*shifts)
 
         rsp = read_shift.miso if read_shift else b""
         if rsp:
             self.logger.protocol(">> %s", rsp[:32].hex())
         return rsp
 
-    def _addr_bytes(self, addr: int) -> bytes:
+    def __addr_bytes(self, addr: int) -> bytes:
         return addr.to_bytes(self.ADDRESS_SIZE, "big")
 
     # --- Status ---
 
     async def read_status(self) -> int:
         """Read the status register."""
-        data = await self._command(self.CMD_READ_STATUS, rsize=1)
+        data = await self.__command(self.CMD_READ_STATUS, rsize=1)
         return data[0]
 
-    async def _wait_ready(self):
+    async def __wait_ready(self):
         """Poll until WIP bit clears."""
         while True:
             status = await self.read_status()
@@ -150,7 +150,7 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
 
     async def read_jedec_id(self) -> int:
         """Read 3-byte JEDEC ID (manufacturer, device type, capacity)."""
-        data = await self._command(self.CMD_READ_JEDEC_ID, rsize=3)
+        data = await self.__command(self.CMD_READ_JEDEC_ID, rsize=3)
         return int.from_bytes(data, "big")
 
     CMD_SFDP_READ = b"\x5a"
@@ -158,8 +158,8 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
     async def detect(self):
         """Reset flash, read JEDEC ID, configure geometry from SFDP or defaults."""
         # Software reset
-        await self._command(self.CMD_RESET_ENABLE)
-        await self._command(self.CMD_RESET)
+        await self.__command(self.CMD_RESET_ENABLE)
+        await self.__command(self.CMD_RESET)
         await asyncio.sleep(0.01)
 
         self.jedec_id = await self.read_jedec_id()
@@ -177,7 +177,7 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
 
         # Try SFDP for detailed parameters
         try:
-            await self._sfdp_detect()
+            await self.__sfdp_detect()
         except Exception:
             # SFDP not supported or parse failed, use defaults
             if not self.sector_info:
@@ -193,15 +193,15 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
         for size, cmd in self.sector_info:
             self.logger.info("Erase: %s (cmd 0x%02x)", base2(size, "B"), cmd[0])
 
-    async def _sfdp_read(self, addr, size):
+    async def __sfdp_read(self, addr, size):
         """Read SFDP data at the given address."""
         addr_bytes = addr.to_bytes(3, "big")
-        return await self._command(self.CMD_SFDP_READ, addr=addr_bytes,
+        return await self.__command(self.CMD_SFDP_READ, addr=addr_bytes,
                                    rsize=size, dummy=1)
 
-    async def _sfdp_detect(self):
+    async def __sfdp_detect(self):
         """Parse SFDP header and basic flash parameter table."""
-        header = await self._sfdp_read(0, 8)
+        header = await self.__sfdp_read(0, 8)
         if header[:4] != b'SFDP':
             return
 
@@ -210,7 +210,7 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
         self.logger.note("SFDP v%d.%d, %d parameter header(s)", sfdp_major, sfdp_minor, nph)
 
         # Read all parameter headers
-        ph_data = await self._sfdp_read(8, nph * 8)
+        ph_data = await self.__sfdp_read(8, nph * 8)
 
         # Find JEDEC Basic Flash Parameter (ID 0xff00)
         for i in range(nph):
@@ -222,11 +222,11 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
 
             if jid == 0xff00:
                 # Parse JEDEC basic flash parameters
-                bfp = await self._sfdp_read(ptp, length * 4)
-                self._sfdp_parse_basic(bfp)
+                bfp = await self.__sfdp_read(ptp, length * 4)
+                self.__sfdp_parse_basic(bfp)
                 break
 
-    def _sfdp_parse_basic(self, data):
+    def __sfdp_parse_basic(self, data):
         """Parse JEDEC Basic Flash Parameter Table (JESD216)."""
         # Density (bytes 4-7)
         density = struct.unpack_from("<L", data, 4)[0]
@@ -259,9 +259,9 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
         result = bytearray()
         while size > 0:
             chunk = min(size, 1024)
-            data = await self._command(
+            data = await self.__command(
                 self.CMD_FAST_READ,
-                addr=self._addr_bytes(addr),
+                addr=self.__addr_bytes(addr),
                 rsize=chunk,
                 dummy=1)
             result.extend(data)
@@ -273,11 +273,11 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
 
     async def write_enable(self):
         """Set the Write Enable Latch."""
-        await self._command(self.CMD_WRITE_ENABLE)
+        await self.__command(self.CMD_WRITE_ENABLE)
 
     async def write_disable(self):
         """Clear the Write Enable Latch."""
-        await self._command(self.CMD_WRITE_DISABLE)
+        await self.__command(self.CMD_WRITE_DISABLE)
 
     # --- Erase ---
 
@@ -286,14 +286,14 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
         if erase_cmd is None:
             erase_cmd = self.SECTOR_ERASE_4K
         await self.write_enable()
-        await self._command(erase_cmd, addr=self._addr_bytes(addr))
-        await self._wait_ready()
+        await self.__command(erase_cmd, addr=self.__addr_bytes(addr))
+        await self.__wait_ready()
 
     async def erase_chip(self):
         """Erase the entire chip."""
         await self.write_enable()
-        await self._command(self.CMD_CHIP_ERASE)
-        await self._wait_ready()
+        await self.__command(self.CMD_CHIP_ERASE)
+        await self.__wait_ready()
 
     async def erase(self, addr: int, size: int):
         """Erase a region, choosing appropriate sector sizes."""
@@ -322,10 +322,10 @@ class SpiFlash(Node, Writable, Addressable):  # Writable extends Readable
         """Program a page (up to page_size bytes)."""
         assert len(data) <= self.page_size
         await self.write_enable()
-        await self._command(self.CMD_PAGE_PROGRAM,
-                            addr=self._addr_bytes(addr),
+        await self.__command(self.CMD_PAGE_PROGRAM,
+                            addr=self.__addr_bytes(addr),
                             wdata=data)
-        await self._wait_ready()
+        await self.__wait_ready()
 
     async def program(self, addr: int, data: bytes):
         """Program data, splitting into page-aligned chunks."""

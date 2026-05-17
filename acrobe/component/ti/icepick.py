@@ -342,7 +342,7 @@ class IcePick(jtag.Tap):
 
     # --- Chain geometry helpers --------------------------------------
 
-    def _insertion_position(self, key):
+    def __insertion_position(self, key):
         """Return ``(ir_pre, dr_pre)`` where a newly-enabled tap with
         the given key should be inserted in the chain.
 
@@ -368,7 +368,7 @@ class IcePick(jtag.Tap):
             dr_delta += 1
         return ctx.ir_pre - ir_delta, ctx.dr_pre - dr_delta
 
-    def _enabled_tap(self, key):
+    def __enabled_tap(self, key):
         """Return the sub-TAP at ``key`` if it's currently in the
         scan chain (enabled), else ``None``. A key whose value lives
         in ``self.taps`` as a detached Tap counts as not-currently-
@@ -417,7 +417,7 @@ class IcePick(jtag.Tap):
         await self.router_write(block, index, int(cur))
 
         if enable:
-            ir_pre, dr_pre = self._insertion_position(key)
+            ir_pre, dr_pre = self.__insertion_position(key)
             if existing is not None:
                 self.logger.trace(
                     "Re-enable TAP %s/%d (%s) at ir_pre=%d dr_pre=%d",
@@ -459,7 +459,7 @@ class IcePick(jtag.Tap):
         was active before the TLR.
 
         Restoration happens in sorted-key order so that
-        :meth:`_insertion_position` reconstructs the same chain
+        the per-key insertion calculation reconstructs the same chain
         geometry the user had before the TLR. Each sub-TAP is
         reattached via ``Chain.tap_reattach`` — same object, same
         children, only the JTAG geometry was lost across the
@@ -485,7 +485,7 @@ class IcePick(jtag.Tap):
             cur.select_tap = True
             await self.router_write(block, index, int(cur))
 
-            ir_pre, dr_pre = self._insertion_position(key)
+            ir_pre, dr_pre = self.__insertion_position(key)
             self.chain.tap_reattach(
                 sub_tap, ir_pre, dr_pre, controller=self)
             self.logger.note(

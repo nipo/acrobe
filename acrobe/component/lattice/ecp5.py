@@ -76,13 +76,13 @@ class ECP5(Tap, JtagSramFpga):
         name = _ECP5_PARTS.get(idcode & 0x0FFFFFFF, f"ECP5-0x{idcode:08x}")
         super().__init__(idcode=idcode, name=name, **kw)
 
-    async def _read_status(self):
+    async def __read_status(self):
         raw = await self.LSC_READ_STATUS()
         status = ECP5Status(int(raw))
         self.logger.trace("Status: %s", status)
         return status
 
-    async def _wait_not_busy(self, timeout=1.0, step=0.01):
+    async def __wait_not_busy(self, timeout=1.0, step=0.01):
         for _ in range(max(int(timeout / step), 1)):
             raw = await self.LSC_CHECK_BUSY()
             if not (int(raw) & 1):
@@ -90,29 +90,29 @@ class ECP5(Tap, JtagSramFpga):
             await asyncio.sleep(step)
         raise RuntimeError("ECP5 busy flag stuck")
 
-    async def _isc_enable(self, target=0x00):
+    async def __isc_enable(self, target=0x00):
         await self.ISC_ENABLE(target, read_tdo=False)
         await self.run(1000)
-        await self._wait_not_busy()
-        status = await self._read_status()
+        await self.__wait_not_busy()
+        status = await self.__read_status()
         if not status.ISC:
             raise RuntimeError(f"ECP5 ISC enable failed (ISC not set): {status}")
         if status.Fail:
             raise RuntimeError(f"ECP5 ISC enable failed: {status}")
 
-    async def _isc_disable(self):
+    async def __isc_disable(self):
         await self.ISC_DISABLE(read_tdo=False)
         await self.run(1000)
-        await self._wait_not_busy()
+        await self.__wait_not_busy()
 
     async def start(self):
-        status = await self._read_status()
+        status = await self.__read_status()
         self.logger.note("IDCODE: 0x%08x, %s", self.idcode, status)
 
-    async def _assert_done(self):
+    async def __assert_done(self):
         for _ in range(3):
             await self.run(1000)
-            status = await self._read_status()
+            status = await self.__read_status()
             if status.Done:
                 return
         raise RuntimeError(f"ECP5 SRAM load failed (DONE not set): {status}")
@@ -132,13 +132,13 @@ class ECP5(Tap, JtagSramFpga):
         await self.run(1000)
         await asyncio.sleep(0.1)
 
-        await self._isc_enable(target=0x00)
+        await self.__isc_enable(target=0x00)
 
         # Erase SRAM before loading (required by TN02039)
         await self.ISC_ERASE(self.ERASE_SRAM, read_tdo=False)
         await self.run(1000)
-        await self._wait_not_busy(timeout=5.0)
-        status = await self._read_status()
+        await self.__wait_not_busy(timeout=5.0)
+        status = await self.__read_status()
         if status.Fail:
             raise RuntimeError(f"ECP5 SRAM erase failed: {status}")
 
@@ -151,21 +151,21 @@ class ECP5(Tap, JtagSramFpga):
         await self.run(1000)
 
         # Check DONE before leaving ISC mode
-        await self._assert_done()
+        await self.__assert_done()
 
         await self.BYPASS(read_tdo=False)
-        await self._isc_disable()
+        await self.__isc_disable()
         await self.BYPASS(read_tdo=False)
 
         self.logger.note("SRAM load complete")
 
     async def erase(self):
-        await self._isc_enable(target=0x00)
+        await self.__isc_enable(target=0x00)
         await self.ISC_ERASE(self.ERASE_SRAM, read_tdo=False)
         await self.run(100)
-        await self._wait_not_busy(timeout=5.0)
-        await self._isc_disable()
+        await self.__wait_not_busy(timeout=5.0)
+        await self.__isc_disable()
 
     async def is_configured(self):
-        status = await self._read_status()
+        status = await self.__read_status()
         return status.Done

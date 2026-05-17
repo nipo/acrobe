@@ -29,20 +29,20 @@ class GowinPayload(Node, Readable):
 
     def __init__(self, name, data: bytes):
         super().__init__(name)
-        self._data = data
+        self.__data = data
 
     @property
     def size(self) -> int:
-        return len(self._data)
+        return len(self.__data)
 
     async def read(self, offset, size):
-        if offset < 0 or offset > len(self._data):
+        if offset < 0 or offset > len(self.__data):
             raise ValueError(f"offset {offset} out of range")
-        avail = len(self._data) - offset
+        avail = len(self.__data) - offset
         n = min(size, avail)
         if n <= 0:
             return b""
-        return self._data[offset:offset + n]
+        return self.__data[offset:offset + n]
 
 
 @register_format("gowin_fs",

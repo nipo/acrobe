@@ -23,20 +23,20 @@ class _BytesReadable(Readable):
     """In-memory Readable backing (used after gzip decompress)."""
 
     def __init__(self, data: bytes):
-        self._data = data
+        self.__data = data
 
     @property
     def size(self) -> int:
-        return len(self._data)
+        return len(self.__data)
 
     async def read(self, offset, size):
-        if offset < 0 or offset > len(self._data):
+        if offset < 0 or offset > len(self.__data):
             raise ValueError(f"offset {offset} out of range")
-        avail = len(self._data) - offset
+        avail = len(self.__data) - offset
         n = min(size, avail)
         if n <= 0:
             return b""
-        return self._data[offset:offset + n]
+        return self.__data[offset:offset + n]
 
 
 class XilinxPayload(Node, Readable):
@@ -44,22 +44,22 @@ class XilinxPayload(Node, Readable):
 
     def __init__(self, name, source, offset, size):
         super().__init__(name)
-        self._source = source
-        self._offset = offset
-        self._size = size
+        self.__source = source
+        self.__offset = offset
+        self.__size = size
 
     @property
     def size(self) -> int:
-        return self._size
+        return self.__size
 
     async def read(self, offset, size):
-        if offset < 0 or offset > self._size:
+        if offset < 0 or offset > self.__size:
             raise ValueError(f"offset {offset} out of range")
-        avail = self._size - offset
+        avail = self.__size - offset
         n = min(size, avail)
         if n <= 0:
             return b""
-        return await self._source.read(self._offset + offset, n)
+        return await self.__source.read(self.__offset + offset, n)
 
 
 @register_format("xilinx_bit",
