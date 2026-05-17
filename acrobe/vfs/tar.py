@@ -21,49 +21,49 @@ class TarEntry(Node, Readable):
 
     def __init__(self, name, archive_source, info):
         super().__init__(name)
-        self._archive_source = archive_source
-        self._info = info
-        self._cached = None
+        self.__archive_source = archive_source
+        self.__info = info
+        self.__cached = None
 
     @property
     def size(self) -> int:
-        return self._info.size
+        return self.__info.size
 
     async def start(self):
         from . import auto_populate
         await auto_populate(self, self, self._name)
 
-    async def _ensure_data(self):
-        if self._cached is not None:
+    async def __ensure_data(self):
+        if self.__cached is not None:
             return
-        all_bytes = await self._archive_source.read(
-            0, self._archive_source.size)
+        all_bytes = await self.__archive_source.read(
+            0, self.__archive_source.size)
         with tarfile.open(fileobj=io.BytesIO(all_bytes)) as tf:
-            f = tf.extractfile(self._info)
+            f = tf.extractfile(self.__info)
             if f is None:
                 # Symlink/special — not file data
                 raise ValueError(
                     f"{self.fqdn}: tar entry has no extractable data")
-            self._cached = f.read()
+            self.__cached = f.read()
 
     async def read(self, offset, size):
-        if offset < 0 or offset > self._info.size:
+        if offset < 0 or offset > self.__info.size:
             raise ValueError(f"offset {offset} out of range")
-        await self._ensure_data()
-        avail = len(self._cached) - offset
+        await self.__ensure_data()
+        avail = len(self.__cached) - offset
         n = min(size, avail)
         if n <= 0:
             return b""
-        return self._cached[offset:offset + n]
+        return self.__cached[offset:offset + n]
 
     @property
     def metadata(self) -> dict:
         return {
-            "size": self._info.size,
-            "mtime": self._info.mtime,
-            "mode": self._info.mode,
-            "type": self._info.type.decode("ascii", errors="replace")
-            if isinstance(self._info.type, bytes) else self._info.type,
+            "size": self.__info.size,
+            "mtime": self.__info.mtime,
+            "mode": self.__info.mode,
+            "type": self.__info.type.decode("ascii", errors="replace")
+            if isinstance(self.__info.type, bytes) else self.__info.type,
             **self._metadata,
         }
 

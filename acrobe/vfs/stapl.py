@@ -11,7 +11,7 @@ variable initializer as RBF, etc.
 
 Notes/actions/procedures/data_blocks are exposed via metadata
 (introspection-only). Their typed access is via the parsed STAPL
-program object held on `_program`.
+program object held on `program`.
 """
 
 from ..node import Node, Readable
@@ -29,14 +29,14 @@ class StaplBooleanArray(Node, Readable):
 
     def __init__(self, name, literal):
         super().__init__(name)
-        self._literal = literal
+        self.__literal = literal
 
     @property
     def size(self) -> int:
-        return len(self._literal.data)
+        return len(self.__literal.data)
 
     async def read(self, offset, size):
-        data = self._literal.data
+        data = self.__literal.data
         if offset < 0 or offset > len(data):
             raise ValueError(f"offset {offset} out of range")
         avail = len(data) - offset
@@ -48,8 +48,8 @@ class StaplBooleanArray(Node, Readable):
     @property
     def metadata(self) -> dict:
         return {
-            "bit_count": self._literal.bit_count,
-            "byte_size": len(self._literal.data),
+            "bit_count": self.__literal.bit_count,
+            "byte_size": len(self.__literal.data),
             **self._metadata,
         }
 
@@ -62,7 +62,7 @@ class Stapl(FormatNode):
 
     def __init__(self, name, source):
         super().__init__(name, source)
-        self._program = None
+        self.program = None
 
     async def start(self):
         from ..stapl import load
@@ -74,7 +74,7 @@ class Stapl(FormatNode):
             program = load(text, check_crc=False)
         except Exception as exc:
             raise NoMatch("stapl_jam", f"parse failed: {exc}") from exc
-        self._program = program
+        self.program = program
 
         # Surface notes / actions / procedures as metadata.
         notes = {}

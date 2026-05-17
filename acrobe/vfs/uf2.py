@@ -71,24 +71,24 @@ class Uf2Region(Node, Readable, Addressable):
 
     def __init__(self, name, address, data: bytes):
         super().__init__(name)
-        self._address = address
-        self._data = data
+        self.__address = address
+        self.__data = data
 
     @property
     def size(self) -> int:
-        return len(self._data)
+        return len(self.__data)
 
     async def read(self, offset, size):
-        if offset < 0 or offset > len(self._data):
+        if offset < 0 or offset > len(self.__data):
             raise ValueError(f"offset {offset} out of range")
-        n = min(size, len(self._data) - offset)
+        n = min(size, len(self.__data) - offset)
         if n <= 0:
             return b""
-        return self._data[offset:offset + n]
+        return self.__data[offset:offset + n]
 
     @property
     def load_address(self) -> int:
-        return self._address
+        return self.__address
 
 
 @register_format("uf2",
@@ -108,7 +108,7 @@ class Uf2(FormatNode):
         if len(raw) == 0:
             raise NoMatch("uf2", "empty file")
 
-        regions, family_ids = self._parse(raw)
+        regions, family_ids = self.__parse(raw)
         if not regions:
             raise NoMatch("uf2", "no payload blocks")
 
@@ -124,7 +124,7 @@ class Uf2(FormatNode):
         self._metadata["family_ids"] = sorted(family_ids)
 
     @staticmethod
-    def _parse(raw: bytes):
+    def __parse(raw: bytes):
         regions: list[tuple[int, bytearray]] = []
         family_ids: set[int] = set()
         cur_addr: int | None = None

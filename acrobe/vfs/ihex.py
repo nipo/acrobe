@@ -20,25 +20,25 @@ class IhexRegion(Node, Readable, Addressable):
 
     def __init__(self, name, address, data: bytes):
         super().__init__(name)
-        self._address = address
-        self._data = data
+        self.__address = address
+        self.__data = data
 
     @property
     def size(self) -> int:
-        return len(self._data)
+        return len(self.__data)
 
     async def read(self, offset, size):
-        if offset < 0 or offset > len(self._data):
+        if offset < 0 or offset > len(self.__data):
             raise ValueError(f"offset {offset} out of range")
-        avail = len(self._data) - offset
+        avail = len(self.__data) - offset
         n = min(size, avail)
         if n <= 0:
             return b""
-        return self._data[offset:offset + n]
+        return self.__data[offset:offset + n]
 
     @property
     def load_address(self) -> int:
-        return self._address
+        return self.__address
 
 
 @register_format("ihex",
@@ -59,7 +59,7 @@ class Ihex(FormatNode):
     async def start(self):
         text_bytes = await self._source.read(0, self._source.size)
         text = text_bytes.decode("ascii", errors="replace")
-        regions, entry = self._parse(text)
+        regions, entry = self.__parse(text)
         if not regions:
             raise NoMatch("ihex", "no data records")
 
@@ -84,7 +84,7 @@ class Ihex(FormatNode):
         self._metadata["max_address"] = max_end
 
     @staticmethod
-    def _parse(text):
+    def __parse(text):
         """Parse ihex text into (regions, entry).
 
         regions: list of (address, bytes), each contiguous.

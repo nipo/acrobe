@@ -26,54 +26,54 @@ class FileNode(Node, Readable):
 
     def __init__(self, name: str, path: str):
         super().__init__(name)
-        self._path = path
-        self._fd = None
-        self._size = 0
+        self.__path = path
+        self.__fd = None
+        self.__size = 0
 
     @property
     def path(self) -> str:
-        return self._path
+        return self.__path
 
     @property
     def size(self) -> int:
-        return self._size
+        return self.__size
 
     async def start(self):
         # Open file and stat for size. os.open is blocking but
         # cheap; not worth offloading.
-        self._fd = os.open(self._path, os.O_RDONLY)
-        self._size = os.fstat(self._fd).st_size
+        self.__fd = os.open(self.__path, os.O_RDONLY)
+        self.__size = os.fstat(self.__fd).st_size
         # Auto-detect format and populate children if recognised.
         from . import auto_populate
         await auto_populate(self, self, self._name)
 
     async def stop(self):
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
+        if self.__fd is not None:
+            os.close(self.__fd)
+            self.__fd = None
 
     async def read(self, offset: int, size: int) -> bytes:
-        if offset < 0 or offset > self._size:
+        if offset < 0 or offset > self.__size:
             raise ValueError(
-                f"offset {offset} out of range [0, {self._size}]")
-        if self._fd is None:
+                f"offset {offset} out of range [0, {self.__size}]")
+        if self.__fd is None:
             raise RuntimeError(f"{self.fqdn}: file not open (call start())")
         # os.pread is sync; run in default executor for async contract
         import asyncio
         loop = asyncio.get_running_loop()
         # Clamp size to remaining bytes (POSIX-pread semantics).
-        avail = self._size - offset
+        avail = self.__size - offset
         n = min(size, avail)
         if n <= 0:
             return b""
         return await loop.run_in_executor(
-            None, os.pread, self._fd, n, offset)
+            None, os.pread, self.__fd, n, offset)
 
     @property
     def metadata(self) -> dict:
         # Merge our intrinsic file metadata with anything populated
         # by an auto-detected format.
-        return {"path": self._path, "size": self._size, **self._metadata}
+        return {"path": self.__path, "size": self.__size, **self._metadata}
 
 
 class FsRoot(Node):
@@ -91,11 +91,11 @@ class FsRoot(Node):
 
     def __init__(self, base_dir: str = "."):
         super().__init__(name=os.path.abspath(base_dir))
-        self._base_dir = os.path.abspath(base_dir)
+        self.__base_dir = os.path.abspath(base_dir)
 
     @property
     def base_dir(self) -> str:
-        return self._base_dir
+        return self.__base_dir
 
     async def child_spawn(self, name: str) -> Node:
         # Resolve the path. Allow absolute names; otherwise
@@ -103,7 +103,7 @@ class FsRoot(Node):
         if os.path.isabs(name):
             path = name
         else:
-            path = os.path.join(self._base_dir, name)
+            path = os.path.join(self.__base_dir, name)
         if os.path.isdir(path):
             return FsRoot(path)
         if os.path.isfile(path):

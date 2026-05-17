@@ -31,20 +31,20 @@ class _LiteralBytes(Node, Readable):
 
     def __init__(self, name, data: bytes):
         super().__init__(name)
-        self._data = data
+        self.__data = data
 
     @property
     def size(self) -> int:
-        return len(self._data)
+        return len(self.__data)
 
     async def read(self, offset, size):
-        if offset < 0 or offset > len(self._data):
+        if offset < 0 or offset > len(self.__data):
             raise ValueError(f"offset {offset} out of range")
-        avail = len(self._data) - offset
+        avail = len(self.__data) - offset
         n = min(size, avail)
         if n <= 0:
             return b""
-        return self._data[offset:offset + n]
+        return self.__data[offset:offset + n]
 
 
 @register_format("literal")
@@ -53,19 +53,19 @@ class Literal(FormatNode):
 
     def __init__(self, name, source):
         super().__init__(name, source)
-        self._hex_value = None
+        self.__hex_value = None
 
     def option_set(self, key, value):
         if key == "value":
-            self._hex_value = value
+            self.__hex_value = value
             return
         super().option_set(key, value)
 
     async def start(self):
-        if self._hex_value is None:
+        if self.__hex_value is None:
             raise ValueError(
                 f"{self.fqdn}: literal requires value=...")
-        data = bytes.fromhex(self._hex_value)
+        data = bytes.fromhex(self.__hex_value)
         self._child_attach(_LiteralBytes("data", data))
 
 
@@ -80,19 +80,19 @@ class Random(FormatNode):
 
     def __init__(self, name, source):
         super().__init__(name, source)
-        self._size_str = None
+        self.__size_str = None
 
     def option_set(self, key, value):
         if key == "size":
-            self._size_str = value
+            self.__size_str = value
             return
         super().option_set(key, value)
 
     async def start(self):
-        if self._size_str is None:
+        if self.__size_str is None:
             raise ValueError(
                 f"{self.fqdn}: random requires size=...")
-        n = _parse_size(self._size_str)
+        n = _parse_size(self.__size_str)
         self._child_attach(_LiteralBytes("data", os.urandom(n)))
 
 
@@ -102,19 +102,19 @@ class Zero(FormatNode):
 
     def __init__(self, name, source):
         super().__init__(name, source)
-        self._size_str = None
+        self.__size_str = None
 
     def option_set(self, key, value):
         if key == "size":
-            self._size_str = value
+            self.__size_str = value
             return
         super().option_set(key, value)
 
     async def start(self):
-        if self._size_str is None:
+        if self.__size_str is None:
             raise ValueError(
                 f"{self.fqdn}: zero requires size=...")
-        n = _parse_size(self._size_str)
+        n = _parse_size(self.__size_str)
         self._child_attach(_LiteralBytes("data", b"\x00" * n))
 
 
@@ -124,17 +124,17 @@ class One(FormatNode):
 
     def __init__(self, name, source):
         super().__init__(name, source)
-        self._size_str = None
+        self.__size_str = None
 
     def option_set(self, key, value):
         if key == "size":
-            self._size_str = value
+            self.__size_str = value
             return
         super().option_set(key, value)
 
     async def start(self):
-        if self._size_str is None:
+        if self.__size_str is None:
             raise ValueError(
                 f"{self.fqdn}: one requires size=...")
-        n = _parse_size(self._size_str)
+        n = _parse_size(self.__size_str)
         self._child_attach(_LiteralBytes("data", b"\xff" * n))

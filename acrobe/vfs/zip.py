@@ -28,13 +28,13 @@ class ZipEntry(Node, Readable):
 
     def __init__(self, name, archive_source, info):
         super().__init__(name)
-        self._archive_source = archive_source
-        self._info = info
-        self._cached = None
+        self.__archive_source = archive_source
+        self.__info = info
+        self.__cached = None
 
     @property
     def size(self) -> int:
-        return self._info.file_size
+        return self.__info.file_size
 
     async def start(self):
         # Auto-detect format on this entry's content (e.g. for
@@ -43,35 +43,35 @@ class ZipEntry(Node, Readable):
         from . import auto_populate
         await auto_populate(self, self, self._name)
 
-    async def _ensure_data(self):
-        if self._cached is not None:
+    async def __ensure_data(self):
+        if self.__cached is not None:
             return
         # Read entire archive bytes (zipfile needs a file-like).
         # For most use cases, the archive's parent is already a
         # FileNode; reading once into memory is acceptable.
-        all_bytes = await self._archive_source.read(
-            0, self._archive_source.size)
+        all_bytes = await self.__archive_source.read(
+            0, self.__archive_source.size)
         with zipfile.ZipFile(io.BytesIO(all_bytes)) as zf:
-            self._cached = zf.read(self._info.filename)
+            self.__cached = zf.read(self.__info.filename)
 
     async def read(self, offset, size):
-        if offset < 0 or offset > self._info.file_size:
+        if offset < 0 or offset > self.__info.file_size:
             raise ValueError(f"offset {offset} out of range")
-        await self._ensure_data()
-        avail = len(self._cached) - offset
+        await self.__ensure_data()
+        avail = len(self.__cached) - offset
         n = min(size, avail)
         if n <= 0:
             return b""
-        return self._cached[offset:offset + n]
+        return self.__cached[offset:offset + n]
 
     @property
     def metadata(self) -> dict:
         return {
-            "compress_type": self._info.compress_type,
-            "compress_size": self._info.compress_size,
-            "uncompressed_size": self._info.file_size,
-            "crc": self._info.CRC,
-            "date_time": self._info.date_time,
+            "compress_type": self.__info.compress_type,
+            "compress_size": self.__info.compress_size,
+            "uncompressed_size": self.__info.file_size,
+            "crc": self.__info.CRC,
+            "date_time": self.__info.date_time,
             **self._metadata,
         }
 

@@ -85,11 +85,11 @@ class Bin(FormatNode):
 
     def __init__(self, name, source):
         super().__init__(name, source)
-        self._load_address = 0
+        self.__load_address = 0
 
     def option_set(self, key, value):
         if key == "offset":
-            self._load_address = int(value, 0)
+            self.__load_address = int(value, 0)
             return
         super().option_set(key, value)
 
@@ -97,7 +97,7 @@ class Bin(FormatNode):
         self._child_attach(_make_view(
             "data", self._source,
             offset=0, size=self._source.size,
-            load_address=self._load_address))
+            load_address=self.__load_address))
 
 
 @register_format("slice")
@@ -109,34 +109,34 @@ class Slice(FormatNode):
 
     def __init__(self, name, source):
         super().__init__(name, source)
-        self._offset = None
-        self._size = None
-        self._load_address = None
+        self.__offset = None
+        self.__size = None
+        self.__load_address = None
 
     def option_set(self, key, value):
         if key == "offset":
-            self._offset = int(value, 0)
+            self.__offset = int(value, 0)
             return
         if key == "size":
-            self._size = int(value, 0)
+            self.__size = int(value, 0)
             return
         if key == "load_address":
-            self._load_address = int(value, 0)
+            self.__load_address = int(value, 0)
             return
         super().option_set(key, value)
 
     async def start(self):
-        if self._offset is None:
+        if self.__offset is None:
             raise ValueError(f"{self.fqdn}: slice requires offset=")
-        if self._size is None:
+        if self.__size is None:
             raise ValueError(f"{self.fqdn}: slice requires size=")
-        if self._offset + self._size > self._source.size:
+        if self.__offset + self.__size > self._source.size:
             raise ValueError(
-                f"{self.fqdn}: slice [{self._offset}, "
-                f"{self._offset + self._size}) extends past source size "
+                f"{self.fqdn}: slice [{self.__offset}, "
+                f"{self.__offset + self.__size}) extends past source size "
                 f"{self._source.size}")
-        load = self._load_address if self._load_address is not None else self._offset
+        load = self.__load_address if self.__load_address is not None else self.__offset
         self._child_attach(_make_view(
             "data", self._source,
-            offset=self._offset, size=self._size,
+            offset=self.__offset, size=self.__size,
             load_address=load))

@@ -92,9 +92,9 @@ class TestFileNode:
         root = FsRoot(str(tmp_files))
         await root.start_tree()
         leaf = await root.child_summon("a.bin")
-        assert leaf._fd is not None
+        assert leaf._FileNode__fd is not None
         await leaf.stop_tree()
-        assert leaf._fd is None
+        assert leaf._FileNode__fd is None
 
 
 class TestFsRootDirectories:
