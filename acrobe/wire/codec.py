@@ -111,14 +111,14 @@ class _FieldSchema:
 
     def __init__(self, name: str, encode_fn, decode_fn):
         self.name = name
-        self._encode = encode_fn
-        self._decode = decode_fn
+        self.__encode = encode_fn
+        self.__decode = decode_fn
 
     def encode(self, value):
-        return self._encode(value)
+        return self.__encode(value)
 
     def decode(self, value):
-        return self._decode(value)
+        return self.__decode(value)
 
 
 def _resolve_field_codec(annotation: Any, registry, owner: str, fname: str):
