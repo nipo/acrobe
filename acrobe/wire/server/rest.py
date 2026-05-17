@@ -60,7 +60,7 @@ class EnumerationServer:
         self.hw_root = hw_root
         self.auth = auth_backend or OpenAuthBackend()
         self.registry = registry or default_registry()
-        self._probe_lock = asyncio.Lock()
+        self.__probe_lock = asyncio.Lock()
 
     async def resolve_node(self, parts: list[str]) -> Node:
         """Walk hw_root → ... → leaf, starting nodes as needed.
@@ -68,7 +68,7 @@ class EnumerationServer:
         Held under the probe lock so concurrent callers don't race
         on hardware-touching start() side effects.
         """
-        async with self._probe_lock:
+        async with self.__probe_lock:
             node = await self.hw_root.child_summon(*parts)
             if isinstance(node, Node):
                 await node.start_tree()
@@ -98,7 +98,7 @@ class EnumerationServer:
         adapter subclasses (JtagMpsse, JtagBitbang, ...) report their
         parent's wire identity so clients can recognize them as
         transport cutoffs."""
-        entry = self._lookup_node_entry(type(node))
+        entry = self.__lookup_node_entry(type(node))
 
         out = {
             "path":        self.canonical_path(node),
@@ -107,7 +107,7 @@ class EnumerationServer:
             "metadata":    dict(node.metadata) if hasattr(node, "metadata") else {},
             "is_batcher":  isinstance(node, Batcher),
             "wire_uuid":   str(entry.type_uuid) if entry else None,
-            "connect_url": self._connect_url(node, request) if entry else None,
+            "connect_url": self.__connect_url(node, request) if entry else None,
         }
         if include_children:
             out["children"] = [
@@ -117,7 +117,7 @@ class EnumerationServer:
             out["hints"] = list(node.child_hints())
         return out
 
-    def _lookup_node_entry(self, cls: type):
+    def __lookup_node_entry(self, cls: type):
         """Return the registry entry for the deepest @wire.node ancestor
         of `cls`, or None. Mirrors the WS upgrade handler's logic."""
         for base in cls.__mro__:
@@ -126,7 +126,7 @@ class EnumerationServer:
                 return candidate
         return None
 
-    def _connect_url(self, node: Node, request: web.Request) -> str:
+    def __connect_url(self, node: Node, request: web.Request) -> str:
         """Build the WS connect URL for a registered @wire.node.
 
         Token is whatever the AuthBackend issues; OpenAuthBackend
