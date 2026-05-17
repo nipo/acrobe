@@ -16,7 +16,7 @@ def _tap_annotation(tap):
     parent = tap._parent
     if not isinstance(parent, Chain):
         return ""
-    ctx = parent._contexts.get(tap)
+    ctx = parent.contexts.get(tap)
     if ctx is None:
         return ""
     bits = []

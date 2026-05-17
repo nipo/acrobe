@@ -409,7 +409,7 @@ class TestDynamicInstruction:
     def test_dynamic_ir_masked(self):
         tap = _make_tap(MockInterface())
         dyn = tap.ir(0xff)
-        assert dyn._ir_value == 0x0f
+        assert dyn._DynamicInstruction__ir_value == 0x0f
 
     def test_dynamic_repr(self):
         tap = _make_tap(MockInterface())
@@ -705,7 +705,7 @@ class TestTlrRefresh:
 
     @classmethod
     def _shift_discover_payload(cls, register: BitString):
-        """Build the TDO that ``Chain._shift_discover`` expects to
+        """Build the TDO that ``Chain.shift_discover`` expects to
         see when probing a register of bit-width ``len(register)``.
 
         The probe sends ``marker(32) + zeros(max_length+4)`` (548

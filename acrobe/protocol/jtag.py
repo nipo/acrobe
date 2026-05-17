@@ -269,34 +269,34 @@ class _DynamicInstruction:
     """Callable for ad-hoc IR values not in the InstructionRegistry."""
 
     def __init__(self, tap, ir_value, dr_length=None):
-        self._tap = tap
-        self._ir_value = int(ir_value) & ((1 << tap.irlen) - 1)
-        self._dr_length = dr_length
+        self.__tap = tap
+        self.__ir_value = int(ir_value) & ((1 << tap.irlen) - 1)
+        self.__dr_length = dr_length
 
     def __call__(self, tdi=None, read_tdo=None):
         if tdi is None:
             if read_tdo is None:
-                read_tdo = self._dr_length is not None
-            if read_tdo and self._dr_length is not None:
-                tdi = BitString(0, self._dr_length)
+                read_tdo = self.__dr_length is not None
+            if read_tdo and self.__dr_length is not None:
+                tdi = BitString(0, self.__dr_length)
             elif read_tdo:
                 raise ValueError("Cannot determine shift length")
         else:
             if read_tdo is None:
                 read_tdo = True
             if isinstance(tdi, int):
-                if self._dr_length is not None:
-                    tdi = BitString(tdi, self._dr_length)
+                if self.__dr_length is not None:
+                    tdi = BitString(tdi, self.__dr_length)
                 else:
                     raise ValueError("Cannot determine shift length from int")
             elif not isinstance(tdi, BitStringBase):
                 raise TypeError("tdi must be int, BitString, or None")
 
-        op = _TapShift(self._ir_value, tdi, read_tdo)
-        return self._tap.post(op)
+        op = _TapShift(self.__ir_value, tdi, read_tdo)
+        return self.__tap.post(op)
 
     def __repr__(self):
-        return f"<DynamicInstruction ir={self._ir_value:#x}>"
+        return f"<DynamicInstruction ir={self.__ir_value:#x}>"
 
 
 # Tap
@@ -320,14 +320,14 @@ class Tap(Batcher, Node, InstructionRegistry):
     # raw 32-bit IDCODEs — they're the wire form of a PartId, so we
     # auto-convert via PartId.from_idcode in the eq function.
     @staticmethod
-    def _partid_eq(key, lookup):
+    def __partid_eq(key, lookup):
         if isinstance(key, int):
             key = PartId.from_idcode(key)
         if isinstance(lookup, int):
             lookup = PartId.from_idcode(lookup)
         return key.is_same_part(lookup)
 
-    db = Db("TAP partid", eq_func=_partid_eq)
+    db = Db("TAP partid", eq_func=__partid_eq)
 
     def __init__(self, idcode=None, irlen=None, name=None):
         if irlen is not None:
@@ -466,7 +466,7 @@ class Tap(Batcher, Node, InstructionRegistry):
             raise RuntimeError(f"Tap {self.name!r} has no parent to forward to")
 
         if isinstance(self._parent, Chain):
-            ctx = self._parent._contexts.get(self)
+            ctx = self._parent.contexts.get(self)
             if (ctx is not None and not ctx.enabled
                     and ctx.controller is not None):
                 # Auto-wake. The controller knows how to put us back
@@ -481,7 +481,7 @@ class Tap(Batcher, Node, InstructionRegistry):
 
         if forwarded:
             forwarded[-1][1].add_done_callback(
-                lambda _lf, fwd=forwarded: Tap._resolve_batch(fwd))
+                lambda _lf, fwd=forwarded: Tap.__resolve_batch(fwd))
 
     async def wake_tap(self, tap):
         """Re-attach a gated TAP that was detached by this
@@ -494,7 +494,7 @@ class Tap(Batcher, Node, InstructionRegistry):
             f"{tap.name!r} but doesn't implement wake_tap")
 
     @staticmethod
-    def _resolve_batch(forwarded):
+    def __resolve_batch(forwarded):
         for future, parent_future in forwarded:
             if future.done():
                 continue
@@ -606,7 +606,7 @@ class Chain(Batcher, Node):
     """A bit-level JTAG chain. Parent of Taps.
 
     Receives `TapOp` envelopes from its child Taps via `post`. Looks
-    up each tap's geometry in `self._contexts` and translates the
+    up each tap's geometry in `self.contexts` and translates the
     inner op into bit-level ops (`CaptureIr`, `CaptureDr`, `Shift`,
     `Run`) posted to its own parent — a `JtagInterface`.
 
@@ -619,39 +619,39 @@ class Chain(Batcher, Node):
     def __init__(self, name="chain"):
         Batcher.__init__(self)
         Node.__init__(self, name)
-        self._contexts = {}  # tap → ChainContext
+        self.contexts = {}  # tap → ChainContext
         self.total_irlen = 0
         self.total_drlen = 0
         # Per-length BitString caches: dr-pad (zeros) and ir-pad (ones).
         # Pre-/post-padding for any given context has constant content
         # but is built fresh for every TapShift; cache it once per
         # length and reuse across the whole chunk.
-        self._zeros: dict[int, BitString] = {}
-        self._ones: dict[int, BitString] = {}
+        self.__zeros: dict[int, BitString] = {}
+        self.__ones: dict[int, BitString] = {}
 
-    def _pad_zeros(self, n: int) -> BitString:
-        bs = self._zeros.get(n)
+    def __pad_zeros(self, n: int) -> BitString:
+        bs = self.__zeros.get(n)
         if bs is None:
             bs = BitString(0, n)
-            self._zeros[n] = bs
+            self.__zeros[n] = bs
         return bs
 
-    def _pad_ones(self, n: int) -> BitString:
-        bs = self._ones.get(n)
+    def __pad_ones(self, n: int) -> BitString:
+        bs = self.__ones.get(n)
         if bs is None:
             bs = BitString(-1, n)
-            self._ones[n] = bs
+            self.__ones[n] = bs
         return bs
 
     def context(self, tap) -> ChainContext:
-        return self._contexts[tap]
+        return self.contexts[tap]
 
     async def start(self):
         jtag_iface = self.parent_of_class(JtagInterface)
         with jtag_iface.freq_capped("enumeration", 1e6):
-            await self._cold_init_and_discover(jtag_iface)
+            await self.__cold_init_and_discover(jtag_iface)
 
-    async def _cold_init_and_discover(self, jtag_iface):
+    async def __cold_init_and_discover(self, jtag_iface):
         """Atomic cold-line init + blind discovery.
 
         Sequence:
@@ -689,12 +689,12 @@ class Chain(Batcher, Node):
         be batched into a single uninterrupted post sequence."""
         self._parent.post(Reset(count=50))
         self._parent.post(SwdToJtag())
-        self._tlr_reset_and_unlock()
+        self.__tlr_reset_and_unlock()
         await self.discover()
         for tap in list(self._children):
             await tap.post_tlr()
 
-    def _tlr_reset_and_unlock(self):
+    def __tlr_reset_and_unlock(self):
         """TAP reset + post-reset settle + IEEE-1149.7 escape.
 
         Shared by :meth:`_cold_init_and_discover` and
@@ -736,7 +736,7 @@ class Chain(Batcher, Node):
 
     # --- Discovery (bit-level, posts directly to parent) ---
 
-    async def _shift_discover(self, max_length=512, shift_in=None):
+    async def shift_discover(self, max_length=512, shift_in=None):
         """Probe a register's length by shifting a marker through.
 
         Shifts a 32-bit marker followed by zeros. The marker's
@@ -782,13 +782,13 @@ class Chain(Batcher, Node):
         cJTAG escape sequence in :meth:`_cold_init_and_discover`,
         so the reset is the caller's responsibility.
         """
-        slots = await self._probe_chain_in_reset_state()
+        slots = await self.__probe_chain_in_reset_state()
         for idcode, irlen in slots:
             tap = self.tap_add(idcode, irlen)
             self.logger.note("TAP: %s (irlen=%d)", tap._name, irlen)
         await self._parent.post(Run(1))
 
-    async def _probe_chain_in_reset_state(self):
+    async def __probe_chain_in_reset_state(self):
         """Blind chain probe: identify (idcode, irlen) for each TAP
         in chain order (TDO end first).
 
@@ -803,16 +803,16 @@ class Chain(Batcher, Node):
         """
         self.logger.trace("Probing chain in reset state...")
         self._parent.post(CaptureDr())
-        reset_dr = await self._shift_discover()
+        reset_dr = await self.shift_discover()
         self.logger.trace("DR after reset: %d bits", len(reset_dr))
 
         self._parent.post(CaptureIr())
-        captured_ir = await self._shift_discover(shift_in=-1)
+        captured_ir = await self.shift_discover(shift_in=-1)
         captured_ir_length = len(captured_ir)
         self.logger.trace("IR captured: %d bits", captured_ir_length)
 
         self._parent.post(CaptureDr())
-        bypass_dr = await self._shift_discover(
+        bypass_dr = await self.shift_discover(
             max_length=captured_ir_length // 2)
         device_count = len(bypass_dr)
         self.logger.trace("BYPASS DR: %d devices", device_count)
@@ -851,7 +851,7 @@ class Chain(Batcher, Node):
 
         possibilities = ir_merge([], segments, device_count)
 
-        known_irlens = [self._irlen_for(idc) for idc in idcodes]
+        known_irlens = [self.__irlen_for(idc) for idc in idcodes]
         possibilities = [
             p for p in possibilities
             if all(k is None or k == l for k, l in zip(known_irlens, p))]
@@ -866,7 +866,7 @@ class Chain(Batcher, Node):
         return list(zip(idcodes, possibilities[0]))
 
     @staticmethod
-    def _irlen_for(idcode):
+    def __irlen_for(idcode):
         """Look up known IR length for an IDCODE via Tap.db. Returns None if unknown."""
         if idcode is None:
             return None
@@ -925,9 +925,9 @@ class Chain(Batcher, Node):
         ctx = ChainContext(tap, ir_pre=ir_pre, dr_pre=dr_pre,
                            ir_post=0, dr_post=0, enabled=True,
                            controller=controller)
-        self._contexts[tap] = ctx
-        self._apply_insertion_geometry(ctx, irlen)
-        self._set_controller(ctx, controller)
+        self.contexts[tap] = ctx
+        self.__apply_insertion_geometry(ctx, irlen)
+        self.__set_controller(ctx, controller)
         self.child_add(tap)
         return tap
 
@@ -942,7 +942,7 @@ class Chain(Batcher, Node):
         re-issued whatever hardware command exposes it), or when a
         deferred sub-TAP is being unparked from a cool-down.
         """
-        ctx = self._contexts.get(tap)
+        ctx = self.contexts.get(tap)
         if ctx is None:
             raise RuntimeError(
                 f"Tap {tap.name!r} has no context — was never inserted")
@@ -956,8 +956,8 @@ class Chain(Batcher, Node):
         ctx.ir_post = 0
         ctx.dr_post = 0
         ctx.enabled = True
-        self._apply_insertion_geometry(ctx, tap.irlen)
-        self._set_controller(ctx, controller)
+        self.__apply_insertion_geometry(ctx, tap.irlen)
+        self.__set_controller(ctx, controller)
         return tap
 
     def tap_detach(self, tap):
@@ -970,13 +970,13 @@ class Chain(Batcher, Node):
         controller / gated links are preserved so a later TLR refresh
         can pair the detached Tap with a returning slot.
         """
-        ctx = self._contexts.get(tap)
+        ctx = self.contexts.get(tap)
         if ctx is None:
             raise RuntimeError(
                 f"Tap {tap.name!r} is not in chain {self.name!r}")
         if not ctx.enabled:
             return  # idempotent
-        self._apply_removal_geometry(ctx, tap.irlen)
+        self.__apply_removal_geometry(ctx, tap.irlen)
         ctx.enabled = False
         ctx.current_ir = None
 
@@ -991,14 +991,14 @@ class Chain(Batcher, Node):
         hardware IR contents of the taps still in the chain are
         unchanged.
         """
-        ctx = self._contexts.pop(tap)
+        ctx = self.contexts.pop(tap)
         if ctx.enabled:
-            self._apply_removal_geometry(ctx, tap.irlen)
-        self._clear_controller(ctx)
+            self.__apply_removal_geometry(ctx, tap.irlen)
+        self.__clear_controller(ctx)
         # Drop gated children too: the controller is going away, so
         # they have no path back into the chain.
         for gated in list(ctx.gated):
-            gated_ctx = self._contexts.get(gated)
+            gated_ctx = self.contexts.get(gated)
             if gated_ctx is not None:
                 gated_ctx.controller = None
         ctx.gated.clear()
@@ -1015,15 +1015,15 @@ class Chain(Batcher, Node):
         Pass ``controller=None`` to release ownership without
         detaching the tap.
         """
-        ctx = self._contexts.get(tap)
+        ctx = self.contexts.get(tap)
         if ctx is None:
             raise RuntimeError(
                 f"Tap {tap.name!r} is not in chain {self.name!r}")
-        self._set_controller(ctx, controller)
+        self.__set_controller(ctx, controller)
 
     # --- Geometry / controller helpers -----------------------------
 
-    def _apply_insertion_geometry(self, ctx, irlen):
+    def __apply_insertion_geometry(self, ctx, irlen):
         """Slot `ctx` (already populated with the desired
         `ir_pre`/`dr_pre`) into the chain. Updates total lengths and
         every other context's geometry. Computes `ir_post` and
@@ -1033,7 +1033,7 @@ class Chain(Batcher, Node):
         self.total_drlen += 1
         ctx.ir_post = self.total_irlen - ir_pre - irlen
         ctx.dr_post = self.total_drlen - ctx.dr_pre - 1
-        for other_tap, other_ctx in self._contexts.items():
+        for other_tap, other_ctx in self.contexts.items():
             if other_tap is ctx.tap or not other_ctx.enabled:
                 continue
             if other_ctx.ir_pre < ir_pre:
@@ -1043,14 +1043,14 @@ class Chain(Batcher, Node):
                 other_ctx.ir_pre += irlen
                 other_ctx.dr_pre += 1
 
-    def _apply_removal_geometry(self, ctx, irlen):
+    def __apply_removal_geometry(self, ctx, irlen):
         """Inverse of `_apply_insertion_geometry`: caller has decided
         `ctx` is leaving the chain; update total lengths and every
         other (still-enabled) context."""
         ir_pre = ctx.ir_pre
         self.total_irlen -= irlen
         self.total_drlen -= 1
-        for other_tap, other_ctx in self._contexts.items():
+        for other_tap, other_ctx in self.contexts.items():
             if other_tap is ctx.tap or not other_ctx.enabled:
                 continue
             if other_ctx.ir_pre > ir_pre:
@@ -1060,15 +1060,15 @@ class Chain(Batcher, Node):
                 other_ctx.ir_post -= irlen
                 other_ctx.dr_post -= 1
 
-    def _set_controller(self, ctx, controller):
+    def __set_controller(self, ctx, controller):
         """Set `ctx.controller = controller` and add `ctx.tap` to the
         controller's `gated` list. Removes the old controller link
         first if any."""
-        self._clear_controller(ctx)
+        self.__clear_controller(ctx)
         if controller is None:
             return
         ctx.controller = controller
-        ctrl_ctx = self._contexts.get(controller)
+        ctrl_ctx = self.contexts.get(controller)
         if ctrl_ctx is None:
             raise RuntimeError(
                 f"Controller {controller.name!r} has no context in "
@@ -1076,10 +1076,10 @@ class Chain(Batcher, Node):
         if ctx.tap not in ctrl_ctx.gated:
             ctrl_ctx.gated.append(ctx.tap)
 
-    def _clear_controller(self, ctx):
+    def __clear_controller(self, ctx):
         if ctx.controller is None:
             return
-        ctrl_ctx = self._contexts.get(ctx.controller)
+        ctrl_ctx = self.contexts.get(ctx.controller)
         if ctrl_ctx is not None and ctx.tap in ctrl_ctx.gated:
             ctrl_ctx.gated.remove(ctx.tap)
         ctx.controller = None
@@ -1135,20 +1135,20 @@ class Chain(Batcher, Node):
         self.logger.trace("Refresh: %d existing TAPs (%d enabled)",
                           len(existing),
                           sum(1 for t in existing
-                              if self._contexts[t].enabled))
+                              if self.contexts[t].enabled))
 
         for tap in existing:
             await tap.pre_tlr()
 
-        self._tlr_reset_and_unlock()
+        self.__tlr_reset_and_unlock()
 
-        slots = await self._probe_chain_in_reset_state()
+        slots = await self.__probe_chain_in_reset_state()
         self.logger.trace("Refresh probe: %s",
                           [(f"0x{i:08x}" if i else "none", l)
                            for i, l in slots])
 
-        claimed = self._match_identities(existing, slots)
-        await self._apply_refresh(existing, slots, claimed)
+        claimed = self.__match_identities(existing, slots)
+        await self.__apply_refresh(existing, slots, claimed)
 
         # post_tlr in chain order. New taps created by _apply_refresh
         # don't get post_tlr in this pass — they're freshly born, no
@@ -1157,11 +1157,11 @@ class Chain(Batcher, Node):
         # children list as we iterate; we honour those by snapshotting
         # *after* mutations apply.
         for tap in list(self._children):
-            ctx = self._contexts.get(tap)
+            ctx = self.contexts.get(tap)
             if ctx is not None and ctx.enabled:
                 await tap.post_tlr()
 
-    def _match_identities(self, existing, slots):
+    def __match_identities(self, existing, slots):
         """Greedy IDCODE+irlen match. Returns dict {slot_idx: tap}.
 
         Walks enabled TAPs first in chain order (TDO end first), then
@@ -1175,10 +1175,10 @@ class Chain(Batcher, Node):
         # detached. Detached order doesn't matter for correctness
         # but use a stable order for reproducible logs.
         enabled_first = sorted(
-            (t for t in existing if self._contexts[t].enabled),
-            key=lambda t: self._contexts[t].ir_pre)
+            (t for t in existing if self.contexts[t].enabled),
+            key=lambda t: self.contexts[t].ir_pre)
         detached_last = [
-            t for t in existing if not self._contexts[t].enabled]
+            t for t in existing if not self.contexts[t].enabled]
 
         claimed = {}
         available = set(range(len(slots)))
@@ -1203,7 +1203,7 @@ class Chain(Batcher, Node):
 
         return claimed
 
-    async def _apply_refresh(self, existing, slots, claimed):
+    async def __apply_refresh(self, existing, slots, claimed):
         """Mutate chain state to match `slots` given the matching
         decisions in `claimed`. Existing TAPs that claimed a slot
         are reattached / kept at the new position; existing TAPs
@@ -1230,7 +1230,7 @@ class Chain(Batcher, Node):
         # the geometry update can't bite — we always rebuild from a
         # clean slate.
         for tap in [t for t in existing
-                    if self._contexts[t].enabled]:
+                    if self.contexts[t].enabled]:
             self.tap_detach(tap)
 
         # Reattach claimed TAPs (preserves identity) at new slot
@@ -1239,7 +1239,7 @@ class Chain(Batcher, Node):
         for slot_idx in sorted(claimed):
             tap = claimed[slot_idx]
             ir_pre, dr_pre = slot_geo[slot_idx]
-            ctx_controller = self._contexts[tap].controller
+            ctx_controller = self.contexts[tap].controller
             self.tap_reattach(tap, ir_pre, dr_pre,
                               controller=ctx_controller)
 
@@ -1290,7 +1290,7 @@ class Chain(Batcher, Node):
 
             tap = top.tap
             op = top.op
-            ctx = self._contexts.get(tap)
+            ctx = self.contexts.get(tap)
             if ctx is None:
                 if not top_future.done():
                     top_future.set_exception(ValueError(
@@ -1307,11 +1307,11 @@ class Chain(Batcher, Node):
 
             if isinstance(op, _TapIrStatus):
                 self._parent.post(CaptureIr())
-                tdi = self._pad_with(self._pad_ones, ctx.ir_pre,
+                tdi = self.__pad_with(self.__pad_ones, ctx.ir_pre,
                                      BitString(bypass_val, tap.irlen),
                                      ctx.ir_post)
                 shift_future = self._parent.post(Shift(tdi, read_tdo=True))
-                self._invalidate_ir_cache_for_shift(tap, bypass_val)
+                self.__invalidate_ir_cache_for_shift(tap, bypass_val)
                 resolutions.append(
                     (top_future, shift_future, (ctx.ir_pre, tap.irlen)))
                 last_anchor = shift_future
@@ -1319,12 +1319,12 @@ class Chain(Batcher, Node):
             elif isinstance(op, _TapShift):
                 ir_done = None
                 if op.ir_value is not None and op.ir_value != ctx.current_ir:
-                    ir_tdi = self._pad_with(self._pad_ones, ctx.ir_pre,
+                    ir_tdi = self.__pad_with(self.__pad_ones, ctx.ir_pre,
                                             BitString(op.ir_value, tap.irlen),
                                             ctx.ir_post)
                     self._parent.post(CaptureIr())
                     ir_done = self._parent.post(Shift(ir_tdi, read_tdo=False))
-                    self._invalidate_ir_cache_for_shift(tap, op.ir_value)
+                    self.__invalidate_ir_cache_for_shift(tap, op.ir_value)
 
                 # pre_dr_run: idle TCKs in RTI before DR selection.
                 # Issued unconditionally so the cycles still happen
@@ -1335,7 +1335,7 @@ class Chain(Batcher, Node):
 
                 if op.tdi is not None:
                     self._parent.post(CaptureDr())
-                    dr_tdi = self._pad_with(self._pad_zeros, ctx.dr_pre,
+                    dr_tdi = self.__pad_with(self.__pad_zeros, ctx.dr_pre,
                                             op.tdi, ctx.dr_post)
                     # post_dr_run is baked into the Shift itself so the
                     # adapter can fold the trailing idle into the shift's
@@ -1381,11 +1381,11 @@ class Chain(Batcher, Node):
 
         if last_anchor is not None:
             last_anchor.add_done_callback(
-                lambda _lf, r=resolutions: Chain._resolve_batch(r))
+                lambda _lf, r=resolutions: Chain.__resolve_batch(r))
 
     @staticmethod
-    def _pad_with(pad_fn, pre: int, data: BitString,
-                  post: int) -> BitString:
+    def __pad_with(pad_fn, pre: int, data: BitString,
+                   post: int) -> BitString:
         """Concatenate ``pre`` bits of padding (from ``pad_fn``), the
         ``data`` BitString, and ``post`` bits of padding. Skips the
         empty concatenations so the common single-tap case (pre==post==0)
@@ -1399,7 +1399,7 @@ class Chain(Batcher, Node):
         return data
 
     @staticmethod
-    def _resolve_batch(resolutions):
+    def __resolve_batch(resolutions):
         """Walk the recorded (top_future, anchor_future, slice) tuples
         and resolve each top_future. Called once per batch when the
         last anchor future fires."""
@@ -1420,13 +1420,13 @@ class Chain(Batcher, Node):
                 else:
                     top_future.set_result(value[offset:offset + length])
 
-    def _invalidate_ir_cache_for_shift(self, tap, new_ir):
+    def __invalidate_ir_cache_for_shift(self, tap, new_ir):
         """An IR shift just happened: this tap loaded `new_ir`, all
         others were padded with all-1s and now hold BYPASS."""
-        target_ctx = self._contexts.get(tap)
+        target_ctx = self.contexts.get(tap)
         if target_ctx is not None:
             target_ctx.current_ir = new_ir
-        for other_tap, other_ctx in self._contexts.items():
+        for other_tap, other_ctx in self.contexts.items():
             if other_tap is tap:
                 continue
             other_ctx.current_ir = (1 << other_tap.irlen) - 1

@@ -272,7 +272,7 @@ class IcePick(jtag.Tap):
                 await asyncio.sleep(self.COOLDOWN_POLL_S)
                 now = loop.time()
                 for key, sub in list(self.taps.items()):
-                    sub_ctx = self.chain._contexts.get(sub)
+                    sub_ctx = self.chain.contexts.get(sub)
                     if sub_ctx is None or not sub_ctx.enabled:
                         continue
                     last = sub.last_activity
@@ -361,7 +361,7 @@ class IcePick(jtag.Tap):
         for k, tap in self.taps.items():
             if k >= key:
                 continue
-            sub_ctx = self.chain._contexts.get(tap)
+            sub_ctx = self.chain.contexts.get(tap)
             if sub_ctx is None or not sub_ctx.enabled:
                 continue
             ir_delta += tap.irlen
@@ -376,7 +376,7 @@ class IcePick(jtag.Tap):
         tap = self.taps.get(key)
         if tap is None:
             return None
-        ctx = self.chain._contexts.get(tap)
+        ctx = self.chain.contexts.get(tap)
         if ctx is None or not ctx.enabled:
             return None
         return tap
