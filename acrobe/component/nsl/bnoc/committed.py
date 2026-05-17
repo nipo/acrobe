@@ -20,16 +20,16 @@ class Committed(Framed):
 
     def __init__(self, channel: Framed, name: str = "committed"):
         super().__init__(name)
-        self._channel = channel
+        self.__channel = channel
 
     async def flush_ops(self, batch):
         lower_futures = []
         for op, future in batch:
             if isinstance(op, Send):
-                lf = self._channel.send(op.data + bytes([self.COMMIT]))
+                lf = self.__channel.send(op.data + bytes([self.COMMIT]))
                 lower_futures.append((lf, future, 'send'))
             elif isinstance(op, Recv):
-                lf = self._channel.recv()
+                lf = self.__channel.recv()
                 lower_futures.append((lf, future, 'recv'))
 
         await asyncio.gather(*[f for f, _, _ in lower_futures])

@@ -18,9 +18,9 @@ class JtagFifo:
     DMASK = (1 << WIDTH) - 1      # bits 8:0
 
     def __init__(self, tap, data_ir, status_ir=None):
-        self._tap = tap
-        self._data = tap.ir(data_ir, dr_length=self.DR_LEN)
-        self._status = tap.ir(status_ir, dr_length=32) if status_ir is not None else None
+        self.__tap = tap
+        self.__data = tap.ir(data_ir, dr_length=self.DR_LEN)
+        self.__status = tap.ir(status_ir, dr_length=32) if status_ir is not None else None
 
     async def exchange(self, tx_words, expect_frames=1):
         """Send tx_words and receive until expect_frames complete frames seen.
@@ -28,11 +28,11 @@ class JtagFifo:
         Each frame ends with the LAST bit (bit 8) set in a data word.
         Returns flat list of received 9-bit words (including LAST markers).
         """
-        if self._status is not None:
-            return await self._exchange_speculative(tx_words, expect_frames)
-        return await self._exchange_single(tx_words, expect_frames)
+        if self.__status is not None:
+            return await self.__exchange_speculative(tx_words, expect_frames)
+        return await self.__exchange_single(tx_words, expect_frames)
 
-    async def _exchange_single(self, tx_words, expect_frames):
+    async def __exchange_single(self, tx_words, expect_frames):
         """One DR shift per round. Checks VALID/READY from TDO."""
         tx_idx = 0
         rx_words = []
@@ -46,7 +46,7 @@ class JtagFifo:
             else:
                 tdi = self.READY
 
-            result = await self._data(tdi)
+            result = await self.__data(tdi)
             tdo = int(result)
 
             ready = bool(tdo & self.READY)
@@ -68,7 +68,7 @@ class JtagFifo:
 
         return rx_words
 
-    async def _exchange_speculative(self, tx_words, expect_frames):
+    async def __exchange_speculative(self, tx_words, expect_frames):
         """Batch multiple DR shifts using status register for queue depths."""
         tx_idx = 0
         rx_words = []
@@ -76,7 +76,7 @@ class JtagFifo:
 
         while frames_seen < expect_frames or tx_idx < len(tx_words):
             # Read status: out_free (bits 31:16), in_ready (bits 15:0)
-            status_result = await self._status()
+            status_result = await self.__status()
             status = int(status_result)
             out_free = (status >> 16) & 0xffff
             in_ready = (status & 0xffff) + 16  # margin
@@ -86,21 +86,21 @@ class JtagFifo:
             count = 0
             while tx_idx < len(tx_words) and count < out_free:
                 tdi = self.VALID | self.READY | tx_words[tx_idx]
-                shifts.append(self._data(tdi))
+                shifts.append(self.__data(tdi))
                 # Interleave run cycles for firmware processing
-                self._tap.run(10)
+                self.__tap.run(10)
                 tx_idx += 1
                 count += 1
 
             # Pad with dummy reads
             while count < min(in_ready, 128):
-                shifts.append(self._data(self.READY))
-                self._tap.run(10)
+                shifts.append(self.__data(self.READY))
+                self.__tap.run(10)
                 count += 1
 
             if not shifts:
                 # Nothing to do, run some cycles and retry
-                await self._tap.run(100)
+                await self.__tap.run(100)
                 continue
 
             results = await asyncio.gather(*shifts)

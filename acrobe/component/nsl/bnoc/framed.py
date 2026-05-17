@@ -62,7 +62,7 @@ class JtagFramed(Framed):
 
     def __init__(self, fifo, name: str = "framed"):
         super().__init__(name)
-        self._fifo = fifo
+        self.__fifo = fifo
 
     async def flush_ops(self, batch):
         sends = [(op, f) for op, f in batch if isinstance(op, Send)]
@@ -72,7 +72,7 @@ class JtagFramed(Framed):
         for op, _ in sends:
             tx_words.extend(self.encode(op.data))
 
-        rx_words = await self._fifo.exchange(
+        rx_words = await self.__fifo.exchange(
             tx_words, expect_frames=len(recvs))
 
         frames = self.split_frames(rx_words)
