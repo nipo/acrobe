@@ -44,9 +44,9 @@ class PicobootAdapter(Adapter):
     def __init__(self, name: str, info: AdapterInfo, device,
                  transport: PicobootUsbTransport):
         super().__init__(name)
-        self._info = info
-        self._device = device
-        self._transport = transport
+        self.__info = info
+        self.__device = device
+        self.__transport = transport
 
     @classmethod
     async def open(cls, descriptor) -> "PicobootAdapter":
@@ -71,12 +71,12 @@ class PicobootAdapter(Adapter):
     async def child_spawn(self, name):
         if name == "picoboot":
             from ...component.raspberry.picoboot import Picoboot
-            return Picoboot(self._transport, name="picoboot")
+            return Picoboot(self.__transport, name="picoboot")
         raise NoMatch("interface", name)
 
     async def close(self):
-        await self._transport.close()
-        self._device.handle.close()
+        await self.__transport.close()
+        self.__device.handle.close()
 
 
 for _info in _INFOS:
