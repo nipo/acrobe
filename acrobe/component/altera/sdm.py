@@ -163,11 +163,6 @@ class Sdm(Node):
     async def start(self):
         await self.sync()
 
-    async def child_spawn(self, name):
-        if name == "spi":
-            from .sdm_spi import SdmSpiAdapter
-            return SdmSpiAdapter(self)
-        
     async def do_io(self, cmd: list[int]) -> list[int]:
         """Send a command frame and receive a response frame.
 
