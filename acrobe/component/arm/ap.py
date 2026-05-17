@@ -134,7 +134,7 @@ class Ap(Node):
             else:
                 name = f"ap@{base:08x}"
         super().__init__(name)
-        self._dp = dp
+        self.__dp = dp
         self.base = base
         self.idr = idr
 
@@ -164,11 +164,11 @@ class Ap(Node):
 
     def reg_read(self, addr: int):
         """Post an AP register read. Returns Future -> int."""
-        return self._dp.post(dpmod.ApRead(addr=self.base + addr))
+        return self.__dp.post(dpmod.ApRead(addr=self.base + addr))
 
     def reg_write(self, addr: int, data: int):
         """Post an AP register write. Returns Future -> None."""
-        return self._dp.post(dpmod.ApWrite(addr=self.base + addr, data=data))
+        return self.__dp.post(dpmod.ApWrite(addr=self.base + addr, data=data))
 
     # -- Discovery --------------------------------------------------
 

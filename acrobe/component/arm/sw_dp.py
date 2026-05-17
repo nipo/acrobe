@@ -38,13 +38,13 @@ class SwDp(dpmod.Dp):
     def __init__(self, swd_interface: swd.Interface, *,
                  dpidr: int | None = None, name: str = "dp"):
         super().__init__(name=name, dpidr=dpidr)
-        self._swd = swd_interface
+        self.__swd = swd_interface
         # swd.Interface.start() leaves the DP's SELECT register at 0
         # (line reset clears it); pre-seed accordingly so the first
         # access doesn't emit a redundant SELECT write.
-        self._select: int = 0
+        self.__select: int = 0
 
-    def _select_for(self, op) -> int:
+    def __select_for(self, op) -> int:
         """Compute the SELECT value needed to access ``op``'s register.
 
         For AP ops, ``op.addr`` is the absolute system address, encoded
@@ -52,7 +52,7 @@ class SwDp(dpmod.Dp):
         SELECT[31:24] and APBANKSEL (upper nibble of the register
         offset) in SELECT[7:4]. For DP ops, only DPBANKSEL (lower
         nibble) changes; APSEL/APBANKSEL stick."""
-        cur = self._select
+        cur = self.__select
         if isinstance(op, (dpmod.ApRead, dpmod.ApWrite)):
             apsel = (op.addr >> 24) & 0xff
             apbank = (op.addr >> 4) & 0xf
@@ -63,16 +63,16 @@ class SwDp(dpmod.Dp):
         # (user_future, swd_future, kind) — we await all swd futures
         # at the end and propagate results/exceptions.
         records: list[tuple] = []
-        select = self._select
+        select = self.__select
 
         for op, future in batch:
             if isinstance(op, dpmod.Run):
-                self._swd.post(swd.Run(op.cycles))
+                self.__swd.post(swd.Run(op.cycles))
                 future.set_result(None)
                 continue
 
             if isinstance(op, dpmod.Abort):
-                f = self._swd.post(swd.Write(False, self.ABORT_REG, op.what))
+                f = self.__swd.post(swd.Write(False, self.ABORT_REG, op.what))
                 records.append((future, f, "abort"))
                 continue
 
@@ -82,29 +82,29 @@ class SwDp(dpmod.Dp):
                     f"SwDp can't lower {type(op).__name__}"))
                 continue
 
-            new_select = self._select_for(op)
+            new_select = self.__select_for(op)
             if select != new_select:
-                self._swd.post(swd.Write(False, self.SELECT_REG, new_select))
+                self.__swd.post(swd.Write(False, self.SELECT_REG, new_select))
                 select = new_select
 
             wire_addr = op.addr & 0xc
 
             if isinstance(op, dpmod.DpRead):
-                f = self._swd.post(swd.Read(False, wire_addr))
+                f = self.__swd.post(swd.Read(False, wire_addr))
                 records.append((future, f, "dp_read"))
             elif isinstance(op, dpmod.DpWrite):
-                f = self._swd.post(swd.Write(False, wire_addr, op.data))
+                f = self.__swd.post(swd.Write(False, wire_addr, op.data))
                 records.append((future, f, "dp_write"))
             elif isinstance(op, dpmod.ApRead):
-                f = self._swd.post(swd.Read(True, wire_addr))
+                f = self.__swd.post(swd.Read(True, wire_addr))
                 records.append((future, f, "ap_read"))
-                self._swd.post(swd.Run(self.AP_IDLE_CYCLES))
+                self.__swd.post(swd.Run(self.AP_IDLE_CYCLES))
             else:  # ApWrite
-                f = self._swd.post(swd.Write(True, wire_addr, op.data))
+                f = self.__swd.post(swd.Write(True, wire_addr, op.data))
                 records.append((future, f, "ap_write"))
-                self._swd.post(swd.Run(self.AP_IDLE_CYCLES))
+                self.__swd.post(swd.Run(self.AP_IDLE_CYCLES))
 
-        self._select = select
+        self.__select = select
 
         # Resolve user futures from swd futures. We gather rather than
         # await individually so that a single failure doesn't strand

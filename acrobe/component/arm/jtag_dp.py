@@ -159,15 +159,15 @@ class JtagDpLowerer:
         """
         Hook `lower` future done callback to resolve `upper`
         """
-        lower.add_done_callback(functools.partial(self._completion_from_lower, upper))
+        lower.add_done_callback(functools.partial(self.__completion_from_lower, upper))
 
     def chain_data(self, upper: asyncio.Future, lower: asyncio.Future):
         """Hook `lower` future done callback to resolve `upper` with
         response data.
         """
-        lower.add_done_callback(functools.partial(self._data_from_lower, upper))
+        lower.add_done_callback(functools.partial(self.__data_from_lower, upper))
 
-    def _completion_from_lower(self, upper: asyncio.Future, lower: asyncio.Future):
+    def __completion_from_lower(self, upper: asyncio.Future, lower: asyncio.Future):
         """
         Actual implementation for chain_completion()
         """
@@ -176,7 +176,7 @@ class JtagDpLowerer:
         except Exception as e:
             upper.set_exception(e)
 
-    def _data_from_lower(self, upper: asyncio.Future, lower: asyncio.Future):
+    def __data_from_lower(self, upper: asyncio.Future, lower: asyncio.Future):
         """
         Actual implementation for chain_data()
         """
@@ -334,18 +334,18 @@ class JtagDp(dpmod.Dp):
 
     def __init__(self, name: str = "dap", jtag_protocol_version: int = 0):
         super().__init__(name)
-        self._select: int | None = None  # cached SELECT value
+        self.__select: int | None = None  # cached SELECT value
         if jtag_protocol_version not in (0, 1):
             raise ValueError(
                 f"JTAG-DP protocol version must be 0 or 1, "
                 f"got {jtag_protocol_version!r}")
-        self._jtag_protocol_version = jtag_protocol_version
+        self.__jtag_protocol_version = jtag_protocol_version
         
     async def flush_ops(self, batch):
         """Lower a DP/AP batch to JTAG-DP wire shifts."""
 
         try:
-            JtagDpLowerer(self._jtag_protocol_version, self._parent).process(batch)
+            JtagDpLowerer(self.__jtag_protocol_version, self._parent).process(batch)
         except Exception as e:
             import traceback
             traceback.print_exc()

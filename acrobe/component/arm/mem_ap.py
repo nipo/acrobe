@@ -149,18 +149,18 @@ class _PendingBlob:
                sub_future: asyncio.Future) -> None:
         self.sub_futures.append((offset, size_bytes, sub_future))
         self.remaining += 1
-        sub_future.add_done_callback(self._on_done)
+        sub_future.add_done_callback(self.__on_done)
 
-    def _on_done(self, sub_future: asyncio.Future) -> None:
+    def __on_done(self, sub_future: asyncio.Future) -> None:
         self.remaining -= 1
         if self.exception is None:
             exc = sub_future.exception()
             if exc is not None:
                 self.exception = exc
         if self.remaining == 0:
-            self._resolve()
+            self.__resolve()
 
-    def _resolve(self) -> None:
+    def __resolve(self) -> None:
         if self.user_future.done():
             return
         if self.exception is not None:
@@ -297,7 +297,7 @@ class MemApLowering:
         }.get(type_field, "")
 
     @staticmethod
-    def _size_for(op) -> int:
+    def __size_for(op) -> int:
         if isinstance(op, (Read8, Write8)):
             return MemApLowering.CSW_SIZE_BYTE
         if isinstance(op, (Read16, Write16)):
@@ -306,7 +306,7 @@ class MemApLowering:
             return MemApLowering.CSW_SIZE_WORD
         raise TypeError(f"Unhandled MEM-AP op: {type(op).__name__}")
 
-    def _csw_with(self, size: int, addrinc: int) -> int:
+    def __csw_with(self, size: int, addrinc: int) -> int:
         """Build a CSW value: requested size + auto-increment, plus
         the master-mode bits the AP needs for normal memory access.
 
@@ -357,7 +357,7 @@ class MemApLowering:
     # -- Blob expansion + chaining helpers ------------------------
 
     @staticmethod
-    def _expand_read_blob(blob, user_future, loop):
+    def __expand_read_blob(blob, user_future, loop):
         """Expand a ReadBlob into Read{8,16,32} sub-ops with internal
         sub-futures; each is wired to a ``_PendingBlob`` aggregator
         that reassembles the bytes once every sub-op resolves. Empty
@@ -376,7 +376,7 @@ class MemApLowering:
         return sub_pairs
 
     @staticmethod
-    def _consume_exception(fut: asyncio.Future) -> None:
+    def __consume_exception(fut: asyncio.Future) -> None:
         """No-op done callback that just retrieves any exception so
         asyncio doesn't log a 'Future exception was never retrieved'
         warning. Used on CSW/TAR write futures whose result we don't
@@ -384,12 +384,12 @@ class MemApLowering:
         future, which IS chained to a user future."""
         fut.exception()
 
-    def _chain_read_lane(self, op, user_future: asyncio.Future,
+    def __chain_read_lane(self, op, user_future: asyncio.Future,
                          drw_future: asyncio.Future) -> None:
         """When the DRW read resolves, extract the byte/halfword lane
         and resolve ``user_future`` with the masked value (or
         propagate the exception)."""
-        size_bytes = self._SIZE_BYTES[self._size_for(op)]
+        size_bytes = self._SIZE_BYTES[self.__size_for(op)]
         shift = (op.addr & 3) * 8
         mask = (1 << (size_bytes * 8)) - 1
 
@@ -405,7 +405,7 @@ class MemApLowering:
         drw_future.add_done_callback(cb)
 
     @staticmethod
-    def _chain_write_completion(user_future: asyncio.Future,
+    def __chain_write_completion(user_future: asyncio.Future,
                                 drw_future: asyncio.Future) -> None:
         """When the DRW write resolves, resolve ``user_future`` with
         ``None`` (or propagate the exception). Writes have no payload
@@ -452,36 +452,36 @@ class MemApLowering:
 
         for top_op, user_future in batch:
             if isinstance(top_op, WriteBlob):
-                csw, tar = self._emit_write_blob(
+                csw, tar = self.__emit_write_blob(
                     top_op, csw, tar, user_future)
             elif isinstance(top_op, ReadBlob):
-                for sub_op, sub_fut in self._expand_read_blob(
+                for sub_op, sub_fut in self.__expand_read_blob(
                         top_op, user_future, loop):
-                    csw, tar = self._emit_single(sub_op, csw, tar, sub_fut)
+                    csw, tar = self.__emit_single(sub_op, csw, tar, sub_fut)
             else:
-                csw, tar = self._emit_single(top_op, csw, tar, user_future)
+                csw, tar = self.__emit_single(top_op, csw, tar, user_future)
 
         self._csw_cache = csw
         self._tar_cache = tar
 
-    def _csw_tar_setup(self, addr: int, size_field: int,
+    def __csw_tar_setup(self, addr: int, size_field: int,
                        csw, tar):
         """Issue CSW and TAR writes if their cached values don't match
         the requested ones. Returns the updated cache values."""
-        new_csw = self._csw_with(size=size_field,
+        new_csw = self.__csw_with(size=size_field,
                                  addrinc=self.CSW_ADDRINC_SINGLE)
         if csw != new_csw:
             f = self.reg_write(self.CSW, new_csw)
-            f.add_done_callback(self._consume_exception)
+            f.add_done_callback(self.__consume_exception)
             csw = new_csw
         if tar != addr:
             f = self.reg_write(self.TAR_LO, addr & 0xffffffff)
-            f.add_done_callback(self._consume_exception)
+            f.add_done_callback(self.__consume_exception)
             tar = addr
         return csw, tar
 
     @staticmethod
-    def _tar_advance(addr: int, size_bytes: int, tar):
+    def __tar_advance(addr: int, size_bytes: int, tar):
         """Auto-increment cached TAR after a write/read. If the next
         address crosses the 1 KiB segment boundary auto-inc no longer
         guarantees correctness, so invalidate the cache."""
@@ -490,7 +490,7 @@ class MemApLowering:
             return None
         return next_tar
 
-    def _emit_write_blob(self, blob, csw, tar, user_future):
+    def __emit_write_blob(self, blob, csw, tar, user_future):
         """Emit one CSW/TAR/DRW set per sub-op for a WriteBlob, then
         chain the user future to the last DRW future only — there's
         no need to thread per-sub-op futures through _PendingBlob for
@@ -503,35 +503,35 @@ class MemApLowering:
         last_drw = None
         for sub_op, _offset, _size_bytes in _decompose_byte_io(
                 blob.addr, len(blob.data), blob.data):
-            size_field = self._size_for(sub_op)
-            csw, tar = self._csw_tar_setup(sub_op.addr, size_field, csw, tar)
+            size_field = self.__size_for(sub_op)
+            csw, tar = self.__csw_tar_setup(sub_op.addr, size_field, csw, tar)
             shift = (sub_op.addr & 3) * 8
             lane_data = (sub_op.data << shift) & 0xffffffff
             last_drw = self.reg_write(self.DRW, lane_data)
-            tar = self._tar_advance(sub_op.addr,
+            tar = self.__tar_advance(sub_op.addr,
                                     self._SIZE_BYTES[size_field], tar)
 
-        self._chain_write_completion(user_future, last_drw)
+        self.__chain_write_completion(user_future, last_drw)
         return csw, tar
 
-    def _emit_single(self, op, csw, tar, user_future):
+    def __emit_single(self, op, csw, tar, user_future):
         """Emit one CSW/TAR/DRW set for a single Read*/Write* op and
         chain the user future to its DRW future."""
         try:
-            size_field = self._size_for(op)
+            size_field = self.__size_for(op)
         except TypeError as exc:
             user_future.set_exception(exc)
             return csw, tar
-        csw, tar = self._csw_tar_setup(op.addr, size_field, csw, tar)
+        csw, tar = self.__csw_tar_setup(op.addr, size_field, csw, tar)
         if isinstance(op, (Read8, Read16, Read32)):
             drw_future = self.reg_read(self.DRW)
-            self._chain_read_lane(op, user_future, drw_future)
+            self.__chain_read_lane(op, user_future, drw_future)
         else:
             shift = (op.addr & 3) * 8
             lane_data = (op.data << shift) & 0xffffffff
             drw_future = self.reg_write(self.DRW, lane_data)
-            self._chain_write_completion(user_future, drw_future)
-        tar = self._tar_advance(op.addr, self._SIZE_BYTES[size_field], tar)
+            self.__chain_write_completion(user_future, drw_future)
+        tar = self.__tar_advance(op.addr, self._SIZE_BYTES[size_field], tar)
         return csw, tar
 
     # -- start() helpers ------------------------------------------

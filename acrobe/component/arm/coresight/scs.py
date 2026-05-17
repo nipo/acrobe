@@ -180,7 +180,7 @@ class Scs(MemoryMappedComponent):
         except DpAccessFailure as exc:
             self.logger.warning("CPUID read failed: %s", exc)
 
-        await self._enable_trcena()
+        await self.__enable_trcena()
 
     # -- CPUID + features ------------------------------------------
 
@@ -255,7 +255,7 @@ class Scs(MemoryMappedComponent):
 
         feats = await self.read_features()
         self.features = feats
-        decoded = self._decode_features(feats)
+        decoded = self.__decode_features(feats)
 
         # Headline summary derived from the decoded bitfields. Lets
         # the common case ("does it have an FPU?") stay readable
@@ -317,7 +317,7 @@ class Scs(MemoryMappedComponent):
         return lines
 
     @staticmethod
-    def _decode_features(feats: "CpuFeatures") -> dict:
+    def __decode_features(feats: "CpuFeatures") -> dict:
         """Wrap each non-None raw value in its Bitfield class.
 
         Skips registers the core leaves unread (read-faulted or
@@ -333,7 +333,7 @@ class Scs(MemoryMappedComponent):
 
     # -- TRCENA ----------------------------------------------------
 
-    async def _enable_trcena(self) -> None:
+    async def __enable_trcena(self) -> None:
         addr = self.base + self.DEMCR_OFFSET
         try:
             demcr = await self._bus.read32(addr)

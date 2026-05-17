@@ -240,7 +240,7 @@ class MemoryMappedComponent(Node):
     def __init__(self, bus, base: int, ids: ComponentIds,
                  name: str | None = None):
         if name is None:
-            name = self._default_name(ids, base)
+            name = self.__default_name(ids, base)
         super().__init__(name)
         self._bus = bus
         self.base = base
@@ -294,7 +294,7 @@ class MemoryMappedComponent(Node):
 
     # -- Friendly default naming ------------------------------------
 
-    def _default_name(self, ids: ComponentIds, base: int) -> str:
+    def __default_name(self, ids: ComponentIds, base: int) -> str:
         if self.FRIENDLY_NAME:
             return f"{self.FRIENDLY_NAME}@{base:08x}"
         if ids.cidr_class is None:

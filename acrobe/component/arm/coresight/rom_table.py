@@ -74,8 +74,8 @@ class RomTable(MemoryMappedComponent):
     # register space starts at 0xF00 so entries occupy 0x000..0xEFC.
     # Class 0x9: reserved area starts at 0x800 so entries occupy
     # 0x000..0x7FC (or 0x7F8 for 64-bit).
-    _ENTRY_AREA_END_CLASS_1 = 0xF00
-    _ENTRY_AREA_END_CLASS_9 = 0x800
+    __ENTRY_AREA_END_CLASS_1 = 0xF00
+    __ENTRY_AREA_END_CLASS_9 = 0x800
 
     @property
     def entry_size(self) -> int:
@@ -95,21 +95,21 @@ class RomTable(MemoryMappedComponent):
         self.logger.info(
             "ROM Table at 0x%x: cidr=%s, %d-bit entries, partid=%s",
             self.base, self.cidr_class, size * 8, self.partid.pretty())
-        await self._walk(size)
+        await self.__walk(size)
 
     # Width (in nibbles) used when formatting OFFSET/child addresses
     # in entry-trace lines. Sized for 64-bit entries; 32-bit entries
     # zero-extend in the same field, which keeps log columns aligned.
-    _LOG_ADDR_NIBBLES = 16
+    __LOG_ADDR_NIBBLES = 16
 
-    async def _walk(self, entry_size: int):
+    async def __walk(self, entry_size: int):
         is_class_9 = self.cidr_class == self.CLASS_CORESIGHT
-        entry_area_end = (self._ENTRY_AREA_END_CLASS_9 if is_class_9
-                          else self._ENTRY_AREA_END_CLASS_1)
+        entry_area_end = (self.__ENTRY_AREA_END_CLASS_9 if is_class_9
+                          else self.__ENTRY_AREA_END_CLASS_1)
         offset = 0
         while offset < entry_area_end:
             try:
-                entry = await self._read_entry(offset, entry_size)
+                entry = await self.__read_entry(offset, entry_size)
             except DpAccessFailure as exc:
                 self.logger.warning(
                     "ROM entry +0x%x read failed: %s — stopping walk",
@@ -121,7 +121,7 @@ class RomTable(MemoryMappedComponent):
             present_bits = entry & 0x3
             powerid_valid = bool((entry >> 2) & 1)
             powerid = (entry >> 4) & 0x1f
-            child_offset = self._sign_extend_offset(entry, entry_size)
+            child_offset = self.__sign_extend_offset(entry, entry_size)
             addr_size_bits = getattr(self._bus, "addr_size_bits", 64)
             addr_mask = (1 << addr_size_bits) - 1
             child_addr = (self.base + child_offset) & addr_mask
@@ -163,7 +163,7 @@ class RomTable(MemoryMappedComponent):
                 "0x%0*x",
                 offset, entry_size * 2, entry, state,
                 powerid, powerid_valid,
-                self._LOG_ADDR_NIBBLES, child_addr)
+                self.__LOG_ADDR_NIBBLES, child_addr)
 
             if not present:
                 if is_class_9 and present_bits == 0b01:
@@ -186,10 +186,10 @@ class RomTable(MemoryMappedComponent):
                     "(power-domain gated, requester not yet driven)",
                     offset, child_addr, powerid)
 
-            await self._discover_child(child_addr)
+            await self.__discover_child(child_addr)
             offset += entry_size
 
-    async def _read_entry(self, offset: int, entry_size: int) -> int:
+    async def __read_entry(self, offset: int, entry_size: int) -> int:
         """Read a ROM entry as an int. 64-bit entries combine two
         32-bit reads (low word at +offset, high word at +offset+4)."""
         if entry_size == 4:
@@ -199,7 +199,7 @@ class RomTable(MemoryMappedComponent):
         return (hi << 32) | lo
 
     @staticmethod
-    def _sign_extend_offset(entry: int, entry_size: int) -> int:
+    def __sign_extend_offset(entry: int, entry_size: int) -> int:
         """Extract the signed byte offset from a ROM entry."""
         if entry_size == 4:
             raw = entry & 0xFFFFF000
@@ -212,7 +212,7 @@ class RomTable(MemoryMappedComponent):
             raw -= 1 << 64
         return raw
 
-    async def _discover_child(self, addr: int):
+    async def __discover_child(self, addr: int):
         """Read the child's IDs and pick a class. On any failure,
         install a PowerGate."""
         try:
@@ -231,7 +231,7 @@ class RomTable(MemoryMappedComponent):
             self.child_add(PowerGate(self._bus, addr, FailureKind.EMPTY))
             return
 
-        chosen = self._classify(ids, addr)
+        chosen = self.__classify(ids, addr)
 
         try:
             child = chosen(self._bus, addr, ids)
@@ -263,7 +263,7 @@ class RomTable(MemoryMappedComponent):
                 "discovery may be incomplete",
                 addr, exc, exc_info=True)
 
-    def _classify(self, ids: ComponentIds, addr: int):
+    def __classify(self, ids: ComponentIds, addr: int):
         """Pick a class for the child at ``addr`` given its IDs.
         Per-SoC override (this ROM's PartId + child address) wins
         over the standard precedence."""

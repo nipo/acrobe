@@ -41,7 +41,7 @@ class ApRead:
     APSEL+APBANKSEL+register-offset retrofits onto the same model:
     callers compose ``(apsel << 24) | reg_offset``, which is exactly
     what an ADIv5 SELECT register needs to load. The DP's
-    ``_select_for`` then extracts the right SELECT view per protocol
+    SELECT lowering then extracts the right SELECT view per protocol
     (legacy APSEL/APBANKSEL/DPBANKSEL split, or ADIv6 unified
     ADDR[31:4])."""
     addr: int
@@ -152,7 +152,7 @@ class DpSystemBus:
     are word-aligned)."""
 
     def __init__(self, dp: "Dp"):
-        self._dp = dp
+        self.__dp = dp
         # Mirror DP's logger so child components attached via this bus
         # surface log lines under the DP's tree path.
         self.logger = dp.logger
@@ -167,13 +167,13 @@ class DpSystemBus:
         if addr & 0x3:
             raise ValueError(
                 f"DpSystemBus.read32: unaligned address 0x{addr:x}")
-        return self._dp.post(ApRead(addr=addr))
+        return self.__dp.post(ApRead(addr=addr))
 
     def write32(self, addr: int, data: int):
         if addr & 0x3:
             raise ValueError(
                 f"DpSystemBus.write32: unaligned address 0x{addr:x}")
-        return self._dp.post(ApWrite(addr=addr, data=data & 0xffffffff))
+        return self.__dp.post(ApWrite(addr=addr, data=data & 0xffffffff))
 
 
 # --- Abstract DP ---------------------------------------------------
@@ -309,7 +309,7 @@ class Dp(Batcher, Node):
         continues. Per-AP ``start()`` failures are isolated by the
         :meth:`start_tree` override below."""
         if self.adi_version >= 6:
-            await self._enumerate_aps_adiv6()
+            await self.__enumerate_aps_adiv6()
             return
 
         # Imported lazily to avoid a circular dependency at module-load.
@@ -334,7 +334,7 @@ class Dp(Batcher, Node):
                     "AP%d discovered: idr=0x%08x class=0x%x type=0x%x",
                     apsel, ap.idr, ap.klass, ap.type)
 
-    async def _enumerate_aps_adiv6(self):
+    async def __enumerate_aps_adiv6(self):
         """ADIv6 path: read BASEPTR0 (and BASEPTR1 if ASIZE > 32),
         discover the top-level component at that system address, and
         attach it as a child. Typically a ROM Table whose entries
