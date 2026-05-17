@@ -150,10 +150,10 @@ class Interface(Batcher, Node):
     def __init__(self, adapter, name: str = "i2c"):
         Batcher.__init__(self)
         Node.__init__(self, name)
-        self._adapter = adapter
+        self.__adapter = adapter
 
     @staticmethod
-    def _normalize(op):
+    def __normalize(op):
         """Return (Transaction, single).  ``single`` means the caller
         passed a naked item and expects an unwrapped result."""
         if isinstance(op, Transaction):
@@ -165,8 +165,8 @@ class Interface(Batcher, Node):
     async def flush_ops(self, batch):
         forwarded = []
         for op, future in batch:
-            tx, single = self._normalize(op)
-            forwarded.append((self._adapter.post(tx), future, single))
+            tx, single = self.__normalize(op)
+            forwarded.append((self.__adapter.post(tx), future, single))
 
         for af, mf, single in forwarded:
             try:
@@ -189,34 +189,34 @@ class Slave(Node):
         if name is None:
             name = f"i2c[0x{addr:02x}]"
         Node.__init__(self, name)
-        self._interface = interface
+        self.__interface = interface
         self.addr = addr
 
     def read(self, size: int):
         """Future → bytes."""
-        return self._interface.post(Transfer(self.addr, size_r=size))
+        return self.__interface.post(Transfer(self.addr, size_r=size))
 
     def write(self, data):
         """Future → None."""
-        return self._interface.post(Transfer(self.addr, data_w=bytes(data)))
+        return self.__interface.post(Transfer(self.addr, data_w=bytes(data)))
 
     def write_read(self, data, size: int):
         """Future → bytes."""
-        return self._interface.post(
+        return self.__interface.post(
             Transfer(self.addr, data_w=bytes(data), size_r=size))
 
     def wait_ready(self, timeout_s: float, interval_s: float | None = None):
         """Future → None.  Raises WaitAckTimeout on timeout."""
-        return self._interface.post(
+        return self.__interface.post(
             WaitAck(self.addr, timeout_s, interval_s))
 
     def transaction(self, *items):
         """Future → tuple of per-item natural results."""
-        return self._interface.post(Transaction(items))
+        return self.__interface.post(Transaction(items))
 
     def post(self, op):
         """Forward a pre-built op (Transaction, Transfer, WaitAck) directly."""
-        return self._interface.post(op)
+        return self.__interface.post(op)
 
     def __repr__(self):
         return f"<Slave 0x{self.addr:02x}>"
