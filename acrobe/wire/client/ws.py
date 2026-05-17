@@ -53,18 +53,18 @@ class WireClient:
     def __init__(self, ws: aiohttp.ClientWebSocketResponse,
                  session: Session,
                  http_session: Optional[aiohttp.ClientSession] = None):
-        self._ws = ws
-        self._session = session
-        self._http_session = http_session
-        self._owns_http_session = http_session is not None
-        self._pending: dict[int, asyncio.Future] = {}
-        self._req_ids = itertools.count(1)
-        self._reader_task = asyncio.create_task(self._read_loop())
-        self._closed = False
+        self.__ws = ws
+        self.__session = session
+        self.__http_session = http_session
+        self.__owns_http_session = http_session is not None
+        self.__pending: dict[int, asyncio.Future] = {}
+        self.__req_ids = itertools.count(1)
+        self.__reader_task = asyncio.create_task(self.__read_loop())
+        self.__closed = False
 
     @property
     def session(self) -> Session:
-        return self._session
+        return self.__session
 
     @classmethod
     async def connect(cls, url: str, registry: Registry,
@@ -97,60 +97,60 @@ class WireClient:
                 await session_to_use.close()
             raise
 
-    async def _read_loop(self):
+    async def __read_loop(self):
         try:
-            async for msg in self._ws:
+            async for msg in self.__ws:
                 if msg.type != aiohttp.WSMsgType.BINARY:
                     continue
                 try:
-                    frame = decode_frame(msg.data, self._session)
+                    frame = decode_frame(msg.data, self.__session)
                 except FrameError:
                     continue
 
                 if isinstance(frame, Response):
-                    fut = self._pending.pop(frame.req_id, None)
+                    fut = self.__pending.pop(frame.req_id, None)
                     if fut is not None and not fut.done():
                         fut.set_result(frame)
                 elif isinstance(frame, ProtocolError):
                     err = WireClientError(frame.kind, frame.payload)
                     if frame.req_id is not None:
-                        fut = self._pending.pop(frame.req_id, None)
+                        fut = self.__pending.pop(frame.req_id, None)
                         if fut is not None and not fut.done():
                             fut.set_exception(err)
         finally:
             # On socket close, fail every still-pending future so
             # awaiters wake up rather than hang forever.
-            for fut in self._pending.values():
+            for fut in self.__pending.values():
                 if not fut.done():
                     fut.set_exception(
                         WireClientError("connection_closed",
                                         "WS closed before response"))
-            self._pending.clear()
+            self.__pending.clear()
 
     async def send_batch(self, batch: list) -> Response:
-        if self._closed:
+        if self.__closed:
             raise WireClientError("closed", "client already closed")
-        req_id = next(self._req_ids)
+        req_id = next(self.__req_ids)
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        self._pending[req_id] = fut
+        self.__pending[req_id] = fut
         request = Request(req_id=req_id, batch=batch)
-        await self._ws.send_bytes(encode_request(request, self._session))
+        await self.__ws.send_bytes(encode_request(request, self.__session))
         return await fut
 
     async def close(self):
-        if self._closed:
+        if self.__closed:
             return
-        self._closed = True
+        self.__closed = True
         from ...lifecycle import cancel_shutdown
         cancel_shutdown(self.close)
-        await self._ws.close()
+        await self.__ws.close()
         try:
-            await self._reader_task
+            await self.__reader_task
         except Exception:
             pass
-        if self._owns_http_session and self._http_session is not None:
-            await self._http_session.close()
+        if self.__owns_http_session and self.__http_session is not None:
+            await self.__http_session.close()
 
     async def __aenter__(self):
         return self
