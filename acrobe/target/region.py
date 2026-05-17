@@ -141,7 +141,7 @@ class Flash(Region):
 
     async def plan_update(self, region_map):
         if not self.is_blank:
-            await self.__erase_for(region_map)
+            await self._erase_for(region_map)
         paged = region_map.paged(self.write_page_size,
                                  fill=bytes([self.erased_value]))
         page = self.write_page_size
@@ -155,7 +155,7 @@ class Flash(Region):
             self.write_page_size,
             fill=bytes([self.erased_value])).size
 
-    async def __erase_for(self, region_map):
+    async def _erase_for(self, region_map):
         """Issue per-erase-page erases covering every chunk in
         `region_map`. Aligns to the smallest erase granularity the
         flash exposes; dedupes pages touched by multiple chunks."""

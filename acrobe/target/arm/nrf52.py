@@ -164,7 +164,7 @@ class NvmcFlash(Flash):
         long-lived `PagedPuppetWriter` set up around the yield loop
         so per-page `write()` calls pipeline across iterations."""
         if not self.is_blank:
-            await self._Flash__erase_for(region_map)
+            await self._erase_for(region_map)
         paged = region_map.paged(self.write_page_size,
                                  fill=bytes([self.erased_value]))
         page = self.write_page_size

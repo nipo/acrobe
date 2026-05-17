@@ -36,7 +36,7 @@ class FpgaLoadable(Loadable):
 
     @staticmethod
     def __payload(source):
-        if isinstance(source, Readable) and not source._children:
+        if isinstance(source, Readable) and not source.children:
             return source
         if isinstance(source, Node):
             return find_bitstream(source)
