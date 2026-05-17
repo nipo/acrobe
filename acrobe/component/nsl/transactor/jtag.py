@@ -50,7 +50,7 @@ class JtagTransactor:
     CMD_RESET8       = 0xb0
 
     @dataclass(frozen=True, slots=True)
-    class _Gather:
+    class __Gather:
         """One TDO-bearing command's response slot. Used to reassemble
         a (potentially chunked) Shift op's TDO output."""
 
@@ -100,11 +100,11 @@ class JtagTransactor:
             self.__rate_dirty = False
 
         for op_idx, (op, _future) in enumerate(batch):
-            rsp_size = self._encode_one(op, op_idx, cmd, rsp_size, gather)
+            rsp_size = self.__encode_one(op, op_idx, cmd, rsp_size, gather)
 
         return bytes(cmd), rsp_size, gather
 
-    def _encode_one(self, op, op_idx, cmd, rsp_size, gather):
+    def __encode_one(self, op, op_idx, cmd, rsp_size, gather):
         if isinstance(op, jtag.CaptureDr):
             cmd.append(self.CMD_DR_CAPTURE)
             rsp_size += 1
@@ -121,20 +121,20 @@ class JtagTransactor:
             return rsp_size
 
         if isinstance(op, jtag.Reset):
-            return self._encode_reset(op.count, cmd, rsp_size)
+            return self.__encode_reset(op.count, cmd, rsp_size)
 
         if isinstance(op, jtag.Run):
-            return self._encode_rti(op.cycles, cmd, rsp_size)
+            return self.__encode_rti(op.cycles, cmd, rsp_size)
 
         if isinstance(op, jtag.Shift):
-            rsp_size = self._encode_shift(op, op_idx, cmd, rsp_size, gather)
+            rsp_size = self.__encode_shift(op, op_idx, cmd, rsp_size, gather)
             if op.post_run:
-                rsp_size = self._encode_rti(op.post_run, cmd, rsp_size)
+                rsp_size = self.__encode_rti(op.post_run, cmd, rsp_size)
             return rsp_size
 
         raise TypeError(f"JtagTransactor cannot encode {type(op).__name__}")
 
-    def _encode_reset(self, count: int, cmd, rsp_size):
+    def __encode_reset(self, count: int, cmd, rsp_size):
         cycles = max(5, int(count))
         # Use RESET8 (groups of 8 cycles) for the bulk, then fill with
         # RESET for the remainder. RESET8 count field is 4 bits =
@@ -150,7 +150,7 @@ class JtagTransactor:
             rsp_size += 1
         return rsp_size
 
-    def _encode_rti(self, cycles: int, cmd, rsp_size):
+    def __encode_rti(self, cycles: int, cmd, rsp_size):
         cycles = int(cycles)
         if cycles <= 0:
             return rsp_size
@@ -165,7 +165,7 @@ class JtagTransactor:
             rsp_size += 1
         return rsp_size
 
-    def _encode_shift(self, op, op_idx, cmd, rsp_size, gather):
+    def __encode_shift(self, op, op_idx, cmd, rsp_size, gather):
         # tdi must be a BitString (acrobe's JTAG always uses one).
         tdi = op.tdi
         if not isinstance(tdi, BitStringBase):
@@ -197,7 +197,7 @@ class JtagTransactor:
             cmd.extend(data[:byte_count])
             data = data[byte_count:]
             if has_tdo:
-                gather.append(self._Gather(op_idx, rsp_size, byte_count * 8))
+                gather.append(self.__Gather(op_idx, rsp_size, byte_count * 8))
                 rsp_size += byte_count
             rsp_size += 1  # status byte (at the end of this command's response)
             bit_count -= byte_count * 8
@@ -206,7 +206,7 @@ class JtagTransactor:
             cmd.append(shift_bit_cmd | (bit_count - 1))
             cmd.append(data[0] if data else 0)
             if has_tdo:
-                gather.append(self._Gather(op_idx, rsp_size, bit_count))
+                gather.append(self.__Gather(op_idx, rsp_size, bit_count))
                 rsp_size += 1  # 1 byte holds the tail TDO bits
             rsp_size += 1  # status byte (at the end)
 

@@ -54,7 +54,7 @@ class SwdTransactor:
     # Encoder state attached to each Read/Write op for decode-time
     # response gathering. Stored in the `state` returned by encode().
     @dataclass(frozen=True, slots=True)
-    class _Resolve:
+    class __Resolve:
         op_idx: int               # index into the batch
         rsp_offset: int           # offset in response bytes
         is_read: bool             # if True, 4 data bytes follow ack
@@ -142,11 +142,11 @@ class SwdTransactor:
             self.__rate_dirty = False
 
         for op_idx, (op, _future) in enumerate(batch):
-            rsp_size = self._encode_one(op, op_idx, cmd, rsp_size, gather)
+            rsp_size = self.__encode_one(op, op_idx, cmd, rsp_size, gather)
 
         return bytes(cmd), rsp_size, gather
 
-    def _encode_one(self, op, op_idx, cmd, rsp_size, gather):
+    def __encode_one(self, op, op_idx, cmd, rsp_size, gather):
         if isinstance(op, swd.Read):
             # Insert a few idle cycles before the transaction. Crobe
             # uses CMD_RUN | 2 (3 cycles); keep the same default.
@@ -159,7 +159,7 @@ class SwdTransactor:
                 byte |= self.CMD_RW_AP
             byte |= reg & 0xf
             cmd.append(byte)
-            gather.append(self._Resolve(op_idx, rsp_size, True))
+            gather.append(self.__Resolve(op_idx, rsp_size, True))
             rsp_size += 5  # ack + 4 data
             if ap:
                 # Insert trailing idle cycles for AP read pipelining.
@@ -179,7 +179,7 @@ class SwdTransactor:
             byte |= reg & 0xf
             cmd.append(byte)
             cmd.extend(int(op.data & 0xFFFFFFFF).to_bytes(4, "little"))
-            gather.append(self._Resolve(op_idx, rsp_size, False))
+            gather.append(self.__Resolve(op_idx, rsp_size, False))
             rsp_size += 1  # ack only
             if ap:
                 cmd.append(self.CMD_RUN | 10)
@@ -206,9 +206,9 @@ class SwdTransactor:
 
         if isinstance(op, swd.LineReset):
             # ≥50 cycles SWDIO=1, then ≥2 idle.
-            rsp_size = self._encode_one(swd.Wakeup(60), op_idx, cmd,
+            rsp_size = self.__encode_one(swd.Wakeup(60), op_idx, cmd,
                                         rsp_size, gather)
-            rsp_size = self._encode_one(swd.Run(8), op_idx, cmd,
+            rsp_size = self.__encode_one(swd.Run(8), op_idx, cmd,
                                         rsp_size, gather)
             return rsp_size
 
@@ -220,14 +220,14 @@ class SwdTransactor:
             # sequence as 0x79E7 sent MSB-first; LSB-first wire
             # ordering of the same sequence is 0xE79E, packed LE as
             # bytes [0x9E, 0xE7].
-            rsp_size = self._encode_one(swd.Wakeup(60), op_idx, cmd,
+            rsp_size = self.__encode_one(swd.Wakeup(60), op_idx, cmd,
                                         rsp_size, gather)
             cmd.append(self.CMD_BITBANG | (16 - 1))
             cmd.extend(b"\x9e\xe7\x00\x00")
             rsp_size += 1
-            rsp_size = self._encode_one(swd.Wakeup(60), op_idx, cmd,
+            rsp_size = self.__encode_one(swd.Wakeup(60), op_idx, cmd,
                                         rsp_size, gather)
-            rsp_size = self._encode_one(swd.Run(16), op_idx, cmd,
+            rsp_size = self.__encode_one(swd.Run(16), op_idx, cmd,
                                         rsp_size, gather)
             return rsp_size
 
