@@ -82,14 +82,15 @@ class CliContext:
     """
 
     def __init__(self):
-        self._hw_root = None
+        self.__hw_root = None
+        self.chained = False
 
     @property
     def hw_root(self):
-        if self._hw_root is None:
+        if self.__hw_root is None:
             from ..adapter.model import make_hw_root
-            self._hw_root = make_hw_root()
-        return self._hw_root
+            self.__hw_root = make_hw_root()
+        return self.__hw_root
 
     async def resolve(self, path):
         """Walk *path* through the shared :class:`HwRoot`, start its
@@ -137,12 +138,12 @@ async def cli(ctx, verbose, quiet, timestamp, no_color,
     # a pthread_mutex_destroy assertion from libusb.
     #
     # When chaining (`a & b ; c`), the dispatcher in :mod:`.chain`
-    # pre-injects a shared :class:`CliContext` flagged ``_chained`` and
+    # pre-injects a shared :class:`CliContext` flagged ``chained`` and
     # drains itself once at the end — this hook then steps aside so
     # resources opened in segment N stay alive for segment N+1.
     cli_ctx_obj = ctx.obj
     async def _drain_lifecycle():
-        if getattr(cli_ctx_obj, "_chained", False):
+        if getattr(cli_ctx_obj, "chained", False):
             return
         from .. import lifecycle
         await lifecycle.shutdown()
@@ -197,14 +198,14 @@ class ResourceRef:
 
     def __init__(self, path: str):
         self.path = path
-        self._node = None
+        self.__node = None
 
     async def resolve(self):
         """Walk the VFS and return the started leaf Node."""
-        if self._node is None:
+        if self.__node is None:
             from .loadable import _summon
-            self._node = await _summon(self.path)
-        return self._node
+            self.__node = await _summon(self.path)
+        return self.__node
 
     async def memory_map(self):
         """Resolve and build a MemoryMap by walking the subtree's

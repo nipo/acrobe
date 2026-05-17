@@ -43,13 +43,13 @@ class ChainDispatcher:
     def __init__(self, argv):
         self.argv = list(argv)
         self.shared = base.CliContext()
-        self.shared._chained = True
+        self.shared.chained = True
 
     @classmethod
     def has_operators(cls, argv):
         return any(t in SUPPORTED_OPS or t in RESERVED_OPS for t in argv)
 
-    def _split(self):
+    def __split(self):
         """Return ``[(op, [tokens]), ...]`` — first ``op`` is None."""
         segments = []
         current_op = None
@@ -68,7 +68,7 @@ class ChainDispatcher:
         segments.append((current_op, current))
         return segments
 
-    async def _extract_globals(self, first_args):
+    async def __extract_globals(self, first_args):
         """Run the cli group's parser over *first_args* to peel off
         the leading global options. Returns
         ``(globals_argv, subcommand_argv)``."""
@@ -80,14 +80,14 @@ class ChainDispatcher:
         n_globals = len(first_args) - len(rest)
         return list(first_args[:n_globals]), rest
 
-    async def _run_segment(self, globals_argv, segment_args):
+    async def __run_segment(self, globals_argv, segment_args):
         args = list(globals_argv) + list(segment_args)
         await base.cli.main(
             args=args, prog_name="acrobe",
             obj=self.shared, standalone_mode=False)
 
     @classmethod
-    def _group_by_sequential(cls, segments):
+    def __group_by_sequential(cls, segments):
         """Bucket segments into ``;``-separated groups; each group is
         a list of ``&``-parallel segments."""
         groups = [[segments[0][1]]]
@@ -99,7 +99,7 @@ class ChainDispatcher:
         return groups
 
     async def run(self):
-        segments = self._split()
+        segments = self.__split()
         if segments[0][0] is not None:
             raise click.UsageError("Operator before first command")
         for op, seg in segments:
@@ -108,20 +108,20 @@ class ChainDispatcher:
                     "Empty segment around operator (check escaping)")
 
         first_op, first_args = segments[0]
-        globals_argv, first_remaining = await self._extract_globals(first_args)
+        globals_argv, first_remaining = await self.__extract_globals(first_args)
         if not first_remaining:
             raise click.UsageError("Missing subcommand before operator")
         segments[0] = (first_op, first_remaining)
 
-        groups = self._group_by_sequential(segments)
+        groups = self.__group_by_sequential(segments)
 
         try:
             for group in groups:
                 if len(group) == 1:
-                    await self._run_segment(globals_argv, group[0])
+                    await self.__run_segment(globals_argv, group[0])
                 else:
                     await asyncio.gather(
-                        *[self._run_segment(globals_argv, seg)
+                        *[self.__run_segment(globals_argv, seg)
                           for seg in group])
         finally:
             await lifecycle.shutdown()
