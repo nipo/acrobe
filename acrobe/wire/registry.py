@@ -55,8 +55,8 @@ class Registry:
     """
 
     def __init__(self):
-        self._by_uuid: dict[uuid_lib.UUID, RegistryEntry] = {}
-        self._by_class: dict[type, RegistryEntry] = {}
+        self.__by_uuid: dict[uuid_lib.UUID, RegistryEntry] = {}
+        self.__by_class: dict[type, RegistryEntry] = {}
 
     def register(self, cls: type, kind: str, type_uuid_str: str,
                  uses: Iterable[type] = ()) -> RegistryEntry:
@@ -66,20 +66,20 @@ class Registry:
             raise RegistryError(
                 f"{cls.__name__}: invalid UUID {type_uuid_str!r}") from exc
 
-        if type_uuid in self._by_uuid:
-            existing = self._by_uuid[type_uuid]
+        if type_uuid in self.__by_uuid:
+            existing = self.__by_uuid[type_uuid]
             raise RegistryError(
                 f"UUID {type_uuid} already registered to "
                 f"{existing.cls.__name__}; cannot reuse for "
                 f"{cls.__name__}")
 
-        if cls in self._by_class:
+        if cls in self.__by_class:
             raise RegistryError(
                 f"{cls.__name__} already registered (uuid="
-                f"{self._by_class[cls].type_uuid})")
+                f"{self.__by_class[cls].type_uuid})")
 
         if kind == "node":
-            uses_tuple = tuple(self._validate_node_use(cls, u) for u in uses)
+            uses_tuple = tuple(self.__validate_node_use(cls, u) for u in uses)
             codec = None
         elif kind in ("op", "error", "value"):
             if list(uses):
@@ -91,12 +91,12 @@ class Registry:
             raise RegistryError(f"unknown kind {kind!r}")
 
         entry = RegistryEntry(cls, type_uuid, kind, codec, uses_tuple)
-        self._by_uuid[type_uuid] = entry
-        self._by_class[cls] = entry
+        self.__by_uuid[type_uuid] = entry
+        self.__by_class[cls] = entry
         # Annotate the class with the registry mapping when the
         # type permits class-attribute assignment. Cython cdef
         # classes (and other immutable types) reject this — the
-        # canonical mapping is _by_class anyway, so silently
+        # canonical mapping is __by_class anyway, so silently
         # tolerate the rejection.
         try:
             cls.__wire_uuid__ = type_uuid
@@ -105,9 +105,9 @@ class Registry:
             pass
         return entry
 
-    def _validate_node_use(self, node_cls: type,
-                           used: type) -> uuid_lib.UUID:
-        entry = self._by_class.get(used)
+    def __validate_node_use(self, node_cls: type,
+                            used: type) -> uuid_lib.UUID:
+        entry = self.__by_class.get(used)
         if entry is None:
             raise RegistryError(
                 f"{node_cls.__name__}: uses={used.__name__!r} which is not "
@@ -120,19 +120,19 @@ class Registry:
         return entry.type_uuid
 
     def lookup_by_uuid(self, type_uuid: uuid_lib.UUID) -> RegistryEntry:
-        return self._by_uuid[type_uuid]
+        return self.__by_uuid[type_uuid]
 
     def lookup_by_class(self, cls: type) -> RegistryEntry:
-        return self._by_class[cls]
+        return self.__by_class[cls]
 
     def try_lookup_by_class(self, cls: type) -> RegistryEntry | None:
-        return self._by_class.get(cls)
+        return self.__by_class.get(cls)
 
     def all_entries(self) -> Iterable[RegistryEntry]:
-        return self._by_uuid.values()
+        return self.__by_uuid.values()
 
     def nodes(self) -> Iterable[RegistryEntry]:
-        return (e for e in self._by_uuid.values() if e.kind == "node")
+        return (e for e in self.__by_uuid.values() if e.kind == "node")
 
 
 _default_registry = Registry()
