@@ -42,7 +42,7 @@ class JtagTmsWalker:
 
     State indexing intentionally collapses the DR/IR mirror sides into
     a single set of states (Capture/Shift/…); we track which side via
-    :attr:`_in_ir` set on entry to Capture.
+    an internal ``in_ir`` flag set on entry to Capture.
     """
 
     TLR = 0      # Test-Logic-Reset
@@ -75,18 +75,18 @@ class JtagTmsWalker:
         layer's capture window would mis-align by one if the pattern
         ever changed. Off by default — XVC and most other peers
         legitimately bundle the entry edge with payload."""
-        self._interface = interface
-        self._state = self.TLR
-        self._in_ir = False
-        self._warn_bundled_entry = warn_bundled_entry
+        self.__interface = interface
+        self.__state = self.TLR
+        self.__in_ir = False
+        self.__warn_bundled_entry = warn_bundled_entry
 
     @property
     def state(self) -> int:
-        return self._state
+        return self.__state
 
     @property
     def state_name(self) -> str:
-        return self.NAMES[self._state]
+        return self.NAMES[self.__state]
 
     async def process(self, tms, tdi) -> BitString:
         """Walk one batch of TMS+TDI bits, drive the interface, return TDO.
@@ -106,8 +106,8 @@ class JtagTmsWalker:
         # JoP shift command per bit), the very first bit of this call
         # belongs to the same Shift run. Start counting from offset 0
         # so it isn't silently dropped.
-        shift_start: int | None = (0 if self._state == self.SHIFT else None)
-        run_start: int | None = (0 if self._state == self.RTI else None)
+        shift_start: int | None = (0 if self.__state == self.SHIFT else None)
+        run_start: int | None = (0 if self.__state == self.RTI else None)
         # (future, start, end) — TDO output range that this Shift covers.
         slots: list[tuple[asyncio.Future, int, int]] = []
         # All futures we post, so we can gather and flush them before returning
@@ -115,18 +115,18 @@ class JtagTmsWalker:
         futures: list[asyncio.Future] = []
 
         def post(op):
-            fut = self._interface.post(op)
+            fut = self.__interface.post(op)
             futures.append(fut)
             return fut
 
         for i in range(n):
             tms_bit = int(tms[i])
-            next_state = self.NEXT_STATE[tms_bit][self._state]
+            next_state = self.NEXT_STATE[tms_bit][self.__state]
 
             # Leaving Shift: the current bit is already the boundary TMS=1
             # bit; acrobe's Shift consumes the entire segment (including its
             # last bit) and handles the Exit1 transition internally.
-            if self._state == self.SHIFT and next_state != self.SHIFT:
+            if self.__state == self.SHIFT and next_state != self.SHIFT:
                 segment = tdi[shift_start:i + 1]
                 fut = post(
                     jtag.Shift(segment, read_tdo=True))
@@ -134,7 +134,7 @@ class JtagTmsWalker:
                 shift_start = None
 
             # Leaving RTI: emit the run we accumulated.
-            if (self._state == self.RTI and next_state != self.RTI
+            if (self.__state == self.RTI and next_state != self.RTI
                     and run_start is not None):
                 cycles = i - run_start
                 if cycles > 0:
@@ -143,14 +143,14 @@ class JtagTmsWalker:
 
             # Leaving TLR towards real work: post a Reset to align the
             # acrobe interface with the peer's view.
-            if self._state == self.TLR and next_state != self.TLR:
+            if self.__state == self.TLR and next_state != self.TLR:
                 post(jtag.Reset())
 
             # Entering Capture: choose the right capture op and remember
             # which side we're on.
             if next_state == self.CAPTURE:
-                self._in_ir = (self._state == self.SEL_IR)
-                if self._in_ir:
+                self.__in_ir = (self.__state == self.SEL_IR)
+                if self.__in_ir:
                     post(jtag.CaptureIr())
                 else:
                     post(jtag.CaptureDr())
@@ -163,7 +163,7 @@ class JtagTmsWalker:
             # to acrobe.Shift would consume one extra bit from the chain
             # before the peer's capture window opens, off-setting every
             # subsequent capture.
-            if next_state == self.SHIFT and self._state != self.SHIFT:
+            if next_state == self.SHIFT and self.__state != self.SHIFT:
                 shift_start = i + 1
                 # Bundled-pattern warning: real Quartus traffic uses a
                 # separate JoP command for the entry edge, so the call
@@ -174,7 +174,7 @@ class JtagTmsWalker:
                 # capture window covering this command would mis-decrement
                 # by 1 at the entry bit's position. Flag it so a future
                 # tool that changes pattern is visible in logs.
-                if self._warn_bundled_entry and i + 1 < n:
+                if self.__warn_bundled_entry and i + 1 < n:
                     _logger.warning(
                         "JoP shift command bundles a Cap→Shift / Ex2→Shift "
                         "entry edge with %d subsequent shift bit(s). "
@@ -185,15 +185,15 @@ class JtagTmsWalker:
                         n - (i + 1))
 
             # Entering RTI: start a new run counter.
-            if next_state == self.RTI and self._state != self.RTI:
+            if next_state == self.RTI and self.__state != self.RTI:
                 run_start = i
 
-            self._state = next_state
+            self.__state = next_state
 
         # End-of-input: if still inside a run-state, flush it.
         # Skip when shift_start ≥ n — happens when the only Shift event in
         # the call was the entry edge (which is not a shift action).
-        if (self._state == self.SHIFT
+        if (self.__state == self.SHIFT
                 and shift_start is not None and shift_start < n):
             # Stream ended inside Shift — peer is drip-feeding bits and
             # hasn't sent the boundary TMS=1 yet. Acrobe.Shift exits to
@@ -204,7 +204,7 @@ class JtagTmsWalker:
             fut = post(jtag.Shift(segment, read_tdo=True))
             slots.append((fut, shift_start, n))
 
-        if (self._state == self.RTI
+        if (self.__state == self.RTI
                 and run_start is not None and run_start < n):
             post(jtag.Run(n - run_start))
 

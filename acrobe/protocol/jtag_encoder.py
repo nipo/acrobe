@@ -45,11 +45,11 @@ class JtagOpEncoder:
             raise ValueError(
                 f"initial_state must be one of {self.REST_STATES}, "
                 f"got {initial_state!r}")
-        self._state = initial_state
+        self.__state = initial_state
 
     @property
     def state(self) -> str:
-        return self._state
+        return self.__state
 
     def encode(self, ops: list) -> tuple[BitString, BitString, list[tuple]]:
         """Lower ``ops`` to (TMS, TDI, slots).
@@ -70,21 +70,21 @@ class JtagOpEncoder:
             next_op = ops[i + 1] if i + 1 < n else None
 
             if isinstance(op, (jtag.Reset, jtag.SwdToJtag)):
-                self._emit_tms_pattern(tms, tdi, op)
+                self.__emit_tms_pattern(tms, tdi, op)
 
             elif isinstance(op, jtag.Run):
-                self._emit_run(tms, tdi, op)
+                self.__emit_run(tms, tdi, op)
 
             elif isinstance(op, jtag.CaptureDr):
-                self._emit_enter_capture(tms, tdi, ir=False)
-                self._emit_capture_exit(tms, tdi, ir=False, next_op=next_op)
+                self.__emit_enter_capture(tms, tdi, ir=False)
+                self.__emit_capture_exit(tms, tdi, ir=False, next_op=next_op)
 
             elif isinstance(op, jtag.CaptureIr):
-                self._emit_enter_capture(tms, tdi, ir=True)
-                self._emit_capture_exit(tms, tdi, ir=True, next_op=next_op)
+                self.__emit_enter_capture(tms, tdi, ir=True)
+                self.__emit_capture_exit(tms, tdi, ir=True, next_op=next_op)
 
             elif isinstance(op, jtag.Shift):
-                self._emit_shift(tms, tdi, op, slots, next_op)
+                self.___emit_shift(tms, tdi, op, slots, next_op)
 
             else:
                 raise ValueError(
@@ -98,38 +98,38 @@ class JtagOpEncoder:
 
     # ----- per-op emitters ------------------------------------------------
 
-    def _emit_tms_pattern(self, tms: BitString, tdi: BitString, op) -> None:
+    def __emit_tms_pattern(self, tms: BitString, tdi: BitString, op) -> None:
         # Reset and SwdToJtag both expose a fixed TMS pattern via ``op.tms``
         # that ends with ≥5 ones, leaving the TAP in TLR. TDI is don't-care
         # — zero it for the whole stretch.
         tms.append(op.tms)
         tdi.append(0, len(op.tms))
-        self._state = self.TLR
+        self.__state = self.TLR
 
-    def _emit_run(self, tms: BitString, tdi: BitString,
-                  op: jtag.Run) -> None:
-        if self._state == self.TLR:
+    def __emit_run(self, tms: BitString, tdi: BitString,
+                   op: jtag.Run) -> None:
+        if self.__state == self.TLR:
             # TLR -[0]-> RTI. The Run cycles count from RTI.
             tms.append(0, 1)
             tdi.append(0, 1)
-            self._state = self.RTI
-        elif self._state == self.PAUSE:
+            self.__state = self.RTI
+        elif self.__state == self.PAUSE:
             # Pause -[1]-> Ex2 -[1]-> Update -[0]-> RTI.
             tms.append(0b011, 3)
             tdi.append(0, 3)
-            self._state = self.RTI
+            self.__state = self.RTI
 
         if op.cycles:
             tms.append(0, op.cycles)
             tdi.append(0, op.cycles)
         # Stay in RTI.
 
-    def _emit_enter_capture(self, tms: BitString, tdi: BitString,
-                            ir: bool) -> None:
+    def __emit_enter_capture(self, tms: BitString, tdi: BitString,
+                             ir: bool) -> None:
         """Walk from current rest state to Capture-DR/IR. Leaves the
         TAP at the Capture state itself — the Capture→Shift or
-        Capture→Exit1 edge is decided by :meth:`_emit_capture_exit`."""
-        if self._state == self.RTI:
+        Capture→Exit1 edge is decided by ``__emit_capture_exit``."""
+        if self.__state == self.RTI:
             if ir:
                 # RTI -[1]-> SelDR -[1]-> SelIR -[0]-> CaptureIR
                 tms.append(0b011, 3)
@@ -138,7 +138,7 @@ class JtagOpEncoder:
                 # RTI -[1]-> SelDR -[0]-> CaptureDR
                 tms.append(0b01, 2)
                 tdi.append(0, 2)
-        elif self._state == self.PAUSE:
+        elif self.__state == self.PAUSE:
             if ir:
                 # Pause -[1]-> Ex2 -[1]-> Update -[1]-> SelDR -[1]-> SelIR
                 #       -[0]-> CaptureIR  (5 bits)
@@ -148,7 +148,7 @@ class JtagOpEncoder:
                 # Pause -[1]-> Ex2 -[1]-> Update -[1]-> SelDR -[0]-> CaptureDR
                 tms.append(0b0111, 4)
                 tdi.append(0, 4)
-        elif self._state == self.TLR:
+        elif self.__state == self.TLR:
             if ir:
                 # TLR -[0]-> RTI -[1]-> SelDR -[1]-> SelIR -[0]-> CaptureIR
                 tms.append(0b0110, 4)
@@ -159,16 +159,16 @@ class JtagOpEncoder:
                 tdi.append(0, 3)
         else:
             raise RuntimeError(
-                f"unexpected state at Capture entry: {self._state}")
+                f"unexpected state at Capture entry: {self.__state}")
 
-    def _emit_capture_exit(self, tms: BitString, tdi: BitString,
-                           ir: bool, next_op) -> None:
+    def __emit_capture_exit(self, tms: BitString, tdi: BitString,
+                            ir: bool, next_op) -> None:
         """Decide the path off the Capture state.
 
         Three cases:
         * Next op is a Shift: Capture -[0]-> Shift. State becomes
           "in shift", but we don't track it explicitly — the next
-          iteration will hit :meth:`_emit_shift`, which assumes it
+          iteration will hit the shift emitter, which assumes it
           owns the Capture→Shift edge bit it just received.
         * Next op is another Capture / Run: Capture -[1]-> Exit1
           -[1]-> Update -[1]-> SelDR -[0]-> Capture (4 bits, same
@@ -181,26 +181,26 @@ class JtagOpEncoder:
         """
         if isinstance(next_op, jtag.Shift):
             # Capture -[0]-> Shift. Leaves the TAP in Shift state;
-            # _emit_shift handles the actual shifting from there.
+            # __emit_shift handles the actual shifting from there.
             tms.append(0, 1)
             tdi.append(0, 1)
             # Mark "we already emitted the Cap→Shift edge bit" via
-            # the sentinel state below. _emit_shift recognises it.
-            self._state = "_PRE_SHIFT"
+            # the sentinel state below. __emit_shift recognises it.
+            self.__state = "_PRE_SHIFT"
         elif isinstance(next_op, (jtag.CaptureDr, jtag.CaptureIr, jtag.Run)):
             # Identity trick: Capture-side path back to Capture is
             # 4 bits 0b0111, same as Pause→Capture. Pretend we're at
             # PAUSE so the next iteration walks the same TMS pattern
             # without us emitting anything here.
-            self._state = self.PAUSE
+            self.__state = self.PAUSE
         else:
             # Capture -[1]-> Exit1 -[1]-> Pause.
             tms.append(0b01, 2)
             tdi.append(0, 2)
-            self._state = self.PAUSE
+            self.__state = self.PAUSE
 
-    def _emit_shift(self, tms: BitString, tdi: BitString,
-                    op: jtag.Shift, slots: list, next_op) -> None:
+    def ___emit_shift(self, tms: BitString, tdi: BitString,
+                     op: jtag.Shift, slots: list, next_op) -> None:
         """Shift op.tdi bits, then exit toward whatever follows.
 
         Expects the TAP to be in Shift state already (entered by a
@@ -208,26 +208,26 @@ class JtagOpEncoder:
         bit) or in PAUSE (back-to-back Shift ops within one batch —
         rare, but legal).
         """
-        if self._state == self.PAUSE:
+        if self.__state == self.PAUSE:
             # Pause -[1]-> Ex2 -[0]-> Shift.
             tms.append(0b01, 2)
             tdi.append(0, 2)
-        elif self._state == "_PRE_SHIFT":
+        elif self.__state == "_PRE_SHIFT":
             # The Cap→Shift edge bit was already emitted by the
             # capture op's exit. We're in Shift now.
             pass
-        elif self._state == "_IN_SHIFT":
+        elif self.__state == "_IN_SHIFT":
             # Continuation of a previous Shift — already in Shift state,
             # no entry transition needed.
             pass
         else:
             raise RuntimeError(
-                f"Shift op not preceded by Capture/Pause: state={self._state}")
+                f"Shift op not preceded by Capture/Pause: state={self.__state}")
 
         length = len(op.tdi)
         if length == 0:
             # Degenerate but legal: nothing to shift, just exit.
-            self._exit_shift(tms, tdi, next_op, last_tdi_bit=0,
+            self.__exit_shift(tms, tdi, next_op, last_tdi_bit=0,
                              skipped_payload=True)
             return
 
@@ -245,12 +245,12 @@ class JtagOpEncoder:
         # last payload bit. We fold that into a single appended bit
         # together with whatever exit path comes next.
         last_tdi = int(op.tdi[length - 1])
-        self._exit_shift(tms, tdi, next_op, last_tdi_bit=last_tdi,
+        self.__exit_shift(tms, tdi, next_op, last_tdi_bit=last_tdi,
                          skipped_payload=False)
 
-    def _exit_shift(self, tms: BitString, tdi: BitString,
-                    next_op, last_tdi_bit: int,
-                    skipped_payload: bool) -> None:
+    def __exit_shift(self, tms: BitString, tdi: BitString,
+                     next_op, last_tdi_bit: int,
+                     skipped_payload: bool) -> None:
         """Emit the Shift→exit transition.
 
         ``last_tdi_bit`` is the final TDI value clocked in on the
@@ -270,7 +270,7 @@ class JtagOpEncoder:
             if not skipped_payload:
                 tms.append(0, 1)
                 tdi.append(last_tdi_bit, 1)
-            self._state = "_IN_SHIFT"
+            self.__state = "_IN_SHIFT"
             return
 
         if isinstance(next_op, (jtag.CaptureDr, jtag.CaptureIr, jtag.Run)):
@@ -287,7 +287,7 @@ class JtagOpEncoder:
                 # two are don't-care.
                 tdi.append(last_tdi_bit | 0, 1)
                 tdi.append(0, 2)
-            self._state = self.RTI
+            self.__state = self.RTI
         else:
             # Default rest path: Shift -[1]-> Exit1 -[1]-> Pause.
             if skipped_payload:
@@ -297,4 +297,4 @@ class JtagOpEncoder:
                 tms.append(0b01, 2)
                 tdi.append(last_tdi_bit, 1)
                 tdi.append(0, 1)
-            self._state = self.PAUSE
+            self.__state = self.PAUSE
