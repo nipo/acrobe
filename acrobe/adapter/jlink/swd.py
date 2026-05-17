@@ -138,7 +138,7 @@ class JLinkSwdInterface(swd.Interface):
 
     def __init__(self, transport, name: str = "swd"):
         super().__init__(name=name)
-        self._transport = transport
+        self.__transport = transport
 
     async def start(self):
         """Switch the J-Link to SWD mode and bring the line up.
@@ -148,9 +148,9 @@ class JLinkSwdInterface(swd.Interface):
         sensible default speed, then defers to
         :meth:`swd.Interface.start` for the chip-side wakeup (line
         reset + JTAG-to-SWD switch + DPIDR read + DP spawn)."""
-        await self._transport.select_interface(protocol.TIF_SWD)
-        await self._transport.deassert_reset()
-        await self._transport.set_speed_khz(1000)
+        await self.__transport.select_interface(protocol.TIF_SWD)
+        await self.__transport.deassert_reset()
+        await self.__transport.set_speed_khz(1000)
         await super().start()
 
     # Cap the per-chunk SWD bit-bang size: large batched mem-AP
@@ -194,7 +194,7 @@ class JLinkSwdInterface(swd.Interface):
             if not direction:
                 return
             try:
-                in_bytes = await self._transport.swd_io(
+                in_bytes = await self.__transport.swd_io(
                     _pack_bits(direction), _pack_bits(out),
                     len(direction))
             except Exception as exc:
@@ -240,7 +240,7 @@ class JLinkSwdInterface(swd.Interface):
                 continue
 
             if isinstance(op, swd.JtagToSwd):
-                self._emit_jtag_to_swd(direction, out)
+                self.__emit_jtag_to_swd(direction, out)
                 future.set_result(None)
                 continue
 
@@ -312,7 +312,7 @@ class JLinkSwdInterface(swd.Interface):
                     f"invalid ACK 0b{ack:03b} on {kind}"))
 
     @staticmethod
-    def _emit_jtag_to_swd(direction, out):
+    def __emit_jtag_to_swd(direction, out):
         """Append the JTAG→SWD switch sequence (matches crobe).
 
             1. ≥250 cycles SWDIO=1 (line reset)

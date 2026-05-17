@@ -50,8 +50,8 @@ class JtagJlink(jtag.JtagInterface):
 
     def __init__(self, transport: JLinkTransport, name: str = "jtag"):
         super().__init__(name=name)
-        self._transport = transport
-        self._state = self.STATE_UNKNOWN
+        self.__transport = transport
+        self.__state = self.STATE_UNKNOWN
 
     async def setup(self, freq_khz: int = 1000):
         """Switch the J-Link to JTAG mode, release the target's
@@ -60,10 +60,10 @@ class JtagJlink(jtag.JtagInterface):
         Without the reset deassertion, the target stays held in
         reset and TDO floats — chain discovery sees "TDO stuck
         high"."""
-        await self._transport.select_interface(protocol.TIF_JTAG)
-        await self._transport.deassert_reset()
-        await self._transport.set_speed_khz(freq_khz)
-        self._state = self.STATE_UNKNOWN
+        await self.__transport.select_interface(protocol.TIF_JTAG)
+        await self.__transport.deassert_reset()
+        await self.__transport.set_speed_khz(freq_khz)
+        self.__state = self.STATE_UNKNOWN
 
     async def flush_ops(self, batch):
         tms: list[int] = []
@@ -77,29 +77,29 @@ class JtagJlink(jtag.JtagInterface):
 
         for op, future in batch:
             if isinstance(op, (jtag.Reset, jtag.SwdToJtag)):
-                self._emit_pattern(tms, tdi, op.tms)
-                self._state = self.STATE_RESET
+                self.__emit_pattern(tms, tdi, op.tms)
+                self.__state = self.STATE_RESET
                 plain.append(future)
             elif isinstance(op, jtag.Run):
-                self._goto_rti(tms, tdi)
+                self.__goto_rti(tms, tdi)
                 # Run cycles in RTI = TMS=0 each cycle.
                 tms.extend([0] * op.cycles)
                 tdi.extend([0] * op.cycles)
                 plain.append(future)
             elif isinstance(op, jtag.CaptureDr):
-                self._goto_rti(tms, tdi)
+                self.__goto_rti(tms, tdi)
                 # RTI -> Sel-DR -> Cap-DR -> Ex1-DR -> Pause-DR
-                self._emit_tms(tms, tdi, [1, 0, 1, 0])
-                self._state = self.STATE_PAUSE
+                self.__emit_tms(tms, tdi, [1, 0, 1, 0])
+                self.__state = self.STATE_PAUSE
                 plain.append(future)
             elif isinstance(op, jtag.CaptureIr):
-                self._goto_rti(tms, tdi)
+                self.__goto_rti(tms, tdi)
                 # RTI -> Sel-DR -> Sel-IR -> Cap-IR -> Ex1-IR -> Pause-IR
-                self._emit_tms(tms, tdi, [1, 1, 0, 1, 0])
-                self._state = self.STATE_PAUSE
+                self.__emit_tms(tms, tdi, [1, 1, 0, 1, 0])
+                self.__state = self.STATE_PAUSE
                 plain.append(future)
             elif isinstance(op, jtag.Shift):
-                self._emit_shift(tms, tdi, shift_jobs, op, future, plain)
+                self.__emit_shift(tms, tdi, shift_jobs, op, future, plain)
             else:
                 future.set_exception(ValueError(
                     f"JtagJlink can't lower {type(op).__name__}"))
@@ -110,7 +110,7 @@ class JtagJlink(jtag.JtagInterface):
                     f.set_result(None)
             return
 
-        tdo_bytes = await self._transport.jtag_io(
+        tdo_bytes = await self.__transport.jtag_io(
             _pack_bits(tms), _pack_bits(tdi), len(tms))
         tdo = _unpack_bits(tdo_bytes, len(tms))
 
@@ -128,11 +128,11 @@ class JtagJlink(jtag.JtagInterface):
 
     # -- FSM helpers -----------------------------------------------
 
-    def _emit_tms(self, tms, tdi, bits):
+    def __emit_tms(self, tms, tdi, bits):
         tms.extend(bits)
         tdi.extend([0] * len(bits))
 
-    def _emit_pattern(self, tms, tdi, pattern: BitString):
+    def __emit_pattern(self, tms, tdi, pattern: BitString):
         """Append a TMS bit pattern (TDI = 0 throughout)."""
         v = int(pattern)
         n = len(pattern)
@@ -140,31 +140,31 @@ class JtagJlink(jtag.JtagInterface):
             tms.append((v >> i) & 1)
             tdi.append(0)
 
-    def _goto_rti(self, tms, tdi):
+    def __goto_rti(self, tms, tdi):
         """Move from the current state to Run-Test/Idle."""
-        if self._state == self.STATE_RTI:
+        if self.__state == self.STATE_RTI:
             return
-        if self._state == self.STATE_PAUSE:
+        if self.__state == self.STATE_PAUSE:
             # Pause -> Exit2 -> Update -> RTI: TMS = 1, 1, 0
-            self._emit_tms(tms, tdi, [1, 1, 0])
-        elif self._state == self.STATE_RESET:
+            self.__emit_tms(tms, tdi, [1, 1, 0])
+        elif self.__state == self.STATE_RESET:
             # TLR -> RTI: TMS = 0
-            self._emit_tms(tms, tdi, [0])
+            self.__emit_tms(tms, tdi, [0])
         else:  # UNKNOWN — do a full TLR first.
-            self._emit_tms(tms, tdi, [1, 1, 1, 1, 1, 0])
-        self._state = self.STATE_RTI
+            self.__emit_tms(tms, tdi, [1, 1, 1, 1, 1, 0])
+        self.__state = self.STATE_RTI
 
-    def _emit_shift(self, tms, tdi, shift_jobs, op, future, plain):
+    def __emit_shift(self, tms, tdi, shift_jobs, op, future, plain):
         """Lower a Shift op. Assumes we're in PAUSE state; will
         emit Pause -> Exit2 -> Shift transition on the way in and
         Exit1 -> Pause on the way out."""
-        if self._state != self.STATE_PAUSE:
+        if self.__state != self.STATE_PAUSE:
             future.set_exception(RuntimeError(
-                f"Shift from unexpected JTAG state {self._state!r}"))
+                f"Shift from unexpected JTAG state {self.__state!r}"))
             return
 
         # Pause -> Exit2 -> Shift: TMS = 1, 0
-        self._emit_tms(tms, tdi, [1, 0])
+        self.__emit_tms(tms, tdi, [1, 0])
 
         bit_start = len(tdi)
         v = int(op.tdi)
@@ -184,9 +184,9 @@ class JtagJlink(jtag.JtagInterface):
         bit_end = len(tdi)
 
         # Exit1 -> Pause: TMS=0
-        self._emit_tms(tms, tdi, [0])
+        self.__emit_tms(tms, tdi, [0])
 
-        self._state = self.STATE_PAUSE
+        self.__state = self.STATE_PAUSE
 
         if op.read_tdo:
             shift_jobs.append((future, bit_start, bit_end, n))

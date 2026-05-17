@@ -26,17 +26,17 @@ class JLinkTransport:
                  ep_out: BulkOutEndpoint, ep_in: BulkInEndpoint,
                  mps: int,
                  logger: logging.Logger):
-        self._device = device
-        self._interface = interface_index
-        self._ep_out = ep_out
-        self._ep_in = ep_in
-        self._mps = mps
-        self._lock = asyncio.Lock()
-        self._logger = logger
+        self.__device = device
+        self.__interface = interface_index
+        self.__ep_out = ep_out
+        self.__ep_in = ep_in
+        self.__mps = mps
+        self.__lock = asyncio.Lock()
+        self.__logger = logger
         # JTAG_IO_V3 (with status byte) is only available on hardware
         # major version ≥ 5; older OB hardware uses V2. Set by the
         # adapter after reading hardware_version.
-        self._jtag_io_v3 = False
+        self.jtag_io_v3 = False
 
     @classmethod
     async def from_device(cls, device, *,
@@ -49,7 +49,7 @@ class JLinkTransport:
             logger = logging.getLogger("jlink.transport")
 
         interface_index, ep_out_addr, ep_in_addr, mps = \
-            cls._find_interface(device)
+            cls.__find_interface(device)
 
         try:
             device.handle.detachKernelDriver(interface_index)
@@ -75,7 +75,7 @@ class JLinkTransport:
         return cls(device, interface_index, ep_out, ep_in, mps, logger)
 
     @staticmethod
-    def _find_interface(device):
+    def __find_interface(device):
         """Locate the J-Link's debug interface — first vendor-class
         interface with at least one bulk-OUT and one bulk-IN
         endpoint. Returns (interface_index, ep_out_addr, ep_in_addr,
@@ -108,10 +108,10 @@ class JLinkTransport:
 
     # -- Low-level write / read ------------------------------------
 
-    async def _write(self, data: bytes) -> None:
-        await self._ep_out.write(data)
+    async def __write(self, data: bytes) -> None:
+        await self.__ep_out.write(data)
 
-    async def _read(self, length: int) -> bytes:
+    async def __read(self, length: int) -> bytes:
         """Read at least ``length`` bytes from the bulk-IN endpoint.
 
         Issues MPS-sized reads in a loop and accumulates the result.
@@ -123,9 +123,9 @@ class JLinkTransport:
             return b""
         out = bytearray()
         while len(out) < length:
-            chunk = await self._ep_in.read(self._mps)
+            chunk = await self.__ep_in.read(self.__mps)
             out.extend(chunk)
-            if len(chunk) < self._mps:
+            if len(chunk) < self.__mps:
                 break
         return bytes(out[:length])
 
@@ -134,22 +134,22 @@ class JLinkTransport:
     async def get_firmware_version(self) -> str:
         """Read the firmware version string (e.g. "J-Link OB-K22-SiFive
         compiled Jan 14 2020 ...")."""
-        async with self._lock:
-            await self._write(bytes([protocol.CMD_GET_VERSION]))
-            length_bytes = await self._read(2)
+        async with self.__lock:
+            await self.__write(bytes([protocol.CMD_GET_VERSION]))
+            length_bytes = await self.__read(2)
             length = length_bytes[0] | (length_bytes[1] << 8)
             if length == 0:
                 return ""
-            data = await self._read(length)
+            data = await self.__read(length)
         return data.rstrip(b"\x00").decode("utf-8", errors="replace")
 
     async def get_hardware_version(self) -> tuple[int, int, int, int]:
         """Returns (type, major, minor, revision). Encoded as a 32-bit
         LE integer: type * 1_000_000 + major * 10_000 + minor * 100 +
         revision."""
-        async with self._lock:
-            await self._write(bytes([protocol.CMD_GET_HW_VERSION]))
-            data = await self._read(4)
+        async with self.__lock:
+            await self.__write(bytes([protocol.CMD_GET_HW_VERSION]))
+            data = await self.__read(4)
         v = (data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24))
         return (v // 1_000_000,
                 (v // 10_000) % 100,
@@ -159,38 +159,38 @@ class JLinkTransport:
     async def get_caps(self) -> bytes:
         """Read the 32-bit capability bitmap. Returns 4 bytes
         little-endian."""
-        async with self._lock:
-            await self._write(bytes([protocol.CMD_GET_CAPS]))
-            return await self._read(4)
+        async with self.__lock:
+            await self.__write(bytes([protocol.CMD_GET_CAPS]))
+            return await self.__read(4)
 
     async def get_ext_caps(self) -> bytes:
         """Read the 256-bit extended capability bitmap. Returns 32
         bytes."""
-        async with self._lock:
-            await self._write(bytes([protocol.CMD_GET_EXT_CAPS]))
-            return await self._read(32)
+        async with self.__lock:
+            await self.__write(bytes([protocol.CMD_GET_EXT_CAPS]))
+            return await self.__read(32)
 
     async def select_interface(self, tif: int) -> int:
         """Switch the target interface (JTAG / SWD / ...). Returns
         the previously-selected interface."""
-        async with self._lock:
-            await self._write(bytes([protocol.CMD_SELECT_TIF, tif & 0xFF]))
-            data = await self._read(4)
+        async with self.__lock:
+            await self.__write(bytes([protocol.CMD_SELECT_TIF, tif & 0xFF]))
+            data = await self.__read(4)
         return data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24)
 
     async def get_available_interfaces(self) -> int:
         """Returns the bitmap of supported interfaces (bit 0=JTAG,
         bit 1=SWD, ...)."""
-        async with self._lock:
-            await self._write(bytes([protocol.CMD_SELECT_TIF,
+        async with self.__lock:
+            await self.__write(bytes([protocol.CMD_SELECT_TIF,
                                      protocol.TIF_GET_AVAILABLE]))
-            data = await self._read(4)
+            data = await self.__read(4)
         return data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24)
 
     async def set_speed_khz(self, speed_khz: int) -> None:
         """Set the JTAG/SWD clock speed in kHz."""
-        async with self._lock:
-            await self._write(bytes([
+        async with self.__lock:
+            await self.__write(bytes([
                 protocol.CMD_SET_SPEED,
                 speed_khz & 0xFF,
                 (speed_khz >> 8) & 0xFF,
@@ -206,10 +206,10 @@ class JLinkTransport:
         GET_SPEEDS has been issued at least once. (JLinkExe always
         runs it during init; we now do too.) Caller's responsibility
         to gate on :data:`CAP_SPEED_INFO`."""
-        async with self._lock:
-            await self._write(bytes([protocol.CMD_GET_SPEEDS]))
-            data = await self._read(6)
-            self._logger.debug("GET_SPEEDS raw: %s (len=%d)",
+        async with self.__lock:
+            await self.__write(bytes([protocol.CMD_GET_SPEEDS]))
+            data = await self.__read(6)
+            self.__logger.debug("GET_SPEEDS raw: %s (len=%d)",
                                data.hex(), len(data))
         base_freq = (data[0] | (data[1] << 8)
                      | (data[2] << 16) | (data[3] << 24))
@@ -238,12 +238,12 @@ class JLinkTransport:
             "<BBIIBBH",
             protocol.CMD_REGISTER, sub, os.getpid() & 0xFFFFFFFF,
             0, 0, 0, handle & 0xFFFF)
-        async with self._lock:
-            await self._write(payload)
+        async with self.__lock:
+            await self.__write(payload)
             # Response is variable length — read one MPS-or-larger
             # buffer; the loop terminates on the device's short-packet
             # marker.
-            resp = await self._read(2048)
+            resp = await self.__read(2048)
         if len(resp) < 8:
             raise protocol.JLinkError(
                 f"REGISTER short response: got {len(resp)} bytes")
@@ -261,9 +261,9 @@ class JLinkTransport:
     async def get_hw_status(self) -> dict:
         """Read the 8-byte hardware status block: target voltage in
         mV plus pin states (TCK, TDI, TDO, TMS, TRES, TRST)."""
-        async with self._lock:
-            await self._write(bytes([protocol.CMD_GET_HW_STATUS]))
-            data = await self._read(8)
+        async with self.__lock:
+            await self.__write(bytes([protocol.CMD_GET_HW_STATUS]))
+            data = await self.__read(8)
         return {
             "target_voltage_mv": data[0] | (data[1] << 8),
             "tck": data[2], "tdi": data[3], "tdo": data[4],
@@ -272,13 +272,13 @@ class JLinkTransport:
 
     async def assert_reset(self) -> None:
         """Drive nRST low (assert reset)."""
-        async with self._lock:
-            await self._write(bytes([protocol.CMD_HW_RESET0]))
+        async with self.__lock:
+            await self.__write(bytes([protocol.CMD_HW_RESET0]))
 
     async def deassert_reset(self) -> None:
         """Drive nRST high (release reset)."""
-        async with self._lock:
-            await self._write(bytes([protocol.CMD_HW_RESET1]))
+        async with self.__lock:
+            await self.__write(bytes([protocol.CMD_HW_RESET1]))
 
     async def jtag_io(self, tms: bytes, tdi: bytes,
                       bit_count: int) -> bytes:
@@ -295,26 +295,26 @@ class JLinkTransport:
             raise ValueError(
                 f"jtag_io: tms/tdi length mismatch "
                 f"(bit_count={bit_count}, expected {num_bytes} bytes)")
-        opcode = (protocol.CMD_JTAG_IO_V3 if self._jtag_io_v3
+        opcode = (protocol.CMD_JTAG_IO_V3 if self.jtag_io_v3
                   else protocol.CMD_JTAG_IO_V2)
         # V3 appends a status byte to the response; V2 does not.
-        resp_size = num_bytes + 1 if self._jtag_io_v3 else num_bytes
+        resp_size = num_bytes + 1 if self.jtag_io_v3 else num_bytes
         cmd = bytes([opcode, 0,
                      bit_count & 0xFF, (bit_count >> 8) & 0xFF])
-        async with self._lock:
-            self._logger.protocol(
+        async with self.__lock:
+            self.__logger.protocol(
                 "JTAG_IO bits=%d tms=%s tdi=%s",
                 bit_count, tms[:8].hex(), tdi[:8].hex())
-            await self._write(cmd + tms + tdi)
-            resp = await self._read(resp_size)
-            self._logger.protocol(
+            await self.__write(cmd + tms + tdi)
+            resp = await self.__read(resp_size)
+            self.__logger.protocol(
                 "JTAG_IO tdo=%s (%d bytes)",
                 resp[:8].hex(), len(resp))
         if len(resp) < resp_size:
             raise protocol.JLinkError(
                 f"JTAG_IO short response: got {len(resp)} bytes, "
                 f"expected {resp_size}")
-        if self._jtag_io_v3:
+        if self.jtag_io_v3:
             status = resp[num_bytes]
             if status != 0:
                 raise protocol.JLinkError(
@@ -342,6 +342,6 @@ class JLinkTransport:
 
     async def close(self) -> None:
         try:
-            self._device.handle.releaseInterface(self._interface)
+            self.__device.handle.releaseInterface(self.__interface)
         except Exception:
             pass

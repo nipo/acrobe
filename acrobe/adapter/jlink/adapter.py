@@ -49,15 +49,15 @@ class JLinkAdapter(Adapter):
                  hardware_version: tuple[int, int, int, int],
                  caps: bytes, register_handle: int | None):
         super().__init__(name)
-        self._info = info
-        self._device = device
-        self._transport = transport
+        self.__info = info
+        self.__device = device
+        self.__transport = transport
         self.firmware_version = firmware_version
         self.hardware_version = hardware_version
         self.caps = caps
         # Connection handle returned by CMD_REGISTER, if we claimed
         # one. Closed back out via CMD_REGISTER(unregister) on close.
-        self._register_handle = register_handle
+        self.__register_handle = register_handle
 
     @classmethod
     async def open(cls, descriptor) -> "JLinkAdapter":
@@ -95,7 +95,7 @@ class JLinkAdapter(Adapter):
         # JTAG_IO_V3 (with per-transaction status byte) is only
         # available on hardware major version ≥ 5; older OB
         # hardware uses V2 with a fixed-length TDO-only response.
-        transport._jtag_io_v3 = hardware_version[1] >= 5
+        transport.jtag_io_v3 = hardware_version[1] >= 5
 
         # Claim a connection handle if the firmware supports it.
         # JLinkExe and crobe both do this unconditionally when
@@ -164,26 +164,26 @@ class JLinkAdapter(Adapter):
     async def child_spawn(self, name):
         if name == "jtag":
             from .jtag import JtagJlink
-            jtag = JtagJlink(self._transport, name="jtag")
+            jtag = JtagJlink(self.__transport, name="jtag")
             await jtag.setup(freq_khz=1000)
             return jtag
         if name == "swd":
             from .swd import JLinkSwdInterface
-            return JLinkSwdInterface(self._transport, name="swd")
+            return JLinkSwdInterface(self.__transport, name="swd")
         raise NoMatch("interface", name)
 
     async def close(self):
-        if self._register_handle is not None:
+        if self.__register_handle is not None:
             try:
-                await self._transport.register(False, self._register_handle)
+                await self.__transport.register(False, self.__register_handle)
             except Exception:
                 # Best-effort: a failed unregister shouldn't prevent
                 # USB cleanup. The firmware times out stale handles
                 # on its own.
                 pass
-            self._register_handle = None
-        await self._transport.close()
-        self._device.handle.close()
+            self.__register_handle = None
+        await self.__transport.close()
+        self.__device.handle.close()
 
 
 for _info in _JLINK_INFOS:
