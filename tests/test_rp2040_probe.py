@@ -127,9 +127,9 @@ class TestProbeShape:
         """User-on-demand: `target.child_summon('spi')` recreates the
         SPI subtree using the Target's puppet."""
         target, _, _ = await build_target()
-        from acrobe.component.raspberry.spi import PicobootSpiInterface
+        from acrobe.component.raspberry.spi import Rp2040Spi
         spi = await target.child_summon("spi")
-        assert isinstance(spi, PicobootSpiInterface)
+        assert isinstance(spi, Rp2040Spi)
         assert spi.puppet is target.puppet
 
     @pytest.mark.asyncio

@@ -1,5 +1,10 @@
-"""SPI passthrough over PICOBOOT — drives the RP2040's QSPI flash
-pins as a generic SPI bus by running a stub on the target.
+"""SPI passthrough over the RP2040 QSPI flash pins.
+
+Drives the chip's QSPI bus as a generic SPI bus by running a stub
+on the chip. The transport is any :class:`Puppet` implementation
+— PICOBOOT (bootrom puppet over USB) and SWD (ArmMPuppet over the
+Cortex-M cores) both work unchanged. The Puppet protocol is the
+only contract.
 
 The stub (`flash_spi_transact`) walks a command array in target RAM
 and processes one entry at a time:
@@ -17,23 +22,25 @@ Reference C source: crobe ``firmware/flash/stubs/arm/rp2040.c``.
 Compiled bytes (Thumb-1, 124 bytes) reused here verbatim with a
 4-byte placeholder (``0xdeadbee0``) the host patches per
 transaction to point at the command array. The stub runs through a
-:class:`PicobootPuppet` — the puppet uploads it, sets the entry
-point, runs it via PICOBOOT EXEC, and the stub returns when it
-encounters a null-size command.
+:class:`Puppet` — the puppet uploads it, sets the entry point,
+runs it, and the stub returns when it encounters a null-size
+command.
 
-Per crobe's experience: ``exit_xip`` is required before the first
-transfer because the bootrom leaves SSI configured for XIP reads,
-and the stub assumes manual SR-polled transfers.
+The SSI block needs an `exit_xip` bring-up before the first
+transfer: the bootrom leaves SSI configured for XIP reads, the
+stub assumes manual SR-polled transfers. Bring-up is supplied by
+the caller as an async callable — see the comment on
+:class:`Rp2040Spi.__init__`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import struct
+from typing import Awaitable, Callable
 
-from ...db import NoMatch
 from ...protocol import spi
-from .picoboot import Picoboot, PicobootPuppet
+from ...target.puppet import Puppet
 
 
 # Placeholder the stub patches per call. Replaced by the host with
@@ -57,34 +64,35 @@ CMD_CS_LOW  = 0x80000000
 CMD_CS_HIGH = 0x80000001
 
 
-class PicobootSpiInterface(spi.Interface):
+class Rp2040Spi(spi.Interface):
     """RP2040 QSPI flash pins as an `spi.Interface`, driven by a
     stub on the chip.
 
-    Constructed by `Rp2040Target.child_spawn("spi")` with the
-    Target's puppet — there is exactly one puppet per chip
-    lifetime, owned by the Target, and every code path that needs
-    to run on-target stubs (SPI passthrough, future SFDP probe,
-    Loadable-side helpers) shares that allocator. Constructing
-    multiple puppets against the same SRAM would race their
-    allocators.
+    Works over any :class:`Puppet` implementation — PICOBOOT, SWD
+    via :class:`ArmMPuppet`, future transports. Constructed with a
+    puppet plus an ``ssi_init`` async callable: the latter is the
+    transport-specific way of putting the SSI block into the
+    manual SR-polled configuration the stub assumes (bootrom's
+    ``exit_xip`` from PICOBOOT, a rom-table-lookup + bootrom call
+    sequence from SWD).
 
     Adds a single `spi.Target` child named ``cs0`` since RP2040's
     QSPI block has one CSn pin.
 
     Multi-Shift CS-held transactions become a single stub call:
     Cs(0) + N×Shift + Cs(None) → one packed command array, one
-    PICOBOOT EXEC. The host pays one USB round-trip for the whole
+    puppet exec. The host pays one wire round-trip for the whole
     transaction instead of one per shift.
     """
 
     EXEC_TIMEOUT_S = 30.0
 
-    def __init__(self, picoboot: Picoboot, puppet: PicobootPuppet,
+    def __init__(self, puppet: Puppet,
+                 ssi_init: Callable[[], Awaitable[None]],
                  name: str = "spi"):
         super().__init__(adapter=None, name=name)
-        self.picoboot = picoboot
         self.puppet = puppet
+        self.__ssi_init = ssi_init
         self.__marker_offset = SPI_TRANSACT_STUB.index(
             PLACEHOLDER.to_bytes(4, "little"))
         self.__stub_zone = None
@@ -96,20 +104,20 @@ class PicobootSpiInterface(spi.Interface):
 
     async def __setup_ssi(self):
         # Take SSI out of XIP mode and into the manual SR-polled
-        # configuration the stub assumes. The bootrom's EXIT_XIP
-        # command is idempotent and reconfigures SSI registers
-        # (CTRL0, BAUDR, SSIENR), so calling it twice does no
-        # harm — we treat it as the defensive opener before any
-        # stub call, not a one-shot setup.
-        self.logger.protocol("SSI exit_xip + setup")
-        await self.picoboot.transport.exit_xip()
+        # configuration the stub assumes. The transport's exit_xip
+        # equivalent is expected to be idempotent — we treat it as
+        # a defensive opener before any stub call, not a one-shot
+        # setup.
+        self.logger.protocol("SSI bring-up")
+        await self.__ssi_init()
 
     async def __ensure_stub(self):
         if self.__stub_zone is not None:
             return
         self.__stub_zone = self.puppet.allocate(
             len(SPI_TRANSACT_STUB), align=4)
-        await self.__stub_zone.write(SPI_TRANSACT_STUB)
+        await self.puppet.mem_write(
+            self.__stub_zone.address, SPI_TRANSACT_STUB)
         self.logger.protocol(
             "SPI stub installed at 0x%08x (%d bytes)",
             self.__stub_zone.address, len(SPI_TRANSACT_STUB))
@@ -139,7 +147,7 @@ class PicobootSpiInterface(spi.Interface):
                     op, future))
             else:
                 future.set_exception(NotImplementedError(
-                    f"PicobootSpi: unsupported op {op!r}"))
+                    f"Rp2040Spi: unsupported op {op!r}"))
 
         if not entries:
             return
@@ -161,12 +169,12 @@ class PicobootSpiInterface(spi.Interface):
                 entries, tx_base, rx_base)
 
             # Upload cmd array + tx data in one bulk write.
-            await self.puppet.transport.write(
+            await self.puppet.mem_write(
                 cmd_buf_addr, bytes(cmd_bytes) + bytes(tx_blob))
 
             # Patch the stub's placeholder with the cmd-array
             # address. One 4-byte mem_write at a known offset.
-            await self.puppet.transport.write(
+            await self.puppet.mem_write(
                 self.__stub_zone.address + self.__marker_offset,
                 cmd_buf_addr.to_bytes(4, "little"))
 
@@ -175,8 +183,7 @@ class PicobootSpiInterface(spi.Interface):
             await self.puppet.wait(timeout=self.EXEC_TIMEOUT_S)
 
             if rx_total > 0:
-                rx_data = await self.puppet.transport.read(
-                    rx_base, rx_total)
+                rx_data = await self.puppet.mem_read(rx_base, rx_total)
             else:
                 rx_data = b""
 

@@ -74,9 +74,13 @@ class Rp2040Target(CortexMTarget):
 
     async def child_spawn(self, name):
         if name == "spi":
-            from ...component.raspberry.spi import PicobootSpiInterface
-            return PicobootSpiInterface(
-                self.picoboot, self.puppet, name="spi")
+            from ...component.raspberry.spi import Rp2040Spi
+            # PICOBOOT transport exposes EXIT_XIP as a vendor USB
+            # command — no on-target stub work needed here.
+            return Rp2040Spi(
+                self.puppet,
+                ssi_init=self.picoboot.transport.exit_xip,
+                name="spi")
         return await super().child_spawn(name)
 
 

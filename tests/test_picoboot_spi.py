@@ -1,4 +1,4 @@
-"""Tests for `PicobootSpiInterface` — the on-target SPI passthrough
+"""Tests for `Rp2040Spi` — the on-target SPI passthrough
 stub driven through PICOBOOT.
 
 The mock transport interprets each PICOBOOT EXEC as "run the SPI
@@ -17,7 +17,7 @@ import pytest
 
 from acrobe.component.raspberry.picoboot import Picoboot, PicobootPuppet
 from acrobe.component.raspberry.spi import (
-    PicobootSpiInterface, SPI_TRANSACT_STUB, PLACEHOLDER,
+    Rp2040Spi, SPI_TRANSACT_STUB, PLACEHOLDER,
     CMD_CS_LOW, CMD_CS_HIGH,
 )
 from acrobe.protocol import spi
@@ -105,7 +105,7 @@ def make_iface():
     picoboot = Picoboot(transport)
     ram = Ram("sram", 0x20000000, 0x42000 - 0x1000)
     puppet = PicobootPuppet("puppet", ram, picoboot)
-    iface = PicobootSpiInterface(picoboot, puppet)
+    iface = Rp2040Spi(puppet, ssi_init=transport.exit_xip)
     return iface, transport
 
 
