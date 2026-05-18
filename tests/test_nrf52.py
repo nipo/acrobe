@@ -307,8 +307,20 @@ class TestNvmcFlash:
 class FakeDp(Node):
     """Minimal DP stub for the discovery probe."""
 
-    def __init__(self, name="dp"):
+    def __init__(self, name="dp", *,
+                 partid=None):
         super().__init__(name)
+        # Default to the nRF52840 TARGETID-family PartId so the
+        # tests that don't care about chip identity still satisfy
+        # the factory's "I have a Nordic PartId" assumption.
+        from acrobe.part_id import PartId
+        from acrobe.component.arm.dp import ChipId
+        if partid is None:
+            partid = PartId(2, 0x44, 8)  # nRF52840 family
+        self.__chip_id = ChipId(partid=partid, source="test")
+
+    def chip_id(self):
+        return self.__chip_id
 
 
 class FakeCtrlAp(CtrlAp):
@@ -389,16 +401,25 @@ class TestNrf52Probe:
         assert ranges["ahb"]  == (0x50000000, 0x80000)
 
     @pytest.mark.asyncio
-    async def test_unknown_part_declines(self):
-        dp = FakeDp()
+    async def test_unknown_part_falls_back_to_family_name(self):
+        """When the constant-PartId match has already confirmed
+        Nordic family but FICR.INFO.PART advertises an unknown SKU,
+        the factory still builds a Target — uses the
+        TARGETID-derived family name as fallback."""
+        dp = FakeDp()  # default Nordic nRF52840-family PartId
         ap = MockAp(part=0xDEADBEEF)
         dp.child_add(ap)
         _make_rom_table_with_scs(ap)
-        with pytest.raises(NoMatch):
-            await nrf52_probe(dp)
+        target = await nrf52_probe(dp)
+        assert isinstance(target, Nrf52Target)
+        # nRF52840 family fallback, suffixed by the (zero) MAC.
+        assert "nRF52840" in target.name
 
     @pytest.mark.asyncio
     async def test_ficr_failure_declines(self):
+        """When every MemAp child fails to report FICR (e.g. AP
+        in fault), the factory declines with NoMatch so a higher-
+        level recovery path can take over."""
         dp = FakeDp()
         ap = MockAp()
         ap.ficr_part_fails = True

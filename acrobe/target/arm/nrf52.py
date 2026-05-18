@@ -11,10 +11,13 @@ Mass-erase via CTRL-AP stays on its dedicated AP path (one-shot,
 faster + works through APPROTECT). UICR erase keeps the direct
 NVMC.ERASEUICR write (also one-shot).
 
-Detection runs against the AHB-AP under each DP: read
-FICR.INFO.PART (0x10000100) and match against the known
-part-number table. Unknown parts decline so the generic
-Cortex-M target picks them up.
+Discovery: register Nordic's per-family TARGETID PartIds against
+:data:`ArmSocTarget.db`. The generic ARM SoC explorer
+(:func:`acrobe.target.arm.soc.arm_soc_probe`) does the constant
+match and dispatches into :func:`nrf52_probe`. The factory then
+checks CTRL-AP for APPROTECT — only chips that already passed the
+PartId match read FICR for SKU refinement, so a stuck or
+unrecognised chip can never trigger a speculative FICR read.
 """
 
 from __future__ import annotations
@@ -23,18 +26,19 @@ import asyncio
 
 from ...component.arm.coresight.rom_table import RomTable
 from ...component.arm.coresight.scs import Scs
-from ...component.arm.dp import Dp, DpAccessFailure
+from ...component.arm.dp import DpAccessFailure
 from ...component.arm.memory import BusRam
 from ...component.arm.mem_ap import MemAp
 from ...component.nordic.ctrl_ap import CtrlAp
 from ...db import NoMatch
+from ...part_id import PartId
 from ..debuggable import Debuggable
 from ..loadable import Loadable
 from ..memory import Memory
 from ..puppet import ArmMPuppet, PagedPuppetWriter
 from ..region import Flash, Ram
-from ..target import Target
-from .cortex_m import CortexMDebuggable, CortexMTarget
+from .cortex_m import CortexMDebuggable
+from .soc import ArmSocTarget
 
 
 # Stub blobs from crobe firmware/flash/stubs/arm/nrf51.c. Calling
@@ -79,7 +83,9 @@ FICR_INFO_FLASH   = FICR_BASE + 0x110
 
 UICR_BASE = 0x10001000
 
-# Known nRF52 family part numbers (from FICR.INFO.PART).
+# Known nRF52 family part numbers (from FICR.INFO.PART). Used to
+# refine the chip name after the constant-PartId match has already
+# confirmed the chip is from the Nordic nRF5x family.
 NRF52_PARTS = {
     0x52805: "nRF52805",
     0x52810: "nRF52810",
@@ -88,6 +94,30 @@ NRF52_PARTS = {
     0x52832: "nRF52832",
     0x52833: "nRF52833",
     0x52840: "nRF52840",
+}
+
+# Nordic TARGETID per-family encoding. JEDEC continuation=2,
+# id=0x44 (Nordic Semi); PARTNO distinguishes the family. Source:
+# crobe `target/soc/arm_based/nrf5.py`. One TARGETID covers
+# multiple SKUs (e.g. nRF52805/810/811 all share PARTNO 0x10);
+# FICR.INFO.PART refines them at factory time.
+NRF52_TARGETIDS: tuple[PartId, ...] = (
+    PartId(2, 0x44, 6),     # nRF52832 family
+    PartId(2, 0x44, 8),     # nRF52840 family
+    PartId(2, 0x44, 0xd),   # nRF52833 family
+    PartId(2, 0x44, 0xe),   # nRF52820 family
+    PartId(2, 0x44, 0x10),  # nRF52805 / 810 / 811 family
+)
+
+# Fallback family name when FICR can't be read (locked chip) or
+# advertises an SKU we don't have a precise label for. Keyed on the
+# Nordic TARGETID PARTNO.
+NRF52_FAMILY_NAME = {
+    6:    "nRF52832 family",
+    8:    "nRF52840 family",
+    0xd:  "nRF52833 family",
+    0xe:  "nRF52820 family",
+    0x10: "nRF52810 family",
 }
 
 
@@ -326,25 +356,25 @@ class Nrf52Loadable(Loadable):
         return debuggables[0].cores[0]
 
 
-class Nrf52Target(CortexMTarget):
+class Nrf52Target(ArmSocTarget):
     """nRF52 family target — Cortex-M4 (M4F on -840/-833) with NVMC
     flash programming."""
 
 
-@Target.register(Dp, precedence=500)
+@ArmSocTarget.db.register(*NRF52_TARGETIDS)
 async def nrf52_probe(dp):
-    """Probe a DP for an nRF52-family chip.
+    """Build an nRF52 Target from a Dp whose TARGETID has already
+    matched the Nordic family.
 
-    Two paths:
+    Flow:
 
     1. CTRL-AP reports APPROTECT enabled → build a *locked* Target
        that exposes only erase-all via CTRL-AP. Avoids the silent
        failure of an FICR read on a locked chip.
 
     2. APPROTECT clear (or no CTRL-AP at all): walk Mem-AP children,
-       read FICR.INFO.PART, match against the known part table.
-       Declines (NoMatch) for unknown parts so the generic Cortex-M
-       target catches them.
+       read FICR for the precise SKU + flash/RAM geometry, build
+       the full Target.
     """
     ctrl_aps = dp.children_of_class(CtrlAp)
     ctrl_ap = ctrl_aps[0] if ctrl_aps else None
@@ -365,10 +395,22 @@ async def nrf52_probe(dp):
             part = await ap.read32(FICR_INFO_PART)
         except DpAccessFailure:
             continue
-        if part not in NRF52_PARTS:
-            continue
+        # Constant-PartId already confirmed Nordic family; FICR
+        # refines the SKU name. Unknown FICR values are a future
+        # SKU we don't have a name for — keep going rather than
+        # decline.
         return await _build_nrf52_target(dp, ap, part, ctrl_ap)
-    raise NoMatch("nrf52_probe", "no nRF52 found behind DP")
+    raise NoMatch("nrf52_probe", "no MemAp responded behind DP")
+
+
+def _nrf52_family_name(dp) -> str:
+    """Best-available Nordic family name when FICR is unreadable
+    (locked chip). Looks up the Nordic TARGETID PARTNO against the
+    family table; falls back to a generic label."""
+    chip = dp.chip_id()
+    if chip is None:
+        return "nRF52 (locked)"
+    return NRF52_FAMILY_NAME.get(chip.partid.part_no, "nRF52 (locked)")
 
 
 def _build_locked_target(dp, ctrl_ap):
@@ -379,7 +421,8 @@ def _build_locked_target(dp, ctrl_ap):
     the user can mass-erase via `chip program --erase` or
     `chip erase-all`.
     """
-    target = Nrf52Target("nRF52 (APPROTECT locked)")
+    family = _nrf52_family_name(dp)
+    target = Nrf52Target(f"{family} (APPROTECT locked)")
     target.claim(dp, ctrl_ap)
     target.logger.warning(
         "APPROTECT is enabled — debug + flash read/write are blocked. "
@@ -406,8 +449,12 @@ async def _build_nrf52_target(dp, ap, part, ctrl_ap):
         raise NoMatch("nrf52_probe", "no SCS under MemAp")
 
     # Suffix with the factory BLE address so multiple identically-
-    # modelled chips parent at distinct paths under HwRoot.
-    name = f"{NRF52_PARTS[part]}-{bdaddr:012x}"
+    # modelled chips parent at distinct paths under HwRoot. The
+    # PartId match has already confirmed Nordic family; FICR.PART
+    # refines the SKU — unknown values fall back to the
+    # TARGETID-derived family label.
+    sku = NRF52_PARTS.get(part, _nrf52_family_name(dp))
+    name = f"{sku}-{bdaddr:012x}"
     target = Nrf52Target(name)
     target.claim(dp, ap, rt)
     if ctrl_ap is not None:
