@@ -192,12 +192,16 @@ class Interface(Batcher, FreqCapper, Node):
     """SWD wire interface.
 
     Concrete subclasses (e.g. :class:`acrobe.adapter.jlink.swd.JLinkSwdInterface`,
-    :class:`acrobe.adapter.cmsisdap.swd.CmsisDapSwdInterface`) implement
-    :meth:`flush_ops` to translate batched swd ops into adapter-specific
-    USB transactions. Subclasses that need adapter-side setup (mode
-    select, default clock, …) override :meth:`start` and call
-    ``await super().start()`` at the end so the base wire init runs
-    once the adapter is ready.
+    :class:`acrobe.adapter.ftdi.swd.SwdMpsse`) implement raw bit-bang
+    SWD: :meth:`flush_ops` translates batched swd ops into wire packets
+    one-for-one. Adapters whose firmware hardens an ADI command set
+    (CMSIS-DAP's DAP_Transfer, ST-Link) sit *above* this layer — they
+    register :class:`acrobe.component.arm.dp.Dp` subclasses directly
+    and never touch the swd.Interface abstraction.
+
+    Subclasses that need adapter-side setup (mode select, default
+    clock, …) override :meth:`start` and call ``await super().start()``
+    at the end so the base wire init runs once the adapter is ready.
 
     Mixes in :class:`FreqCapper` so the wire frequency is always the
     minimum of named constraints (hardware ceiling, user ``fmax``,

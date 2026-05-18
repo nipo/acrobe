@@ -138,9 +138,9 @@ class CmsisDapAdapter(Adapter):
 
     async def child_spawn(self, name):
         if name == "swd":
-            from .swd import CmsisDapSwdInterface
-            return CmsisDapSwdInterface(self.__transport, self.capabilities,
-                                        name="swd")
+            from .swd import CmsisDapSwDp
+            return CmsisDapSwDp(self.__transport, self.capabilities,
+                                name="swd")
         if name == "jtag":
             # JTAG slot reserved — implementation lands in a follow-up
             # commit. CMSIS-DAP supports it via DAP_JTAG_Sequence /
