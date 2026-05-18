@@ -319,31 +319,48 @@ class SwdMpsse(swd.Interface):
         # Per-record: [user_future, kind, ack_op, data_op_or_None,
         #              parity_op_or_None].
         records: list[list] = []
-        # Pending AP read whose data lives in the *next* read.
+        # Pending AP read whose data still lives on the chip-side
+        # latch. Per IHI0031G §B4.2 the latch is preserved across
+        # DP non-RDBUFF reads but DESTROYED by any write (AP or DP),
+        # by line-reset / dormant / mode-switch sequences, and (of
+        # course) drained by a DP RDBUFF read or by the next AP
+        # read's response slot.
         pending: list | None = None
 
-        def fill_pending_with(read_data_op, read_par_op):
+        def drain_pending_via_rdbuff():
+            """Issue a DP RDBUFF read to extract a pending AP-read
+            result before something else destroys it on the chip."""
             nonlocal pending
             if pending is None:
                 return
-            pending[3] = read_data_op
-            pending[4] = read_par_op
+            ack_op, data_op, par_op = self.__emit_read(
+                mpsse_ops, False, _RDBUFF_REG)
+            pending[3] = data_op
+            pending[4] = par_op
+            records.append([None, "rdbuff", ack_op, None, None])
             pending = None
 
         for op, future in batch:
             if isinstance(op, swd.Run):
+                # Pure idle cycles. The latch is preserved.
                 self.__set_side(mpsse_ops, self.SIDE_HOST)
                 self.__shift_run(mpsse_ops, op.cycles, 0)
                 future.set_result(None)
                 continue
 
             if isinstance(op, swd.Wakeup):
+                # ≥50 SWDIO=1 cycles is the line-reset preamble and
+                # any long-enough Wakeup may resync the DP. Drain
+                # first.
+                drain_pending_via_rdbuff()
                 self.__set_side(mpsse_ops, self.SIDE_HOST)
                 self.__shift_run(mpsse_ops, op.cycles, 1)
                 future.set_result(None)
                 continue
 
             if isinstance(op, swd.LineReset):
+                # Wipes DP state including any AP-read pipeline.
+                drain_pending_via_rdbuff()
                 self.__set_side(mpsse_ops, self.SIDE_HOST)
                 self.__shift_run(mpsse_ops, 60, 1)
                 self.__shift_run(mpsse_ops, 8, 0)
@@ -351,6 +368,7 @@ class SwdMpsse(swd.Interface):
                 continue
 
             if isinstance(op, swd.JtagToSwd):
+                drain_pending_via_rdbuff()
                 self.__set_side(mpsse_ops, self.SIDE_HOST)
                 # Standard wakeup pattern: line reset + 0xE79E switch
                 # (LSB-first) + line reset + idle. Idempotent.
@@ -364,6 +382,7 @@ class SwdMpsse(swd.Interface):
                 continue
 
             if isinstance(op, swd.SwdToDormant):
+                drain_pending_via_rdbuff()
                 self.__set_side(mpsse_ops, self.SIDE_HOST)
                 # ≥50 cycles SWDIO=1 then the 16-bit 0xE3BC pattern
                 # (LSB-first on the wire matches the spec's wire-order
@@ -374,6 +393,7 @@ class SwdMpsse(swd.Interface):
                 continue
 
             if isinstance(op, swd.DormantToSwd):
+                drain_pending_via_rdbuff()
                 self.__set_side(mpsse_ops, self.SIDE_HOST)
                 # 8 cycles SWDIO=1 + 128-bit selection alert +
                 # 4 cycles of 0 + 8-bit SWD activation 0x1A.
@@ -391,6 +411,8 @@ class SwdMpsse(swd.Interface):
                 continue
 
             if isinstance(op, swd.TargetSelWrite):
+                # Counts as a DP write — destroys any pending latch.
+                drain_pending_via_rdbuff()
                 self.__emit_targetsel_write(mpsse_ops, op.target)
                 future.set_result(None)
                 continue
@@ -399,39 +421,51 @@ class SwdMpsse(swd.Interface):
                 ack_op, data_op, par_op = self.__emit_read(
                     mpsse_ops, op.ap, op.addr)
                 if op.ap:
-                    # AP read: ACK lives here, data lives in the next
-                    # read packet's data slot.
-                    fill_pending_with(data_op, par_op)
+                    # AP read drains via its own data slot — this
+                    # packet's data field carries the previous AP
+                    # read's value, per spec.
+                    if pending is not None:
+                        pending[3] = data_op
+                        pending[4] = par_op
                     rec = [future, "ap_read", ack_op, None, None]
                     records.append(rec)
                     pending = rec
+                elif op.addr == _RDBUFF_REG:
+                    # DP RDBUFF read explicitly drains the AP-read
+                    # latch; its data slot carries the latched value.
+                    if pending is not None:
+                        pending[3] = data_op
+                        pending[4] = par_op
+                        pending = None
+                    records.append(
+                        [future, "dp_read", ack_op, data_op, par_op])
                 else:
-                    # DP read: ACK + data + parity are all in this packet.
-                    fill_pending_with(data_op, par_op)
+                    # DP non-RDBUFF read (DPIDR, CTRL/STAT, …): the
+                    # latch is preserved on the chip but this
+                    # packet's data slot carries the DP register's
+                    # own inline value, NOT the AP latch. Pending
+                    # stays where it is.
                     records.append(
                         [future, "dp_read", ack_op, data_op, par_op])
                 continue
 
             if isinstance(op, swd.Write):
+                # Per IHI0031G §B4.2: an AP or DP write following an
+                # AP read DESTROYS the AP-read latch. Drain before
+                # emitting the write.
+                drain_pending_via_rdbuff()
                 ack_op = self.__emit_write(
                     mpsse_ops, op.ap, op.addr, op.data)
                 kind = "ap_write" if op.ap else "dp_write"
-                # Writes don't update RDBUFF; pending stays where it is.
                 records.append([future, kind, ack_op, None, None])
                 continue
 
             future.set_exception(TypeError(
                 f"SwdMpsse can't lower {type(op).__name__}"))
 
-        # Drain any trailing pending AP read with an explicit RDBUFF
-        # read so the user-future resolves before this batch ends.
-        if pending is not None:
-            ack_op, data_op, par_op = self.__emit_read(
-                mpsse_ops, False, _RDBUFF_REG)
-            pending[3] = data_op
-            pending[4] = par_op
-            records.append([None, "rdbuff", ack_op, None, None])
-            pending = None
+        # End-of-batch drain — same RDBUFF mechanism as the in-batch
+        # drains above.
+        drain_pending_via_rdbuff()
 
         if not mpsse_ops:
             return
