@@ -6,6 +6,7 @@ from ..model import Adapter, AdapterInfo, adapter_db
 from ..ftdi.transport import FtdiTransport
 from ..ftdi.mpsse import MpsseEngine
 from ..ftdi.jtag import JtagMpsse
+from ..ftdi.swd import SwdMpsse
 from ...protocol.jtag import Chain, JtagInterface
 from ...vfs.fs import FileNode
 import acrobe.component.xilinx.formats  # noqa: F401
@@ -20,7 +21,7 @@ _RESETN_PIN = 9
 
 @adapter_db.register(AdapterInfo("Proby", vid=0x10eb, pid=0x0026))
 class ProbyAdapter(Adapter):
-    supported_interfaces = ["jtag", "jtag-pt"]
+    supported_interfaces = ["jtag-int", "jtag-pt", "swd-pt"]
 
     def __init__(self, name, device, transport, engine, jtag):
         super().__init__(name)
@@ -64,51 +65,52 @@ class ProbyAdapter(Adapter):
         await leaf.start()
         view = await leaf.child_summon("bitstream")
 
-        chain = Chain()
-        self.__jtag.child_add(chain)
-        try:
-            await chain.discover()
-            tap = chain.children[0]
-
-            self.logger.trace("Loading %s firmware...", mode)
-            await tap.load(view)
-        finally:
-            await self.__jtag.child_remove(chain)
+        tap = await self.__jtag.child_summon("chain", "*")
+        self.logger.trace("Loading %s firmware...", mode)
+        await tap.load(view)
 
         self.__loaded_mode = mode
+            
+    async def __channel_a_open(self, mode = None):
+        async with self.__channel_a_lock:
+            if self.__transport_a is not None:
+                await self.__transport_a.close()
+                self.__transport_a = None
 
-    async def __close_channel_a(self):
-        if self.__transport_a is not None:
-            await self.__transport_a.close()
-            self.__transport_a = None
-
-    async def __open_channel_a(self, gpio_oe, gpio_val):
-        transport = await FtdiTransport.from_device(self.__device, interface_index=0)
-        engine = MpsseEngine(transport, self.logger)
-        jtag = JtagMpsse(engine)
-        await jtag.setup(gpio_oe=gpio_oe, gpio_val=gpio_val)
-        self.__transport_a = transport
-        return jtag
+            if mode == "mpsse":
+                transport = await FtdiTransport.from_device(self.__device, interface_index=0)
+                engine = MpsseEngine(transport, self.logger)
+                self.__transport_a = engine
+                return engine
 
     async def child_spawn(self, name):
         name_lower = name.lower()
 
-        if name_lower == "jtag":
-            self.__jtag.name = "jtag"
+        if name_lower == "jtag-int":
+            self.__jtag.name = "jtag-int"
             return self.__jtag
 
         if name_lower == "jtag-pt":
-            async with self.__channel_a_lock:
-                await self.__close_channel_a()
-                await self.__reprogram("jtag_swd_raw")
-                jtag = await self.__open_channel_a(
-                    gpio_oe=0x0710, gpio_val=0x0310)
-                jtag.name = "jtag-pt"
-                return jtag
+            await self.__channel_a_open(None)
+            await self.__reprogram("jtag_swd_raw")
+            engine = await self.__channel_a_open("mpsse")
+            jtag = JtagMpsse(engine)
+            await jtag.setup(gpio_oe=0x061b, gpio_val=0x0210)
+            jtag.name = "jtag-pt"
+            return jtag
+
+        if name_lower == "swd-pt":
+            await self.__channel_a_open(None)
+            await self.__reprogram("jtag_swd_raw")
+            engine = await self.__channel_a_open("mpsse")
+            swd = SwdMpsse(engine, oe_pin = 5)
+            await swd.setup(gpio_oe=0x063b, gpio_val=0x0610)
+            swd.name = "swd-pt"
+            return swd
 
         raise NoMatch("interface", name)
 
     async def close(self):
-        await self.__close_channel_a()
+        await self.__channel_a_open(None)
         await self.__transport.close()
         self.__device.handle.close()
