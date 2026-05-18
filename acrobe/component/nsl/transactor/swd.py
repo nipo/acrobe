@@ -58,6 +58,11 @@ class SwdTransactor:
         op_idx: int               # index into the batch
         rsp_offset: int           # offset in response bytes
         is_read: bool             # if True, 4 data bytes follow ack
+        # TARGETSEL writes are spec'd to never be ACKed by any DP, so
+        # the firmware-reported ACK byte for them is meaningless. When
+        # set, decode resolves the op's future with None regardless of
+        # the ACK value (no exception, no result).
+        ignore_ack: bool = False
 
     def __init__(self, base_freq: float, *, divisor_width: int = 2,
                  max_chunk: int = 1024):
@@ -231,6 +236,50 @@ class SwdTransactor:
                                         rsp_size, gather)
             return rsp_size
 
+        if isinstance(op, swd.SwdToDormant):
+            # 50+ SWDIO=1, then the 16-bit selection alert 0xE3BC
+            # transmitted LSB-first. BITBANG shifts the u32 LSB-first
+            # so the value is just 0xE3BC packed LE.
+            rsp_size = self.__encode_one(swd.Wakeup(60), op_idx, cmd,
+                                        rsp_size, gather)
+            cmd.append(self.CMD_BITBANG | (16 - 1))
+            cmd.extend((0xE3BC).to_bytes(4, "little"))
+            rsp_size += 1
+            return rsp_size
+
+        if isinstance(op, swd.DormantToSwd):
+            # 8+ SWDIO=1, 128-bit selection alert (bits[127:0] of
+            # 0x19BC0EA2_E3DDAFE9_86852D95_6209F392, transmitted
+            # LSB-first), 4 SWDIO=0, 8-bit SWD activation code 0x1A.
+            rsp_size = self.__encode_one(swd.Wakeup(60), op_idx, cmd,
+                                        rsp_size, gather)
+            for u32 in (0x6209F392, 0x86852D95, 0xE3DDAFE9, 0x19BC0EA2):
+                cmd.append(self.CMD_BITBANG | (32 - 1))
+                cmd.extend(int(u32).to_bytes(4, "little"))
+                rsp_size += 1
+            rsp_size = self.__encode_one(swd.Run(4), op_idx, cmd,
+                                        rsp_size, gather)
+            cmd.append(self.CMD_BITBANG | (8 - 1))
+            cmd.extend((0x1A).to_bytes(4, "little"))
+            rsp_size += 1
+            return rsp_size
+
+        if isinstance(op, swd.TargetSelWrite):
+            # Same wire shape as a DP Write to register 0x0c, except
+            # ADIv5/v6 guarantees no DP responds with OK on the ACK
+            # phase. We still issue a CMD_RW (write to DP A[3:2]=11)
+            # so the firmware drives data + parity normally, and tag
+            # the gather entry to ignore whatever ACK the wire reports.
+            cmd.append(self.CMD_RUN | 2)
+            rsp_size += 1
+            reg = (0x0c & 0xc) >> 2          # = 0b11
+            cmd.append(self.CMD_RW | (reg & 0xf))   # write, DP, A[3:2]=11
+            cmd.extend(int(op.target & 0xFFFFFFFF).to_bytes(4, "little"))
+            gather.append(self.__Resolve(
+                op_idx, rsp_size, is_read=False, ignore_ack=True))
+            rsp_size += 1
+            return rsp_size
+
         raise TypeError(f"SwdTransactor cannot encode {type(op).__name__}")
 
     def decode(self, batch, response: bytes, gather) -> None:
@@ -244,6 +293,11 @@ class SwdTransactor:
 
         for entry in gather:
             ack_byte = response[entry.rsp_offset]
+            if entry.ignore_ack:
+                # TargetSelWrite path — ACK is meaningless on the wire.
+                results[entry.op_idx] = None
+                continue
+
             ack_bits = ack_byte & self.RSP_ACK_MASK
             par_err = bool(ack_byte & self.RSP_PAR_ERROR)
 
