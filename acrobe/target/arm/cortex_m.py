@@ -17,11 +17,7 @@ import asyncio
 
 from ...component.arm.coresight.dwt import Dwt
 from ...component.arm.coresight.fpb import Fpb
-from ...component.arm.coresight.rom_table import RomTable
 from ...component.arm.coresight.scs import Scs
-from ...component.arm.dp import Dp
-from ...component.arm.mem_ap import MemAp
-from ...db import NoMatch
 from ..debuggable import (
     Core, CoreState, Debuggable, HaltCause, Register, RegisterType,
 )
@@ -424,27 +420,6 @@ class CortexMDebuggable(Debuggable):
             "  resume             Resume all cores.\n"
             "  erase              Mass-erase via the sibling Loadable.\n"
             "  help               Show this help.\n")
-
-
-@Target.register(Dp, precedence=10000)
-def cortex_m_generic_target(dp):
-    """Generic Cortex-M debug-only target.
-
-    Walks the DP's MemAp+RomTable subtree looking for any RomTable
-    containing an SCS. Yields a Target with one CortexMDebuggable
-    child (run-control only — no Loadable; flash programming needs
-    chip-specific knowledge from S2b). High precedence so chip-
-    specific Targets override on declaration.
-    """
-    for ap in dp.children_of_class(MemAp):
-        for rt in ap.children_of_class(RomTable):
-            if not rt.children_of_class(Scs):
-                continue
-            t = CortexMTarget(f"cortex-m@{dp.name}")
-            t.claim(dp, ap, rt)
-            t.child_add(CortexMDebuggable.from_romtable(rt, ap))
-            return t
-    raise NoMatch("cortex_m_generic_target", "no SCS under DP")
 
 
 class CortexMTarget(Target):
