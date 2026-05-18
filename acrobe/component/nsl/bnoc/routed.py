@@ -1,14 +1,18 @@
 """NSL bnoc routed channel.
 
-Matches RTL ``nsl_bnoc.routed``: a single framed channel multiplexes
+Matches RTL ``nsl_bnoc.routed``: a single datagram channel multiplexes
 several point-to-point endpoints. Each frame on the wire carries a
 one-byte routing header ``[dst(3:0) | src(7:4)]`` followed by the
 payload.
 
 `Router` is the multiplexer (a `Datagram` with routing context).
 `Route` is a sugar wrapper that pins one (local, remote) endpoint
-pair on a `Router` and exposes itself as a `Framed` channel (no
+pair on a `Router` and exposes itself as a plain `Datagram` (no
 routing visible to its users).
+
+`FramedEndpoint` wraps a `Route` (or any `Datagram`) and adds an
+auto-incrementing 1-byte tag prepended to every Send and validated
+on every Recv — a transactional request/response shim.
 """
 
 from collections import defaultdict, deque
@@ -17,7 +21,6 @@ from dataclasses import dataclass
 import asyncio
 
 from ....protocol.datagram import Datagram, Send, Recv
-from .framed import Framed
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,11 +44,11 @@ class Context:
 
 
 class Router(Datagram):
-    """Routing dispatch over a lower `Framed` channel."""
+    """Routing dispatch over a lower `Datagram` channel."""
 
-    def __init__(self, framed: Framed, name: str = "router"):
+    def __init__(self, channel: Datagram, name: str = "router"):
         super().__init__(name)
-        self.__framed = framed
+        self.__framed = channel
         self.__rx_queues: dict[Context, deque] = defaultdict(deque)
 
     async def flush_ops(self, batch):
@@ -99,9 +102,9 @@ class Router(Datagram):
         return Route(self, local_id, remote_id)
 
 
-class Route(Framed):
+class Route(Datagram):
     """Single fixed-endpoint route over a `Router`. Presents as a
-    plain `Framed` channel — users don't see the routing context."""
+    plain `Datagram` — users don't see the routing context."""
 
     def __init__(self, router: Router, local_id: int, remote_id: int,
                  name: str | None = None):
@@ -137,20 +140,53 @@ class Route(Framed):
         return f"<Route {self.__outbound}>"
 
 
-class FramedEndpoint:
-    """Tagged request-response transactions over a `Route`. Prepends
-    an auto-incrementing 1-byte tag for correlation."""
+class FramedEndpoint(Datagram):
+    """Auto-tagged request/response wrapper over a `Datagram` backend.
 
-    def __init__(self, route: Route):
-        self.__route = route
-        self.__tag = 0
+    Each Send prepends an 8-bit incrementing tag byte; each Recv pops
+    the leading byte and validates that it matches the tag of the
+    most recently posted Send. Frames whose tag doesn't match the
+    expected one are treated as a hard protocol error.
 
-    async def transact(self, data: bytes) -> bytes:
-        tag = self.__tag
-        self.__tag = (self.__tag + 1) & 0xff
-        self.__route.send(bytes([tag]) + data)
-        rx, _ = await self.__route.recv()
-        if rx[0] != tag:
-            raise RuntimeError(
-                f"Tag mismatch: sent 0x{tag:02x}, got 0x{rx[0]:02x}")
-        return rx[1:]
+    Users see a plain `Datagram` with one byte less of payload.
+    """
+
+    def __init__(self, channel: Datagram, name: str = "endpoint"):
+        super().__init__(name)
+        self.__channel = channel
+        self.__send_tag = 0
+        self.__pending_tags: deque[int] = deque()
+
+    async def flush_ops(self, batch):
+        lower = []
+        for op, future in batch:
+            if isinstance(op, Send):
+                tag = self.__send_tag
+                self.__send_tag = (self.__send_tag + 1) & 0xff
+                self.__pending_tags.append(tag)
+                lf = self.__channel.post(Send(bytes([tag]) + op.data, op.context))
+                lower.append((lf, future, "send", tag))
+            elif isinstance(op, Recv):
+                lf = self.__channel.post(Recv(op.context))
+                lower.append((lf, future, "recv", None))
+
+        await asyncio.gather(*[f for f, _, _, _ in lower])
+
+        for lf, mf, kind, tag in lower:
+            if mf is None or mf.done():
+                continue
+            if kind == "send":
+                mf.set_result(None)
+                continue
+            data, ctx = lf.result()
+            expected = self.__pending_tags.popleft() if self.__pending_tags else None
+            if not data:
+                mf.set_exception(RuntimeError(
+                    "FramedEndpoint: empty frame on recv"))
+                continue
+            if expected is not None and data[0] != expected:
+                mf.set_exception(RuntimeError(
+                    f"FramedEndpoint tag mismatch: expected 0x{expected:02x}, "
+                    f"got 0x{data[0]:02x}"))
+                continue
+            mf.set_result((data[1:], ctx))

@@ -1,7 +1,5 @@
 import asyncio
 
-from .framed import Framed
-
 
 class JtagFifo:
     """9-bit FIFO transport over JTAG USER DR.
@@ -16,6 +14,7 @@ class JtagFifo:
     VALID = 1 << WIDTH            # bit 9
     READY = 1 << (WIDTH + 1)      # bit 10
     DMASK = (1 << WIDTH) - 1      # bits 8:0
+    LAST = 0x100                  # bit 8 of the 9-bit word
 
     def __init__(self, tap, data_ir, status_ir=None):
         self.__tap = tap
@@ -59,7 +58,7 @@ class JtagFifo:
             if valid:
                 rx_words.append(data)
                 idle_count = 0
-                if data & Framed.LAST:
+                if data & JtagFifo.LAST:
                     frames_seen += 1
             else:
                 idle_count += 1
@@ -112,7 +111,7 @@ class JtagFifo:
 
                 if valid:
                     rx_words.append(data)
-                    if data & Framed.LAST:
+                    if data & JtagFifo.LAST:
                         frames_seen += 1
 
         return rx_words

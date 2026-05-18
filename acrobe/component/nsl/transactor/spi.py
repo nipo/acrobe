@@ -1,117 +1,133 @@
+"""NSL SPI transactor batch codec.
+
+Encodes :mod:`acrobe.protocol.spi` Cs/Shift operations into NSL-SPI
+transactor command byte streams and decodes the response back into op
+results. Pure codec: no transport, no Batcher. The adapter-side
+``SpiInterface`` subclass owns the transport and wires the codec to
+it.
+"""
+
+from __future__ import annotations
+
 import math
+from dataclasses import dataclass
 
-from ....engine import Batcher
-from ....node import Node
 from ....protocol.spi import Cs, Shift
-from ..bnoc.framed import Framed
 
 
-class SpiTransactor(Batcher, Node):
-    """Encodes spi.Cs/Shift ops as NSL SPI transactor commands.
+class SpiTransactor:
+    """Batch codec for the NSL SPI transactor command stream."""
 
-    Command encoding (matches RTL nsl_spi_transactor):
-    - 0x00 | cpol<<4 | cpha<<3 | slave_id  — SELECT (slave 0-6)
-    - 0x00 | cpol<<4 | cpha<<3 | 7         — UNSELECT (slave_id = 7)
-    - 0x20 | divisor                        — SET_DIVISOR (5-bit)
-    - 0x80 | (count-1)                      — SHIFT_OUT (write-only), + mosi bytes
-    - 0x40 | (count-1)                      — SHIFT_IN (read-only)
-    - 0xC0 | (count-1)                      — SHIFT_INOUT (full-duplex), + mosi bytes
-    Max 64 bytes per shift chunk.
+    # Command bit layout (matches RTL nsl_spi_transactor):
+    #   0xxx_xxxx  SELECT       cpol[4], cpha[3], slave_id[2:0] (7 = UNSELECT)
+    #   001x_xxxx  SET_DIVISOR  divisor[4:0]
+    #   01xx_xxxx  SHIFT_IN     count[5:0]+1 (read-only)
+    #   10xx_xxxx  SHIFT_OUT    count[5:0]+1 (write-only); host appends mosi
+    #   11xx_xxxx  SHIFT_INOUT  count[5:0]+1 (full duplex); host appends mosi
+    CMD_SELECT       = 0x00
+    UNSELECT_ID      = 0x07
+    CMD_DIVISOR      = 0x20
+    CMD_SHIFT_IN     = 0x40
+    CMD_SHIFT_OUT    = 0x80
+    CMD_SHIFT_INOUT  = 0xC0
 
-    Response: 1 status byte per command + MISO bytes for IN/INOUT.
-    """
+    MAX_CHUNK = 0x40  # 64 bytes per shift command
 
-    CMD_SELECT = 0x00
-    CMD_UNSELECT = 0x07
-    CMD_DIVISOR = 0x20
-    CMD_SHIFT_IN = 0x40
-    CMD_SHIFT_OUT = 0x80
-    CMD_SHIFT_INOUT = 0xC0
+    @dataclass(frozen=True, slots=True)
+    class __Gather:
+        op_idx: int
+        rsp_offset: int
+        length: int
 
-    MAX_CHUNK = 0x40  # 64 bytes
+    def __init__(self, base_freq: float, *, max_chunk: int | None = None):
+        self.base_freq = float(base_freq)
+        if max_chunk is not None:
+            self.max_chunk = int(max_chunk)
+        else:
+            self.max_chunk = self.MAX_CHUNK
+        self.__divisor = max(0, int(self.base_freq / 1e6) - 1) & 0x1f
+        self.__rate_dirty = True
 
-    def __init__(self, channel: Framed, base_freq: float,
-                 name: str = "spi-xact"):
-        Batcher.__init__(self)
-        Node.__init__(self, name)
-        self._channel = channel
-        self.base_freq = base_freq
-        self._divisor = max(0, int(base_freq / 1e6) - 1) & 0x1f
-        self._rate_dirty = True
-
-    def freq_update(self, freq) -> float:
-        """Compute divisor for target frequency. Returns actual frequency."""
+    def freq_update(self, freq: float | None) -> float:
         if not freq:
-            freq = 15e6
-        divisor = int(math.ceil(self.base_freq / 2.0 / float(freq))) - 1
-        divisor = max(0, min(divisor, 0x1f))
-        if self._divisor != divisor:
-            self._divisor = divisor
-            self._rate_dirty = True
-        return self.base_freq / ((self._divisor + 1) * 2)
+            return self.base_freq / ((self.__divisor + 1) * 2)
+        d = int(math.ceil(self.base_freq / 2.0 / float(freq))) - 1
+        d = max(0, min(d, 0x1f))
+        if d != self.__divisor:
+            self.__divisor = d
+            self.__rate_dirty = True
+        return self.base_freq / ((self.__divisor + 1) * 2)
 
-    async def flush_ops(self, batch):
+    def context_force_refresh(self) -> None:
+        self.__rate_dirty = True
+
+    def encode(self, batch) -> tuple[bytes, int, list]:
         cmd = bytearray()
         rsp_size = 0
+        gather: list = []
         mode = 0
 
-        # Per-shift gather info: list of (response_offset, length) tuples
-        gather_map = []  # (batch_idx, gather_list)
-
-        if self._rate_dirty:
-            cmd.append(self.CMD_DIVISOR | self._divisor)
+        if self.__rate_dirty:
+            cmd.append(self.CMD_DIVISOR | self.__divisor)
             rsp_size += 1
-            self._rate_dirty = False
+            self.__rate_dirty = False
 
-        for idx, (op, future) in enumerate(batch):
+        for op_idx, (op, _future) in enumerate(batch):
             if isinstance(op, Cs):
                 if op.value is not None:
                     mode = op.mode
                     cpol = (mode >> 1) & 1
                     cpha = mode & 1
-                    cmd.append(self.CMD_SELECT | (cpol << 4) | (cpha << 3) | op.value)
+                    cmd.append(self.CMD_SELECT
+                               | (cpol << 4) | (cpha << 3)
+                               | (op.value & 0x7))
                 else:
                     cpol = (mode >> 1) & 1
                     cpha = mode & 1
-                    cmd.append(self.CMD_UNSELECT | (cpol << 4) | (cpha << 3))
+                    cmd.append(self.CMD_SELECT
+                               | (cpol << 4) | (cpha << 3)
+                               | self.UNSELECT_ID)
                 rsp_size += 1
+                continue
 
-            elif isinstance(op, Shift):
+            if isinstance(op, Shift):
                 mosi_bytes = bytes(op.mosi)
-                gather = []
-
                 if op.read_miso:
-                    # Read or full-duplex: SHIFT_INOUT with mosi data
-                    for off in range(0, len(mosi_bytes), self.MAX_CHUNK):
-                        left = min(self.MAX_CHUNK, len(mosi_bytes) - off)
-                        cmd.append(self.CMD_SHIFT_INOUT | (left - 1))
-                        cmd.extend(mosi_bytes[off:off + left])
-                        rsp_size += 1  # status byte
-                        gather.append((rsp_size, left))
-                        rsp_size += left
+                    base_cmd = self.CMD_SHIFT_INOUT
                 else:
-                    # Write-only
-                    for off in range(0, len(mosi_bytes), self.MAX_CHUNK):
-                        left = min(self.MAX_CHUNK, len(mosi_bytes) - off)
-                        cmd.append(self.CMD_SHIFT_OUT | (left - 1))
-                        cmd.extend(mosi_bytes[off:off + left])
-                        rsp_size += 1  # status byte
+                    base_cmd = self.CMD_SHIFT_OUT
+                if not mosi_bytes:
+                    continue
+                for off in range(0, len(mosi_bytes), self.max_chunk):
+                    chunk = mosi_bytes[off:off + self.max_chunk]
+                    cmd.append(base_cmd | (len(chunk) - 1))
+                    cmd.extend(chunk)
+                    rsp_size += 1
+                    if op.read_miso:
+                        gather.append(self.__Gather(op_idx, rsp_size,
+                                                    len(chunk)))
+                        rsp_size += len(chunk)
+                continue
 
-                gather_map.append((idx, gather))
+            raise TypeError(f"SpiTransactor cannot encode {type(op).__name__}")
 
-        # Send command frame and receive response
-        self._channel.send(bytes(cmd))
-        response, _ = await self._channel.recv()
+        return bytes(cmd), rsp_size, gather
 
-        # Parse response: populate miso from gather info
-        for idx, gather in gather_map:
-            op = batch[idx][0]
-            if gather:
-                op.miso = b''.join(
-                    response[off:off + size] for off, size in gather)
-            else:
+    def decode(self, batch, response: bytes, gather) -> None:
+        per_op: dict[int, bytearray] = {}
+        for g in gather:
+            per_op.setdefault(g.op_idx, bytearray()).extend(
+                response[g.rsp_offset:g.rsp_offset + g.length])
+
+        for op_idx, (op, future) in enumerate(batch):
+            if isinstance(op, Shift) and op.read_miso:
+                miso = bytes(per_op.get(op_idx, b""))
+                op.miso = miso
+                if future is not None and not future.done():
+                    future.set_result(miso)
+                continue
+
+            if isinstance(op, Shift):
                 op.miso = None
-
-        # Resolve all futures
-        for op, future in batch:
-            future.set_result(op)
+            if future is not None and not future.done():
+                future.set_result(None)

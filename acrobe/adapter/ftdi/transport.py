@@ -24,6 +24,7 @@ SIO_RESET_PURGE_TX = 2
 BITMODE_RESET = 0x00
 BITMODE_MPSSE = 0x02
 BITMODE_SYNCBB = 0x04
+BITMODE_SYNCFF = 0x40
 
 # Fractional divisor encoding for FTDI baudrate generator.
 # Maps sub-integer 0/8..7/8 to the 3-bit code in bits [16:14].
@@ -278,6 +279,45 @@ class FtdiTransport:
         await device.vendor_control(SIO_RESET, SIO_RESET_PURGE_TX, idx, b'')
         await device.vendor_control(
             SIO_SET_BITMODE, (BITMODE_SYNCBB << 8) | oe_mask, idx, b'')
+
+        ep_out_addr = 0x02 + interface_index * 2
+        ep_in_addr = 0x81 + interface_index * 2
+        mps = cls.__endpoint_mps(device, interface_index, ep_in_addr)
+
+        ep_out = BulkOutEndpoint(device, ep_out_addr, mps)
+        ep_in = BulkInEndpoint(device, ep_in_addr, mps)
+        pair = BulkPair(ep_out, ep_in)
+
+        cls.__drain(ep_in, mps)
+
+        return cls(None, device, interface_index, pair, mps)
+
+    @classmethod
+    async def from_device_ft245_sync(cls, device, interface_index=0):
+        """Initialize FT245 Synchronous FIFO mode on an opened ausb Device.
+
+        The FTDI chip relays a transparent byte-stream between the USB
+        bulk endpoints and an external FIFO controller (typically an
+        FPGA) on the channel's pins. The host sees the channel as a
+        full-duplex byte pipe; reads still carry the 2-byte modem
+        status header per USB packet, which ReadOp strips.
+        """
+        try:
+            device.handle.detachKernelDriver(interface_index)
+        except (usb1.USBErrorNotFound, usb1.USBErrorNotSupported, usb1.USBErrorAccess):
+            pass
+
+        device.handle.claimInterface(interface_index)
+
+        idx = interface_index + 1
+
+        await device.vendor_control(SIO_RESET, SIO_RESET_SIO, idx, b'')
+        await device.vendor_control(SIO_SET_LATENCY_TIMER, 1, idx, b'')
+        await device.vendor_control(SIO_SET_BITMODE, BITMODE_RESET << 8, idx, b'')
+        await device.vendor_control(SIO_RESET, SIO_RESET_PURGE_RX, idx, b'')
+        await device.vendor_control(SIO_RESET, SIO_RESET_PURGE_TX, idx, b'')
+        await device.vendor_control(
+            SIO_SET_BITMODE, BITMODE_SYNCFF << 8, idx, b'')
 
         ep_out_addr = 0x02 + interface_index * 2
         ep_in_addr = 0x81 + interface_index * 2

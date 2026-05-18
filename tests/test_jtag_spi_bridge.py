@@ -1,11 +1,11 @@
 import asyncio
 import pytest
 
-from acrobe.protocol.datagram import Send, Recv
-from acrobe.component.nsl.bnoc.framed import Framed, JtagFramed
+from acrobe.protocol.datagram import Datagram, Send, Recv
+from acrobe.component.nsl.bnoc.framed import JtagFramed
 from acrobe.component.nsl.bnoc.fifo import JtagFifo
 from acrobe.component.nsl.transactor.spi import SpiTransactor
-from acrobe.component.jtag_spi_bridge import jtag_spi_bridge
+from acrobe.component.jtag_spi_bridge import jtag_spi_bridge, _SpiFramedAdapter
 from acrobe.protocol.spi import Cs, Shift, Interface, Target
 from acrobe.engine import Batcher
 from acrobe.node import Node
@@ -15,8 +15,8 @@ from acrobe.bitstring import BitString
 
 # -- MockChannel: in-memory Framed for SpiTransactor testing --
 
-class MockChannel(Framed):
-    """In-memory Framed that captures command frames and returns canned responses."""
+class MockChannel(Datagram):
+    """In-memory Datagram that captures command frames and returns canned responses."""
 
     def __init__(self, response_fn=None, name: str = "mock-channel"):
         super().__init__(name)
@@ -43,7 +43,8 @@ class MockChannel(Framed):
 class TestSpiTransactor:
     def _make(self, response_fn=None):
         ch = MockChannel(response_fn)
-        tr = SpiTransactor(ch, base_freq=30e6)
+        codec = SpiTransactor(base_freq=30e6)
+        tr = _SpiFramedAdapter(codec, ch)
         return ch, tr
 
     @pytest.mark.asyncio
@@ -81,11 +82,13 @@ class TestSpiTransactor:
         await tr.post(Cs(0, mode=0))  # consume divisor emission
         ch.sent_frames.clear()
 
-        result = await tr.post(Shift(b'\xAA\xBB', read_miso=False))
+        shift = Shift(b'\xAA\xBB', read_miso=False)
+        result = await tr.post(shift)
         cmd = ch.sent_frames[0]
         assert cmd[0] == (0x80 | 1)  # SHIFT_OUT, 2 bytes (count-1=1)
         assert cmd[1:3] == b'\xAA\xBB'
-        assert result.miso is None
+        assert result is None
+        assert shift.miso is None
 
     @pytest.mark.asyncio
     async def test_shift_read(self):
@@ -112,8 +115,10 @@ class TestSpiTransactor:
         await tr.post(Cs(0, mode=0))
         ch.sent_frames.clear()
 
-        result = await tr.post(Shift(3, read_miso=True))
-        assert result.miso == bytes([0, 1, 2])
+        shift = Shift(3, read_miso=True)
+        result = await tr.post(shift)
+        assert result == bytes([0, 1, 2])
+        assert shift.miso == bytes([0, 1, 2])
 
     @pytest.mark.asyncio
     async def test_shift_inout(self):
@@ -140,8 +145,10 @@ class TestSpiTransactor:
         await tr.post(Cs(0, mode=0))
         ch.sent_frames.clear()
 
-        result = await tr.post(Shift(b'\x12\x34', read_miso=True))
-        assert result.miso == b'\xFF\xFF'
+        shift = Shift(b'\x12\x34', read_miso=True)
+        result = await tr.post(shift)
+        assert result == b'\xFF\xFF'
+        assert shift.miso == b'\xFF\xFF'
 
     @pytest.mark.asyncio
     async def test_chunk_splitting(self):
@@ -151,9 +158,8 @@ class TestSpiTransactor:
         await tr.post(Cs(0, mode=0))
         ch.sent_frames.clear()
 
-        big_data = bytes(range(256)) * 1  # 256 bytes... use 100
         big_data = bytes(100)
-        result = await tr.post(Shift(big_data, read_miso=False))
+        await tr.post(Shift(big_data, read_miso=False))
 
         cmd = ch.sent_frames[0]
         # Should have two SHIFT_OUT commands: 64 + 36
@@ -180,12 +186,14 @@ class TestSpiTransactor:
     @pytest.mark.asyncio
     async def test_divisor_after_freq_update(self):
         """Divisor is re-emitted after freq_update()."""
-        ch, tr = self._make(lambda cmd: bytes(len(cmd)))
+        ch = MockChannel(lambda cmd: bytes(len(cmd)))
+        codec = SpiTransactor(base_freq=30e6)
+        tr = _SpiFramedAdapter(codec, ch)
 
         await tr.post(Cs(0, mode=0))  # emits divisor
         ch.sent_frames.clear()
 
-        tr.freq_update(1e6)  # change freq
+        codec.freq_update(1e6)  # change freq
         await tr.post(Cs(None))
         cmd = ch.sent_frames[0]
         assert cmd[0] & 0xE0 == 0x20  # divisor re-emitted
@@ -213,7 +221,7 @@ class FifoSimulator(Batcher, Node):
     def load_rx(self, frames):
         """Load frames into the device's RX FIFO (these will be sent to host)."""
         for frame in frames:
-            self.rx_fifo.extend(Framed.encode(frame))
+            self.rx_fifo.extend(JtagFramed.encode(frame))
 
     async def flush_ops(self, batch):
         for op, future in batch:
@@ -282,13 +290,13 @@ class TestJtagFifo:
         sim.load_rx([b'\xAA'])
 
         fifo = JtagFifo(sim, 0x42)
-        rx = await fifo.exchange([0x55 | Framed.LAST], expect_frames=1)
+        rx = await fifo.exchange([0x55 | JtagFramed.LAST], expect_frames=1)
 
         assert len(rx) >= 1
-        data = Framed.decode(rx)
+        data = JtagFramed.decode(rx)
         assert data == b'\xAA'
         # Check TX was captured
-        assert 0x55 | Framed.LAST in sim.tx_captured
+        assert 0x55 | JtagFramed.LAST in sim.tx_captured
 
     @pytest.mark.asyncio
     async def test_speculative_exchange(self):
@@ -297,9 +305,9 @@ class TestJtagFifo:
         sim.load_rx([b'\xBB\xCC'])
 
         fifo = JtagFifo(sim, 0x42, status_ir=0x43)
-        rx = await fifo.exchange([0x11 | Framed.LAST], expect_frames=1)
+        rx = await fifo.exchange([0x11 | JtagFramed.LAST], expect_frames=1)
 
-        data = Framed.decode(rx)
+        data = JtagFramed.decode(rx)
         assert data == b'\xBB\xCC'
 
     @pytest.mark.asyncio
@@ -311,10 +319,10 @@ class TestJtagFifo:
         fifo = JtagFifo(sim, 0x42)
         rx = await fifo.exchange([], expect_frames=2)
 
-        frames = Framed.split_frames(rx)
+        frames = JtagFramed.split_frames(rx)
         assert len(frames) == 2
-        assert Framed.decode(frames[0]) == b'\x01'
-        assert Framed.decode(frames[1]) == b'\x02'
+        assert JtagFramed.decode(frames[0]) == b'\x01'
+        assert JtagFramed.decode(frames[1]) == b'\x02'
 
     @pytest.mark.asyncio
     async def test_last_bit_terminates_frame(self):
@@ -325,9 +333,9 @@ class TestJtagFifo:
         fifo = JtagFifo(sim, 0x42)
         rx = await fifo.exchange([], expect_frames=1)
 
-        frames = Framed.split_frames(rx)
+        frames = JtagFramed.split_frames(rx)
         assert len(frames) == 1
-        assert Framed.decode(frames[0]) == b'\x10\x20\x30'
+        assert JtagFramed.decode(frames[0]) == b'\x10\x20\x30'
 
 
 # -- Integration tests --
@@ -361,7 +369,7 @@ class TestJtagFramedIntegration:
             """
             rsp = bytearray()
             i = 0
-            cmd = Framed.decode(cmd_words)
+            cmd = JtagFramed.decode(cmd_words)
             while i < len(cmd):
                 opcode = cmd[i]
                 if opcode & 0xC0 == 0xC0:  # SHIFT_INOUT
@@ -389,7 +397,8 @@ class TestJtagFramedIntegration:
         # divisor(1 status) + cs_select(1 status) + shift_inout 1B (1 status + 1 miso) + cs_deselect(1 status)
         sim.load_rx([bytes([0x00, 0x00, 0x00, 0x9F, 0x00])])
 
-        adapter = SpiTransactor(framed, base_freq=30e6)
+        codec = SpiTransactor(base_freq=30e6)
+        adapter = _SpiFramedAdapter(codec, framed)
         interface = Interface(adapter, name="spi")
         target = Target(interface, cs=0, mode=0, name="cs0")
         interface.child_add(target)
