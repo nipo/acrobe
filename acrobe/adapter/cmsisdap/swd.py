@@ -79,11 +79,31 @@ class CmsisDapSwDp(dpmod.Dp):
     :meth:`flush_ops` lowers each into ``DAP_Transfer`` slots,
     and the firmware does the wire."""
 
+    SELECT_REG = 0x08
+
     def __init__(self, transport, capabilities: int, name: str = "swd"):
         super().__init__(name=name)
         self.__transport = transport
         self.__capabilities = capabilities
         self.__connected = False
+        # DP-side SELECT cache. The firmware doesn't track it for
+        # us; we maintain the same logic SwDp uses. Initial value
+        # 0 matches the DP's reset state.
+        self.__select: int = 0
+
+    def __select_for(self, op) -> int:
+        """SELECT value required to access ``op``'s register.
+
+        AP ops carry ``(apsel << 24) | reg_offset``; APSEL lands in
+        SELECT[31:24], APBANKSEL in SELECT[7:4]. DP ops only set
+        DPBANKSEL (low nibble); APSEL / APBANKSEL stick from the
+        last AP access."""
+        cur = self.__select
+        if isinstance(op, (dpmod.ApRead, dpmod.ApWrite)):
+            apsel = (op.addr >> 24) & 0xff
+            apbank = (op.addr >> 4) & 0xf
+            return (apsel << 24) | (apbank << 4) | (cur & 0xf)
+        return (cur & 0xFFFFFFF0) | ((op.addr >> 4) & 0xf)
 
     async def start(self):
         """Bring the wire up via the CMSIS-DAP command set, then
@@ -141,11 +161,17 @@ class CmsisDapSwDp(dpmod.Dp):
 
         AP-read pipelining is firmware-side: each read's actual
         value comes back inline in the response — no host-side
-        RDBUFF insertion needed."""
+        RDBUFF insertion needed.
+
+        SELECT-cache management is host-side: the firmware just
+        relays DP/AP register accesses without knowing about
+        DPBANKSEL / APSEL / APBANKSEL. We insert a DP write to
+        SELECT whenever a per-op decode needs a different value."""
         # Group: contiguous runs of "transfer-shaped" ops are
         # issued via DAP_Transfer; ABORTs and runs that need
         # special handling break the run.
         encoded: list[tuple] = []  # (op, future, request_byte, payload)
+        select = self.__select
 
         async def flush_run():
             nonlocal encoded
@@ -153,6 +179,28 @@ class CmsisDapSwDp(dpmod.Dp):
                 return
             await self.__flush_xfer_group(encoded)
             encoded = []
+
+        def emit_select_if_changed(op):
+            """Compare the op's required SELECT against the cache;
+            queue a DP write to SELECT if they differ. The DP write
+            future is fire-and-forget — wire faults still surface
+            via the user-facing op's own DAP_Transfer slot."""
+            nonlocal select
+            new_select = self.__select_for(op)
+            if select == new_select:
+                return
+            loop = asyncio.get_running_loop()
+            placeholder = loop.create_future()
+            # Consume any exception so asyncio doesn't warn about
+            # an unretrieved Future exception — wire faults still
+            # surface via the user op that triggered this SELECT
+            # write.
+            placeholder.add_done_callback(lambda f: f.exception())
+            req, payload = self.__encode_transfer_raw(
+                ap=False, read=False, addr=self.SELECT_REG,
+                data=new_select)
+            encoded.append((None, placeholder, req, payload))
+            select = new_select
 
         for op, future in batch:
             if isinstance(op, dpmod.Run):
@@ -185,6 +233,7 @@ class CmsisDapSwDp(dpmod.Dp):
 
             if isinstance(op, (dpmod.DpRead, dpmod.DpWrite,
                                 dpmod.ApRead, dpmod.ApWrite)):
+                emit_select_if_changed(op)
                 req, payload = self.__encode_transfer(op)
                 encoded.append((op, future, req, payload))
                 continue
@@ -194,42 +243,48 @@ class CmsisDapSwDp(dpmod.Dp):
                     f"CmsisDapSwDp can't lower {type(op).__name__}"))
 
         await flush_run()
+        self.__select = select
 
     # --- DAP_Transfer encoding ------------------------------------
 
-    @staticmethod
-    def __encode_transfer(op) -> tuple[int, bytes]:
+    @classmethod
+    def __encode_transfer(cls, op) -> tuple[int, bytes]:
         """Build the (request_byte, payload) pair for one
-        DAP_Transfer slot. ``request_byte`` bits:
+        DAP_Transfer slot."""
+        is_ap = isinstance(op, (dpmod.ApRead, dpmod.ApWrite))
+        is_read = isinstance(op, (dpmod.DpRead, dpmod.ApRead))
+        data = 0 if is_read else op.data
+        return cls.__encode_transfer_raw(
+            ap=is_ap, read=is_read, addr=op.addr, data=data)
+
+    @staticmethod
+    def __encode_transfer_raw(*, ap: bool, read: bool,
+                              addr: int, data: int) -> tuple[int, bytes]:
+        """Pack one DAP_Transfer slot. ``request_byte`` bits:
 
         * 0 = APnDP
         * 1 = RnW
         * 2 = A2
         * 3 = A3
         """
-        is_ap = isinstance(op, (dpmod.ApRead, dpmod.ApWrite))
-        is_read = isinstance(op, (dpmod.DpRead, dpmod.ApRead))
-
         request = 0
-        if is_ap:
+        if ap:
             request |= protocol.XFER_APnDP
-        if is_read:
+        if read:
             request |= protocol.XFER_RnW
-
         # Both DP and AP register addresses fit the same A[3:2]
-        # field. For AP ops the upper bits of op.addr (apsel +
-        # apbank) are handled by SELECT writes — which the
-        # caller posts as plain DpWrites before the AP op.
-        addr = op.addr & 0xC
-        if addr & 0x4:
+        # field. For AP ops the upper bits of addr (apsel +
+        # apbank) are handled by SELECT writes — see
+        # __select_for / flush_ops.
+        lo = addr & 0xC
+        if lo & 0x4:
             request |= protocol.XFER_A2
-        if addr & 0x8:
+        if lo & 0x8:
             request |= protocol.XFER_A3
-
-        if is_read:
+        if read:
             payload = b""
         else:
-            payload = (op.data & 0xFFFFFFFF).to_bytes(4, "little")
+            payload = (data & 0xFFFFFFFF).to_bytes(4, "little")
         return request, payload
 
     async def __flush_xfer_group(self, encoded):
