@@ -25,11 +25,15 @@ Per SWD packet we flip the OE pin twice — once between the host-driven
 cmd byte and the target-driven ACK, once after the target window to
 hand the line back. The TRN cycle between cmd and ACK is clocked with
 OE already in target-drive mode (the line floats on its pull-up for
-that one cycle); same trick on the way back. AP-read pipelining is
-identical to :class:`acrobe.adapter.jlink.swd.JLinkSwdInterface`: a
-``pending`` slot remembers the AP read whose data lives in the *next*
-read packet, and any trailing pending is drained with an explicit
-RDBUFF read at end of batch.
+that one cycle); same trick on the way back.
+
+The wire layer is deliberately raw: each ``swd.Read`` / ``swd.Write``
+turns into exactly one wire packet, and the returned future resolves
+with whatever the chip drove on that packet's data slot. The AP-read
+posted-result is a Debug Port concern, not a wire concern — pipeline
+bookkeeping lives in :class:`acrobe.component.arm.sw_dp.SwDp`'s
+lowering, parallel to how :class:`acrobe.component.arm.jtag_dp.JtagDp`
+handles JTAG-DP-side pipelining.
 """
 
 from __future__ import annotations
@@ -317,18 +321,9 @@ class SwdMpsse(swd.Interface):
     async def flush_wire_ops(self, batch):
         mpsse_ops = []
         # Per-record: [user_future, kind, ack_op, data_op_or_None,
-        #              parity_op_or_None].
+        #              parity_op_or_None]. Each record covers exactly
+        # one wire packet — no pipeline awareness.
         records: list[list] = []
-        # Pending AP read whose data lives in the *next* read.
-        pending: list | None = None
-
-        def fill_pending_with(read_data_op, read_par_op):
-            nonlocal pending
-            if pending is None:
-                return
-            pending[3] = read_data_op
-            pending[4] = read_par_op
-            pending = None
 
         for op, future in batch:
             if isinstance(op, swd.Run):
@@ -396,42 +391,25 @@ class SwdMpsse(swd.Interface):
                 continue
 
             if isinstance(op, swd.Read):
+                # One packet, one future resolving with the chip-
+                # driven data field of THIS packet. The caller is
+                # responsible for interpreting AP-read pipelining
+                # semantics (see SwDp.flush_ops).
                 ack_op, data_op, par_op = self.__emit_read(
                     mpsse_ops, op.ap, op.addr)
-                if op.ap:
-                    # AP read: ACK lives here, data lives in the next
-                    # read packet's data slot.
-                    fill_pending_with(data_op, par_op)
-                    rec = [future, "ap_read", ack_op, None, None]
-                    records.append(rec)
-                    pending = rec
-                else:
-                    # DP read: ACK + data + parity are all in this packet.
-                    fill_pending_with(data_op, par_op)
-                    records.append(
-                        [future, "dp_read", ack_op, data_op, par_op])
+                kind = "ap_read" if op.ap else "dp_read"
+                records.append([future, kind, ack_op, data_op, par_op])
                 continue
 
             if isinstance(op, swd.Write):
                 ack_op = self.__emit_write(
                     mpsse_ops, op.ap, op.addr, op.data)
                 kind = "ap_write" if op.ap else "dp_write"
-                # Writes don't update RDBUFF; pending stays where it is.
                 records.append([future, kind, ack_op, None, None])
                 continue
 
             future.set_exception(TypeError(
                 f"SwdMpsse can't lower {type(op).__name__}"))
-
-        # Drain any trailing pending AP read with an explicit RDBUFF
-        # read so the user-future resolves before this batch ends.
-        if pending is not None:
-            ack_op, data_op, par_op = self.__emit_read(
-                mpsse_ops, False, _RDBUFF_REG)
-            pending[3] = data_op
-            pending[4] = par_op
-            records.append([None, "rdbuff", ack_op, None, None])
-            pending = None
 
         if not mpsse_ops:
             return

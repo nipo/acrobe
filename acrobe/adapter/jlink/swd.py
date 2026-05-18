@@ -14,12 +14,12 @@ bits), then 32 data bits, then parity, then a couple of trailing
 bits. OpenOCD's ``jlink_swd_queue_cmd`` reads ACK at the same
 offset; matching that convention avoids surprises.
 
-AP-read pipelining is part of the wire protocol: the data of an
-AP read packet lands in the data field of the *next* packet. We
-keep a ``pending`` slot for the in-flight AP read and fill its
-``data_offset`` when the next packet (read OR write) is queued. At
-end of batch we drain a trailing pending read with an explicit
-RDBUFF read."""
+The wire layer is deliberately raw: each ``swd.Read`` / ``swd.Write``
+turns into exactly one wire packet, and the returned future
+resolves with whatever the chip drove on that packet's data slot.
+AP-read pipelining is an ADI SW-DP concern, not a wire concern —
+the bookkeeping lives in
+:class:`acrobe.component.arm.sw_dp.SwDp`'s lowering."""
 
 from __future__ import annotations
 
@@ -182,29 +182,17 @@ class JLinkSwdInterface(swd.Interface):
         direction: list[int] = []
         out: list[int] = []
         # Per-packet record: [user_future, kind, ack_offset,
-        #                     data_offset_or_None]
-        # Some entries have user_future=None (phantom RDBUFF).
+        #                     data_offset_or_None]. Each record covers
+        # exactly one wire packet — no pipeline awareness.
         records: list[list] = []
-        # Pending AP read whose data lives in the *next* packet's
-        # data slot. When we emit a new read, we fill this entry's
-        # data_offset and clear pending.
-        pending: list | None = None
-
-        def flush_pending_with_rdbuff():
-            nonlocal pending
-            if pending is None:
-                return
-            offset = _emit_swd_read(direction, out, False, _RDBUFF_REG)
-            pending[3] = offset + _READ_DATA_OFFSET
-            records.append([None, "rdbuff", offset + _ACK_OFFSET, None])
-            pending = None
 
         async def issue_chunk():
             """Emit the accumulated direction/out as one swd_io and
-            resolve every future in `records`. Drains pending first
-            so no AP-read straddles a chunk boundary."""
-            nonlocal direction, out, records, pending
-            flush_pending_with_rdbuff()
+            resolve every future in `records`. Chunks split at
+            transaction boundaries; the chip-side AP-read latch is
+            preserved across chunks (the chip stays in the same SWD
+            state across short idle periods)."""
+            nonlocal direction, out, records
             if not direction:
                 return
             try:
@@ -224,7 +212,8 @@ class JLinkSwdInterface(swd.Interface):
 
         for op, future in batch:
             # Cap accumulated bit-bang size between transactions —
-            # `issue_chunk` drains pending + records, clears arrays.
+            # `issue_chunk` resolves accumulated records and clears
+            # arrays.
             if len(direction) >= self.MAX_CHUNK_BITS:
                 await issue_chunk()
             if isinstance(op, swd.Run):
@@ -288,33 +277,20 @@ class JLinkSwdInterface(swd.Interface):
                 continue
 
             if isinstance(op, swd.Read):
+                # One packet, one future resolving with whatever the
+                # chip drove on its data slot. AP-read pipeline
+                # interpretation lives in SwDp.flush_ops.
                 offset = _emit_swd_read(direction, out, op.ap, op.addr)
-                if op.ap:
-                    # AP read: ACK in this packet, data in NEXT packet.
-                    if pending is not None:
-                        # Previous AP read's data is in THIS packet's
-                        # data field.
-                        pending[3] = offset + _READ_DATA_OFFSET
-                        pending = None
-                    rec = [future, "ap_read", offset + _ACK_OFFSET, None]
-                    records.append(rec)
-                    pending = rec
-                else:
-                    # DP read: ACK + data both in this packet.
-                    if pending is not None:
-                        pending[3] = offset + _READ_DATA_OFFSET
-                        pending = None
-                    rec = [future, "dp_read",
-                           offset + _ACK_OFFSET,
-                           offset + _READ_DATA_OFFSET]
-                    records.append(rec)
+                kind = "ap_read" if op.ap else "dp_read"
+                records.append([future, kind,
+                                offset + _ACK_OFFSET,
+                                offset + _READ_DATA_OFFSET])
                 continue
 
             if isinstance(op, swd.Write):
                 offset = _emit_swd_write(direction, out,
                                          op.ap, op.addr, op.data)
                 kind = "ap_write" if op.ap else "dp_write"
-                # Writes don't update RDBUFF — pending stays.
                 records.append([future, kind, offset + _ACK_OFFSET, None])
                 continue
 
