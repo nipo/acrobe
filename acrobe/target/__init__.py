@@ -31,6 +31,7 @@ from .arm import soc as _arm_soc  # noqa: F401,E402
 from .arm import nrf52 as _nrf52  # noqa: F401,E402
 from .arm import efm32 as _efm32  # noqa: F401,E402
 from .arm import rp2040 as _rp2040  # noqa: F401,E402
+from .arm import rp2040_swd as _rp2040_swd  # noqa: F401,E402
 
 __all__ = [
     "Target", "Explorer", "TargetDiscovery",
