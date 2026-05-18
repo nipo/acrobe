@@ -228,7 +228,6 @@ class JLinkSwdInterface(swd.Interface):
             if len(direction) >= self.MAX_CHUNK_BITS:
                 await issue_chunk()
             if isinstance(op, swd.Run):
-                # Pure idle cycles. Latch is preserved.
                 for _ in range(op.cycles):
                     direction.append(1)
                     out.append(0)
@@ -236,8 +235,6 @@ class JLinkSwdInterface(swd.Interface):
                 continue
 
             if isinstance(op, swd.Wakeup):
-                # ≥50 cycles is the line-reset preamble — drain first.
-                flush_pending_with_rdbuff()
                 for _ in range(op.cycles):
                     direction.append(1)
                     out.append(1)
@@ -245,8 +242,6 @@ class JLinkSwdInterface(swd.Interface):
                 continue
 
             if isinstance(op, swd.LineReset):
-                # Wipes DP state including any AP-read pipeline.
-                flush_pending_with_rdbuff()
                 # 60 cycles SWDIO=1 + 8 idle cycles — comfortably
                 # over the spec minimum (50 + 2).
                 for _ in range(60):
@@ -259,20 +254,17 @@ class JLinkSwdInterface(swd.Interface):
                 continue
 
             if isinstance(op, swd.JtagToSwd):
-                flush_pending_with_rdbuff()
                 self.__emit_jtag_to_swd(direction, out)
                 future.set_result(None)
                 continue
 
             if isinstance(op, swd.SwdToDormant):
-                flush_pending_with_rdbuff()
                 _emit_const(direction, out, 60, 1)
                 _emit_int(direction, out, 0xE3BC, 16)
                 future.set_result(None)
                 continue
 
             if isinstance(op, swd.DormantToSwd):
-                flush_pending_with_rdbuff()
                 _emit_const(direction, out, 8, 1)
                 _emit_int(direction, out, 0x86852D956209F392, 64)
                 _emit_int(direction, out, 0x19BC0EA2E3DDAFE9, 64)
@@ -282,8 +274,6 @@ class JLinkSwdInterface(swd.Interface):
                 continue
 
             if isinstance(op, swd.TargetSelWrite):
-                # Counts as a DP write — destroys the AP-read latch.
-                flush_pending_with_rdbuff()
                 # Bit-bang the entire transaction (no ACK capture):
                 # cmd + TRN + 3 ACK cycles (host high) + TRN + data +
                 # parity + 8 idle. Per spec no DP responds.
@@ -300,29 +290,20 @@ class JLinkSwdInterface(swd.Interface):
             if isinstance(op, swd.Read):
                 offset = _emit_swd_read(direction, out, op.ap, op.addr)
                 if op.ap:
-                    # AP read drains via its own data slot.
+                    # AP read: ACK in this packet, data in NEXT packet.
                     if pending is not None:
+                        # Previous AP read's data is in THIS packet's
+                        # data field.
                         pending[3] = offset + _READ_DATA_OFFSET
                         pending = None
                     rec = [future, "ap_read", offset + _ACK_OFFSET, None]
                     records.append(rec)
                     pending = rec
-                elif op.addr == _RDBUFF_REG:
-                    # Explicit RDBUFF drain — data slot carries the
-                    # latched AP-read value.
+                else:
+                    # DP read: ACK + data both in this packet.
                     if pending is not None:
                         pending[3] = offset + _READ_DATA_OFFSET
                         pending = None
-                    rec = [future, "dp_read",
-                           offset + _ACK_OFFSET,
-                           offset + _READ_DATA_OFFSET]
-                    records.append(rec)
-                else:
-                    # DP non-RDBUFF read (DPIDR, CTRL/STAT, …): the
-                    # latch is preserved on the chip but this
-                    # packet's data slot carries the DP register's
-                    # own inline value, NOT the AP latch. Pending
-                    # stays where it is.
                     rec = [future, "dp_read",
                            offset + _ACK_OFFSET,
                            offset + _READ_DATA_OFFSET]
@@ -330,12 +311,10 @@ class JLinkSwdInterface(swd.Interface):
                 continue
 
             if isinstance(op, swd.Write):
-                # Per IHI0031G §B4.2: an AP or DP write following an
-                # AP read DESTROYS the AP-read latch. Drain first.
-                flush_pending_with_rdbuff()
                 offset = _emit_swd_write(direction, out,
                                          op.ap, op.addr, op.data)
                 kind = "ap_write" if op.ap else "dp_write"
+                # Writes don't update RDBUFF — pending stays.
                 records.append([future, kind, offset + _ACK_OFFSET, None])
                 continue
 
