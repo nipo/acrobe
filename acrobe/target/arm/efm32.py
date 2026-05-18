@@ -30,17 +30,18 @@ import struct
 
 from ...component.arm.coresight.rom_table import RomTable
 from ...component.arm.coresight.scs import Scs
-from ...component.arm.dp import Dp, DpAccessFailure
+from ...component.arm.dp import DpAccessFailure
 from ...component.arm.memory import BusRam
 from ...component.arm.mem_ap import MemAp
 from ...db import NoMatch
+from ...part_id import PartId
 from ..debuggable import Debuggable
 from ..loadable import Loadable
 from ..memory import Memory
 from ..puppet import ArmMPuppet, PagedPuppetWriter
 from ..region import Flash, Ram
-from ..target import Target
-from .cortex_m import CortexMDebuggable, CortexMTarget
+from .cortex_m import CortexMDebuggable
+from .soc import ArmSocTarget
 
 
 # Stub blobs from crobe firmware/flash/stubs/arm/efm32.c, compiled
@@ -385,9 +386,30 @@ DI_EMUTEMP       = 0x054
 DI_END           = 0x058
 
 
-class EfmTarget(CortexMTarget):
+class EfmTarget(ArmSocTarget):
     """EFM32 / EFR32 family target — Cortex-M0+ / M3 / M4 with on-die
     flash programmed via the MSC peripheral."""
+
+
+# Silicon Labs root ROM-Table PIDRs that we recognise. JEDEC
+# continuation=6, id=0x73; PARTNO distinguishes the SoC family. The
+# values mirror crobe's `target/soc/arm_based/efm32.py` registration
+# list — they are CoreSight ROM Table PIDR identifiers, populated
+# during ROM-Table discovery, so they are read once during DP
+# enumeration and never re-read at Target probe time.
+EFM32_TARGETIDS: tuple[PartId, ...] = (
+    PartId(6, 0x73, 0x001),
+    PartId(6, 0x73, 0x041),  # EFM32TG
+    PartId(6, 0x73, 0x081),
+    PartId(6, 0x73, 0x082),  # EZR32LG
+    PartId(6, 0x73, 0x0c1),
+    PartId(6, 0x73, 0x0c9),
+    PartId(6, 0x73, 0x101),
+    PartId(6, 0x73, 0x2c1),
+    PartId(6, 0x73, 0x401),
+    PartId(6, 0x73, 0x901),
+    PartId(6, 0x73, 0xbc1),  # EFR32FG14
+)
 
 
 class EfmLoadable(Loadable):
@@ -421,14 +443,16 @@ class EfmLoadable(Loadable):
         return debuggables[0].cores[0]
 
 
-@Target.register(Dp, precedence=500)
+@ArmSocTarget.db.register(*EFM32_TARGETIDS)
 async def efm32_probe(dp):
-    """Probe a DP for an EFM32 / EFR32 family chip.
+    """Factory for an EFM32 / EFR32 chip whose constant-PartId match
+    has already confirmed the SoC family.
 
-    Walks Mem-APs under the DP, reads the DI block, and matches
-    DI.PART.FAMILY against the known-part table. Unknown families
-    or any access failure decline (`NoMatch`) so the generic
-    Cortex-M target catches the device.
+    Reads the DI (Device Information) block for refinement:
+    flash + RAM size, package + pincount, factory UID, DI.PART
+    family for sub-series dispatch. The DI access is guaranteed to
+    land on a real SiLabs chip because the PartId match precedes
+    it — no speculative read of DI_BASE against an arbitrary DP.
     """
     aps = dp.children_of_class(MemAp)
     if not aps:
@@ -440,9 +464,12 @@ async def efm32_probe(dp):
             continue
         family = di[DI_PART + 2]
         if family not in PARTS:
+            # SiLabs confirmed by PartId but DI.PART.FAMILY is a
+            # value our PARTS table doesn't know. Keep walking;
+            # might be a different MemAp.
             continue
         return await _build_efm32_target(dp, ap, di)
-    raise NoMatch("efm32_probe", "no EFM32 found behind DP")
+    raise NoMatch("efm32_probe", "no EFM32 family found via DI under DP")
 
 
 async def _build_efm32_target(dp, ap, di):
