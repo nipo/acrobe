@@ -5,7 +5,7 @@ rescue DP on a single shared SWD wire (ADIv5 multidrop, selected
 via TARGETSEL). The multidrop bring-up
 (:mod:`acrobe.protocol.swd`) already spawns one
 :class:`SwDp` per responsive TARGETSEL on the wire; this module
-turns that flat set of DPs into a single :class:`Rp2040Target`
+turns that flat set of DPs into a single :class:`Rp2040SwdTarget`
 with one :class:`CortexMDebuggable` per core.
 
 Discovery hooks on :class:`Dp` at precedence 500 — lower than
@@ -17,11 +17,32 @@ bus reads needed. Once matched, the probe walks the parent
 claims them all, so the generic factory does not refire on
 them in subsequent discovery passes.
 
-Flash programming is not modelled here — the SWD path to RP2040
-flash goes through complex XIP / QSPI sequencing best driven
-from the BOOTSEL bootloader. Use the PICOBOOT-rooted
-:class:`Rp2040Target` (sibling module ``rp2040.py``) for
-flashing; this SWD target covers run-control only.
+The Target supports an on-demand ``spi`` child: summon
+``rp2040/spi/cs0/flash`` and the Target halts core0, builds an
+:class:`ArmMPuppet` over its Mem-AP plus a chunk of SRAM,
+performs the bootrom-driven SSI bring-up
+(:func:`rp2040_exit_xip_via_puppet`) and exposes the QSPI bus as
+a generic :class:`spi.Interface` driven by the same
+:class:`Rp2040Spi` stub as the PICOBOOT path. Caller's
+expectation: the chip will be reset after the SPI session — we
+clobber a slice of SRAM and don't restore it.
+
+Known issue (2026-05): RP2040's debug fabric does not pipeline
+AP-read responses the way the ADIv5 spec specifies — only the
+RDBUFF drain at end of a batch carries valid data, all
+intermediate AP-read response slots come back as zeros. Bit-
+banged SWD adapters (FTDI, J-Link) therefore can't run a multi-
+register :meth:`Cortex.reg_write` batch correctly, which is what
+:meth:`ArmMPuppet.prepare` does. SPI-via-SWD is therefore
+scaffolded but not functional on this hardware until the wire
+layer is taught to drain via RDBUFF after every AP read. The
+PICOBOOT path is unaffected (firmware-side pipelining hides the
+issue).
+
+Flash programming over SWD (a Loadable that drives
+:class:`Rp2040Spi`) is not modelled here yet; the PICOBOOT-rooted
+:class:`Rp2040Target` (sibling module ``rp2040.py``) is still the
+canonical flashing path.
 """
 
 from __future__ import annotations
@@ -34,6 +55,8 @@ from ...component.arm.sw_dp import SwDp
 from ...db import NoMatch
 from ...part_id import PartId
 from ...protocol import swd
+from ..puppet import ArmMPuppet, Puppet
+from ..region import Ram
 from ..target import Target
 from .cortex_m import CortexMDebuggable
 from .soc import ArmSocTarget
@@ -49,12 +72,123 @@ RP2_FAMILIES = {
 }
 
 
+# Top 16 KiB of SRAM — large enough for the SPI stub (124 B), its
+# trampoline + data block (~32 B), the per-transaction cmd
+# array + tx/rx buffers, and Puppet's stack. Stays well clear of
+# typical user-firmware .data / .bss at the bottom of SRAM.
+# Caller's contract is that the chip is reset after the puppet
+# session — we deliberately clobber this slice.
+SWD_PUPPET_RAM_BASE = 0x2003C000
+SWD_PUPPET_RAM_SIZE = 0x00004000
+
+# Bootrom function-table magic addresses (RP2040 datasheet
+# section 2.8.3). Each location holds a 16-bit pointer.
+BOOTROM_ROM_FUNC_TABLE_PTR     = 0x14
+BOOTROM_ROM_FUNC_LOOKUP_FN_PTR = 0x18
+
+
+def _rom_code(c1: str, c2: str) -> int:
+    """Encode a two-character bootrom function code."""
+    return ord(c1) | (ord(c2) << 8)
+
+
+async def rp2040_exit_xip_via_puppet(puppet: Puppet) -> None:
+    """Equivalent of the PICOBOOT ``exit_xip`` command, run on the
+    target through a generic :class:`Puppet`.
+
+    Reads the bootrom's function-lookup pointers (fixed addresses
+    in the low 32 bytes of bootrom), invokes
+    ``connect_internal_flash`` + ``flash_exit_xip`` via
+    :meth:`Puppet.call`. Idempotent — every call leaves the SSI
+    block in the manual SR-polled mode the SPI passthrough stub
+    expects, regardless of where the chip was beforehand
+    (running user code from XIP, halted in the middle of a flash
+    transaction, …).
+    """
+    table_bytes = await puppet.mem_read(BOOTROM_ROM_FUNC_TABLE_PTR, 2)
+    lookup_bytes = await puppet.mem_read(BOOTROM_ROM_FUNC_LOOKUP_FN_PTR, 2)
+    table_addr = int.from_bytes(table_bytes, "little")
+    lookup_addr = int.from_bytes(lookup_bytes, "little")
+
+    # CONNECT_INTERNAL_FLASH ('I','F'): re-routes QSPI pins from
+    # XIP to SSI master. Required before EXIT_XIP — without it the
+    # SSI block has nothing to drive.
+    connect_addr = await puppet.call(
+        lookup_addr, table_addr, _rom_code("I", "F"), timeout=2.0)
+    if connect_addr == 0:
+        raise RuntimeError(
+            "RP2040 bootrom: rom_func_lookup('IF') returned 0 — "
+            "connect_internal_flash unavailable")
+
+    # FLASH_EXIT_XIP ('E','X'): SSI block out of XIP-read mode,
+    # into manual SR-polled transfers.
+    exit_addr = await puppet.call(
+        lookup_addr, table_addr, _rom_code("E", "X"), timeout=2.0)
+    if exit_addr == 0:
+        raise RuntimeError(
+            "RP2040 bootrom: rom_func_lookup('EX') returned 0 — "
+            "flash_exit_xip unavailable")
+
+    await puppet.call(connect_addr, timeout=2.0)
+    await puppet.call(exit_addr, timeout=2.0)
+
+
 class Rp2040SwdTarget(ArmSocTarget):
     """RP2040 / RP2350 run-control target accessed via SWD multidrop.
 
-    Holds one :class:`CortexMDebuggable` per core DP. Loadable is
-    deliberately absent — flash programming over SWD on RP2 needs
-    BOOTSEL-driven XIP/QSPI sequencing that lives elsewhere."""
+    Holds one :class:`CortexMDebuggable` per core DP. Exposes
+    ``spi`` as an on-demand child: summon it (via
+    :meth:`child_summon`) to build an :class:`ArmMPuppet` over
+    core0 + the top 16 KiB of SRAM, drive the bootrom EXIT_XIP
+    sequence, and expose the QSPI bus as a generic SPI Interface.
+    Caller's contract: chip will be reset after the SPI session —
+    we don't preserve the SRAM slice we use.
+
+    Loadable for flash programming over SWD is not implemented
+    here yet; the PICOBOOT-rooted :class:`Rp2040Target` covers
+    flashing today."""
+
+    async def child_spawn(self, name):
+        if name == "spi":
+            return await self.__spawn_spi()
+        return await super().child_spawn(name)
+
+    async def __spawn_spi(self):
+        from ...component.raspberry.spi import Rp2040Spi
+
+        debuggables = self.children_of_class(CortexMDebuggable)
+        if not debuggables:
+            raise NoMatch(
+                "rp2040_swd:spi",
+                "no Debuggable on this Target — cannot build a puppet")
+        core_debuggable = debuggables[0]
+        cores = core_debuggable.cores
+        if not cores:
+            raise NoMatch(
+                "rp2040_swd:spi",
+                "Debuggable has no Cores — cannot build a puppet")
+
+        # Enable debug + halt core0. The puppet runs target code by
+        # clobbering its register state and SRAM; if the core were
+        # running user firmware it would race the host on both.
+        # ``attach()`` enables DEBUGEN (required before register
+        # transfers work) and halts every core on the Debuggable;
+        # we use it instead of a bare ``core.halt()`` so the
+        # subsequent puppet ``prepare()`` actually finds DCRSR
+        # responsive.
+        await core_debuggable.attach()
+        core = cores[0]
+
+        sram = Ram(
+            "sram", SWD_PUPPET_RAM_BASE, SWD_PUPPET_RAM_SIZE)
+        puppet = ArmMPuppet(
+            "puppet", core, sram, core_debuggable.mem_ap)
+        self.child_add(puppet)
+
+        async def ssi_init():
+            await rp2040_exit_xip_via_puppet(puppet)
+
+        return Rp2040Spi(puppet, ssi_init=ssi_init, name="spi")
 
 
 def _rp2_family(partid: PartId) -> str | None:
