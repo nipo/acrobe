@@ -6,18 +6,29 @@ opened in FT245 SYNCFF bitmode and exposes it as a
 byte stream between the USB bulk endpoints and the FPGA's FIFO
 controller — there is no command framing on the wire, so callers above
 the Pipe are responsible for any structure they need (typically the
-NSL bnoc Sized layer).
+NSL bnoc Sized or Hdlc layer).
+
+Sized reads (``size=int``) route to the transport's exact-size
+:meth:`~acrobe.adapter.ftdi.transport.FtdiTransport.read`; unsized
+reads (``size=None``) route to
+:meth:`~acrobe.adapter.ftdi.transport.FtdiTransport.read_some`,
+which returns as soon as any bytes are available. Bytes pulled past
+the requested boundary stay in the transport's internal residual
+and surface on the next read of either kind.
 """
 
 from __future__ import annotations
-
-import asyncio
 
 from ...protocol.pipe import Pipe, Read, Write
 
 
 class Ft245SyncPipe(Pipe):
     """Pipe over an FTDI channel in FT245 Synchronous FIFO bitmode."""
+
+    # Cap on a single read_some() call. Sized to comfortably exceed
+    # the FT2232H bulk MPS (512 B) so any USB packet currently in
+    # flight lands in one transport read.
+    UNSIZED_READ_MAX = 4096
 
     def __init__(self, transport, name: str = "fifo"):
         super().__init__(name)
@@ -41,12 +52,12 @@ class Ft245SyncPipe(Pipe):
                 continue
 
             if isinstance(op, Read):
-                if op.size is None:
-                    raise NotImplementedError(
-                        "Ft245SyncPipe does not support Pipe.read(size=None); "
-                        "the FTDI transport has an exact-size contract")
                 try:
-                    data = await self.__transport.read(op.size)
+                    if op.size is None:
+                        data = await self.__transport.read_some(
+                            self.UNSIZED_READ_MAX)
+                    else:
+                        data = await self.__transport.read(op.size)
                 except BaseException as exc:
                     if future is not None and not future.done():
                         future.set_exception(exc)

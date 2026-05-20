@@ -61,14 +61,18 @@ class WriteOp:
         self.future.set_result(None)
 
 class ReadOp:
-    def __init__(self, size, timeout = 1):
+    def __init__(self, size, *, min_size=None, timeout=1):
         self.size = size
+        # min_size defaults to size for the legacy exact-read contract;
+        # callers wanting "at least 1, up to size" pass min_size=1.
+        self.min_size = size if min_size is None else min_size
         self.blob = b""
         self.future = asyncio.Future()
         self.timeout = timeout
 
     async def run(self, ep, mps, residual: bytes) -> bytes:
-        """Resolve the future with exactly ``self.size`` payload bytes.
+        """Resolve the future with between ``min_size`` and ``size``
+        payload bytes.
 
         ``residual`` is bytes left over from the previous ReadOp; we
         consume those first. Any payload pulled past ``self.size`` is
@@ -77,17 +81,18 @@ class ReadOp:
         one USB IN packet the next ReadOp will time out waiting for
         bytes that have already been read and discarded.
         """
-        if len(residual) >= self.size:
-            self.future.set_result(residual[:self.size])
-            return residual[self.size:]
+        if len(residual) >= self.min_size:
+            taken = min(len(residual), self.size)
+            self.future.set_result(residual[:taken])
+            return residual[taken:]
 
         self.blob = residual
         stall_count = 0
         deadline = time.monotonic() + self.timeout
-        while len(self.blob) < self.size:
+        while len(self.blob) < self.min_size:
             if time.monotonic() > deadline:
                 self.future.set_exception(TransferTimeout(
-                    f"FTDI read timeout: got {len(self.blob)}/{self.size} "
+                    f"FTDI read timeout: got {len(self.blob)}/{self.min_size} "
                     f"payload bytes in {self.timeout}s"))
                 return b""
 
@@ -108,8 +113,9 @@ class ReadOp:
             self.blob += data[2:]
             deadline = time.monotonic() + self.timeout
 
-        leftover = self.blob[self.size:]
-        self.blob = self.blob[:self.size]
+        taken = min(len(self.blob), self.size)
+        leftover = self.blob[taken:]
+        self.blob = self.blob[:taken]
         self.future.set_result(self.blob)
         return leftover
 
@@ -374,6 +380,20 @@ class FtdiTransport:
         if timeout is None:
             timeout = self.__READ_DEADLINE
         r = ReadOp(size, timeout = timeout)
+        self.__read_queue.put_nowait(r)
+        if self.__reader is None:
+            self.__reader = asyncio.create_task(self.__reader_worker())
+        return r.future
+
+    def read_some(self, max_size: int, timeout: float|None = None):
+        """Read between 1 and ``max_size`` bytes from the FTDI bulk
+        IN endpoint, returning as soon as any data is available.
+
+        Used by streaming consumers (Pipe.read(None) and similar)
+        that don't know in advance how much data to expect."""
+        if timeout is None:
+            timeout = self.__READ_DEADLINE
+        r = ReadOp(max_size, min_size=1, timeout=timeout)
         self.__read_queue.put_nowait(r)
         if self.__reader is None:
             self.__reader = asyncio.create_task(self.__reader_worker())
