@@ -38,9 +38,16 @@ class _StreamPipe(Pipe):
                     future.set_exception(TypeError(
                         f"_StreamPipe: unsupported op {type(op).__name__}"))
 
+    _STREAM_CHUNK = 65536
+
     async def _read_task(self, size, future):
         try:
-            data = await self._reader.readexactly(size)
+            if size is None:
+                data = await self._reader.read(self._STREAM_CHUNK)
+                if not data:
+                    raise EOFError("_StreamPipe: connection closed")
+            else:
+                data = await self._reader.readexactly(size)
         except Exception as exc:
             if not future.done():
                 future.set_exception(exc)

@@ -37,10 +37,17 @@ class Write:
 
 @dataclass(frozen=True, slots=True)
 class Read:
-    """Read exactly `size` bytes. Future resolves to a ``bytes`` of
-    length `size`."""
+    """Read bytes from the pipe.
 
-    size: int
+    If `size` is an ``int``, the future resolves to exactly `size`
+    bytes. If `size` is ``None``, the future resolves as soon as at
+    least one byte has arrived, with whatever the underlying
+    transport made available — useful for streaming protocols where
+    the caller cannot pre-compute a frame size. Implementations
+    never resolve with an empty ``bytes`` for ``size=None``; they
+    raise (typically :class:`EOFError`) when the transport closes."""
+
+    size: int | None
 
 
 class Pipe(Batcher, Node):
@@ -67,9 +74,12 @@ class Pipe(Batcher, Node):
         """Post a Write op. Returns a Future resolving to ``None``."""
         return self.post(Write(bytes(data)))
 
-    def read(self, size: int):
-        """Post a Read op. Returns a Future resolving to ``bytes``."""
-        return self.post(Read(int(size)))
+    def read(self, size: int | None = None):
+        """Post a Read op. Returns a Future resolving to ``bytes``.
+
+        ``size=None`` requests "at least one byte, possibly more"
+        streaming semantics; see :class:`Read` for the contract."""
+        return self.post(Read(size if size is None else int(size)))
 
     async def flush_ops(self, batch):
         raise NotImplementedError(

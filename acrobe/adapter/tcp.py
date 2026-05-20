@@ -108,11 +108,21 @@ class TcpPipe(Pipe):
         if future is not None and not future.done():
             future.set_result(None)
 
+    # Upper bound on a streaming (size=None) read. Picked to comfortably
+    # exceed a TCP MTU so a single recv() consumes whatever the kernel
+    # delivered in one go.
+    __STREAM_CHUNK = 65536
+
     async def __read_task(self, size, future):
         try:
             if self.__reader is None:
                 raise ConnectionError("TcpPipe not started")
-            data = await self.__reader.readexactly(size)
+            if size is None:
+                data = await self.__reader.read(self.__STREAM_CHUNK)
+                if not data:
+                    raise EOFError("TcpPipe: connection closed")
+            else:
+                data = await self.__reader.readexactly(size)
         except Exception as exc:
             if future is not None and not future.done():
                 future.set_exception(exc)

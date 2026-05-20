@@ -139,7 +139,7 @@ class TelnetPipe(Pipe):
 
     async def __read_task(self, size, future):
         try:
-            data = await self.__read_exact(size)
+            data = await self.__deliver_bytes(size)
         except Exception as exc:
             if not future.done():
                 future.set_exception(exc)
@@ -147,7 +147,16 @@ class TelnetPipe(Pipe):
         if not future.done():
             future.set_result(data)
 
-    async def __read_exact(self, size: int) -> bytes:
+    async def __deliver_bytes(self, size: int | None) -> bytes:
+        if size is None:
+            while not self.__rx_buf:
+                if self.__eof:
+                    raise EOFError("Telnet transport closed")
+                self.__rx_event.clear()
+                await self.__rx_event.wait()
+            data = bytes(self.__rx_buf)
+            self.__rx_buf.clear()
+            return data
         out = bytearray()
         while len(out) < size:
             if self.__rx_buf:

@@ -41,6 +41,10 @@ class Ft245SyncPipe(Pipe):
                 continue
 
             if isinstance(op, Read):
+                if op.size is None:
+                    raise NotImplementedError(
+                        "Ft245SyncPipe does not support Pipe.read(size=None); "
+                        "the FTDI transport has an exact-size contract")
                 try:
                     data = await self.__transport.read(op.size)
                 except BaseException as exc:
