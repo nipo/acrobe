@@ -1086,6 +1086,15 @@ class Chain(Batcher, Node):
 
     # --- TLR-driven refresh ----------------------------------------
 
+    def __snapshot_chain(self):
+        """Set of `(tap_name, enabled)` tuples — used to diff
+        before/after for the post-refresh `mutate` emit."""
+        return {
+            (tap.name, self.contexts[tap].enabled)
+            for tap in self.children
+            if tap in self.contexts
+        }
+
     async def tlr_and_refresh(self):
         """Drive the chain through Test-Logic-Reset, re-probe the
         visible TAPs, and reconcile the software model against
@@ -1128,9 +1137,11 @@ class Chain(Batcher, Node):
         TLR. This is correct: the chain is re-built incrementally
         as `post_tlr` hooks run.
         """
+        from ..event import Phase
         iface = self.parent_of_class(JtagInterface)
         # Snapshot taps so we can iterate while the chain mutates.
         existing = list(self.children)
+        before = self.__snapshot_chain()
 
         self.logger.trace("Refresh: %d existing TAPs (%d enabled)",
                           len(existing),
@@ -1160,6 +1171,12 @@ class Chain(Batcher, Node):
             ctx = self.contexts.get(tap)
             if ctx is not None and ctx.enabled:
                 await tap.post_tlr()
+
+        after = self.__snapshot_chain()
+        await self.emit("mutate", phase=Phase.POST,
+                        committed=True,
+                        changed=(before != after),
+                        tap_count=len(self.children))
 
     def __match_identities(self, existing, slots):
         """Greedy IDCODE+irlen match. Returns dict {slot_idx: tap}.

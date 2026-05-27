@@ -18,11 +18,143 @@ Mixins are independent; a Node opts in to whichever apply. See
 """
 
 import asyncio
+import functools
 import logging
-from contextlib import contextmanager
+import os
+from contextlib import asynccontextmanager, contextmanager
 
 from .db import NoMatch
 from .log import get_progress
+
+
+class Path:
+    """Static utilities for slash-separated paths used in the Node
+    tree and on the event bus, plus the symlink-aware canonicaliser
+    for filesystem paths.
+
+    Used by:
+
+    - `Node.path` callers needing structural queries (descendant,
+      parent, components).
+    - Event-bus subscribers, who must canonicalise the path they
+      subscribe to so it matches what publishers will emit. The
+      bus matches strings verbatim — no fuzzy resolution at
+      subscription time.
+
+    All helpers are static. The class is the namespace, not a
+    constructible thing.
+    """
+
+    @staticmethod
+    def parts(path: str) -> tuple[str, ...]:
+        """Split into components. Empty path or `/` → `()`."""
+        if not path:
+            return ()
+        return tuple(p for p in path.split("/") if p)
+
+    @staticmethod
+    def parent_of(path: str) -> str | None:
+        """Path of the parent. Returns None when `path` is the
+        root (`""`, `"/"`, or a single component without leading
+        `/`)."""
+        if not path:
+            return None
+        if path.startswith("/"):
+            # Absolute (filesystem-style): root is "/".
+            if path == "/":
+                return None
+            head = path.rsplit("/", 1)[0]
+            return head or "/"
+        # Relative (Node-tree-style): single segment has no parent.
+        if "/" not in path:
+            return None
+        return path.rsplit("/", 1)[0]
+
+    @staticmethod
+    def is_descendant_or_self(path: str, ancestor: str) -> bool:
+        """True if `path` equals `ancestor` or is a descendant
+        of it. Empty ancestor matches every path (treated as the
+        universal root)."""
+        if ancestor == "":
+            return True
+        if path == ancestor:
+            return True
+        # Trailing-slash-insensitive: treat "a/b/" and "a/b" the same.
+        anchor = ancestor.rstrip("/")
+        return path.startswith(anchor + "/")
+
+    @staticmethod
+    def canonicalize_fs(path) -> str:
+        """Resolve symlinks for the existing prefix of `path`.
+
+        Returns an absolute path. Components that exist on disk
+        are resolved through the kernel (so symlinks are followed
+        to real paths); the first non-existing component and
+        everything beyond it are appended literally.
+
+        This is the form the OS notifier reports under: events
+        fire under the real directory, never under symlink
+        aliases. Subscribers on a non-canonical path would never
+        match.
+        """
+        abs_path = os.path.abspath(os.fspath(path))
+        # Walk component by component from the root.
+        segments = abs_path.split(os.sep)
+        # segments[0] is "" for an absolute path.
+        resolved = os.sep
+        existing = True
+        for segment in segments[1:]:
+            if not segment:
+                continue
+            candidate = os.path.join(resolved, segment)
+            if existing and os.path.lexists(candidate):
+                # Resolve any symlink at this level. Use realpath
+                # so chained symlinks collapse to the real target.
+                resolved = os.path.realpath(candidate)
+            else:
+                # Past the existing prefix — append literally.
+                existing = False
+                resolved = os.path.join(resolved, segment)
+        return resolved
+
+    @classmethod
+    def canonicalize_hw(cls, root: "Node", path: str) -> str:
+        """Walk the Node tree from `root` resolving each segment
+        of `path` through `child_lookup` to its canonical name.
+
+        Stops at the first segment with no match — remaining
+        segments are appended literally (analogous to the FS
+        case for nodes that don't exist yet, e.g. waiting for
+        a hotplug to surface a USB child).
+
+        Non-spawning: never calls `child_spawn`, never does IO.
+        For canonicalisation through unsummoned subtrees, call
+        `await root.child_summon(...)` first and use the
+        resulting node's `.path`.
+
+        The leading segment of the result is `root.name` (so the
+        result is a fully-qualified path comparable with the
+        `.path` of any descendant).
+        """
+        segments = cls.parts(path)
+        # Strip leading root.name if the caller redundantly
+        # included it — both forms accepted.
+        if segments and segments[0] == root.name:
+            segments = segments[1:]
+        canonical = [root.name]
+        node = root
+        for segment in segments:
+            if node is None:
+                canonical.append(segment)
+                continue
+            child = node.child_lookup(segment)
+            if child is None:
+                canonical.append(segment)
+                node = None
+            else:
+                canonical.append(child.name)
+                node = child
+        return "/".join(canonical)
 
 
 class _NotKvList(Exception):
@@ -273,6 +405,16 @@ class Node:
         # an event loop exists.
         self.__summon_inflight: dict[str, asyncio.Future] = {}
         self.__start_lock: asyncio.Lock | None = None
+        # Event-bus subscriptions registered through self.subscribe()
+        # — auto-cancelled when this Node's stop_tree runs.
+        self.__subscriptions: list = []
+        # Pending attach event, set by __child_attach when this
+        # Node enters the tree. Drained on the next async path
+        # through this Node (ensure_started or child_remove) so
+        # the lifecycle is consistent regardless of whether
+        # attach happened in sync setup or in a live tree.
+        # Tuple `(parent_path,)` or None.
+        self.__pending_attach: tuple | None = None
 
     def __str__(self):
         return self.__name
@@ -354,11 +496,40 @@ class Node:
     def __child_attach(self, child: "Node"):
         """Silent attach. Internal — used by __lookup_or_spawn so
         that child_summon can take the inflight lock and then start
-        the child itself without racing the auto-start path."""
+        the child itself without racing the auto-start path.
+
+        Records a pending `(attach, post)` on the child. The emit
+        actually fires on the next async path through the child:
+
+        - `ensure_started` drains it before emitting `start`, so
+          every node sees `attach → start` in order.
+        - `child_remove` drains it before emitting `detach`, so a
+          child added then removed without ever starting still
+          gets a paired `attach → detach`.
+
+        This avoids the sync/async mismatch around `__init__` —
+        Nodes are constructed sync (no loop yet), but their
+        attach events still reach subscribers once the tree
+        becomes live.
+        """
         assert child.__parent is None, f"{child.fqdn} already has a parent"
         child.__parent = self
         self.__children.append(child)
         self.children_changed()
+        child.__pending_attach = (self.path,)
+
+    async def __drain_pending_attach(self) -> None:
+        """Emit the deferred attach POST, if any. Atomic
+        read-and-clear so concurrent callers can't double-emit."""
+        pending = self.__pending_attach
+        self.__pending_attach = None
+        if pending is None:
+            return
+        from .event import Event, Phase, get_bus
+        (parent_path,) = pending
+        await get_bus().emit(Event(
+            source=self.path, action="attach",
+            phase=Phase.POST, properties={"parent": parent_path}))
 
     def child_add(self, child: "Node"):
         """Public eager-attach. Auto-starts the child if this parent
@@ -369,12 +540,31 @@ class Node:
             asyncio.ensure_future(child.start_tree())
 
     async def child_remove(self, child: "Node"):
-        """Stop the child's subtree, then detach."""
+        """Stop the child's subtree, then detach.
+
+        Drains any pending attach on the child first — so a child
+        added then removed without ever starting still emits a
+        paired `attach → detach` lifecycle.
+
+        Emits `(detach, pre)` before stop, `(detach, post)` after
+        detach. The POST event's `source` is the path the child
+        had while attached — by then, `child.path` no longer
+        reflects where it lived.
+        """
+        from .event import Event, Phase, get_bus
         assert child.__parent is self, f"{child.fqdn} is not a child of {self.fqdn}"
+        await child.__drain_pending_attach()
+        child_path = child.path
+        parent_path = self.path
+        await child.emit("detach", phase=Phase.PRE,
+                         parent=parent_path)
         await child.stop_tree()
         self.__children.remove(child)
         child.__parent = None
         self.children_changed()
+        await get_bus().emit(Event(
+            source=child_path, action="detach",
+            phase=Phase.POST, properties={"parent": parent_path}))
 
     def child_transplant_to(self, new_parent: "Node") -> None:
         """Move every child of this node onto `new_parent`, in order,
@@ -646,16 +836,24 @@ class Node:
         through one ``start()`` call.
 
         Public — subclasses that need to start a borrowed-reference
-        sibling node before using it call this directly."""
+        sibling node before using it call this directly.
+
+        Drains the pending attach event (deferred from
+        `__child_attach`) so subscribers see `attach POST` before
+        `start PRE`. Then fires `(start, pre)`, runs `start()`,
+        emits `(start, post)` with `success=True/False` and
+        re-raises on failure."""
         if self.__started:
             return
+        await self.__drain_pending_attach()
         if self.__start_lock is None:
             self.__start_lock = asyncio.Lock()
         async with self.__start_lock:
             if self.__started:
                 return
-            await self.start()
-            self.__started = True
+            async with self.event_emitter("start"):
+                await self.start()
+                self.__started = True
 
     async def start(self):
         pass
@@ -669,7 +867,111 @@ class Node:
             await child.start_tree()
 
     async def stop_tree(self):
-        await self.stop()
-        self.__started = False
+        """Top-down stop. Emits `(stop, pre/post)` around `stop()`
+        on this Node only if it was actually started — symmetric
+        with `ensure_started`, which emits `start` only when
+        `start()` runs. Cancels subscriptions held against this
+        Node (`subscribe()` scoped to this Node's lifetime), then
+        recurses into children."""
+        if self.__started:
+            async with self.event_emitter("stop"):
+                await self.stop()
+                self.__started = False
+        for sub in self.__subscriptions:
+            sub.cancel()
+        self.__subscriptions.clear()
         for child in self.__children:
             await child.stop_tree()
+
+    # ----- Event-bus integration -----
+
+    async def emit(self, action: str, phase: str | None = None,
+                   **properties) -> None:
+        """Publish on the global event bus with `source=self.path`.
+
+        Convenience over `acrobe.event.get_bus().emit(Event(...))`
+        — captures the path string at call time and forwards. The
+        bus is path-keyed, so the Python identity of `self` is
+        irrelevant to subscribers; they match on the string.
+        """
+        from .event import Event, get_bus
+        await get_bus().emit(Event(
+            source=self.path, action=action, phase=phase,
+            properties=properties))
+
+    def subscribe(self, handler, *,
+                  action=None, phase=None,
+                  source_match: str = "subtree",
+                  predicate=None):
+        """Subscribe to bus events with `source=self.path`.
+
+        Defaults to `source_match="subtree"` because the typical
+        Node-side use is "watch me and my descendants" — opposite
+        to the bare-bus default (`"exact"`).
+
+        The Node instance is consumed only to capture `self.path`.
+        After this call returns, the subscription is path-based;
+        a fresh Node replacing this one at the same path will
+        still trigger the handler.
+
+        The returned `Subscription` is tracked on this Node and
+        auto-cancelled on `stop_tree`. Callers wanting a
+        longer-lived subscription should go through
+        `acrobe.event.get_bus().subscribe(...)` directly.
+        """
+        from .event import get_bus
+        sub = get_bus().subscribe(
+            handler,
+            action=action, phase=phase,
+            source=self.path, source_match=source_match,
+            predicate=predicate)
+        self.__subscriptions.append(sub)
+        return sub
+
+    @asynccontextmanager
+    async def event_emitter(self, action: str, **base_properties):
+        """Async context manager: emits `(action, PRE)` on enter,
+        `(action, POST)` on exit, yields a `Notifier` whose
+        `progress(**props)` emits `(action, PROGRESS)` events
+        sharing the base properties.
+
+        The POST event carries `success=True` on clean exit and
+        `success=False` + `error_class=<exception type name>` on
+        exception. Exceptions still propagate to the caller
+        after the POST is emitted.
+        """
+        from .event import Notifier, Phase
+        await self.emit(action, phase=Phase.PRE, **base_properties)
+        notifier = Notifier(self, action, base_properties)
+        success = True
+        error: BaseException | None = None
+        try:
+            yield notifier
+        except BaseException as exc:
+            success = False
+            error = exc
+            raise
+        finally:
+            extra = {"success": success}
+            if error is not None:
+                extra["error_class"] = type(error).__name__
+            await self.emit(action, phase=Phase.POST,
+                            **base_properties, **extra)
+
+    @staticmethod
+    def notified(action: str):
+        """Decorator: wrap an async method so pre/post events fire
+        automatically around it.
+
+        Equivalent to wrapping the body in
+        `async with self.event_emitter(action): ...`. For richer
+        cases (progress events, per-call base properties), use
+        `event_emitter` directly.
+        """
+        def deco(method):
+            @functools.wraps(method)
+            async def wrapper(self, *args, **kwargs):
+                async with self.event_emitter(action):
+                    return await method(self, *args, **kwargs)
+            return wrapper
+        return deco

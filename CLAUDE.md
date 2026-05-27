@@ -45,6 +45,8 @@ operation layer) and links the rest:
   (frozen-dataclass ops, Db-based subclass discovery, lifecycle
   hooks, naming, comments). **Read before writing code.**
 * @docs/logging.md — log levels, CLI controls, programmatic use.
+* @docs/events.md — process-global pub/sub bus: publishing,
+  subscribing, canonical actions, FsWatcher, USB hotplug.
 * @docs/testing.md — pytest setup, mocking the wire, known
   isolation gotcha.
 * @docs/vfs-design.md — VFS, the `as(type=...)` syntax, format

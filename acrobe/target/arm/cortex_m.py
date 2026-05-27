@@ -160,14 +160,18 @@ class CortexMCore(Core):
 
     async def reset(self, *, stop: bool = True) -> None:
         """SYSRESETREQ. With `stop=True` set DEMCR.VC_CORERESET first
-        so the core comes up halted; restore it after."""
-        if stop:
-            await self.scs.set_reset_catch(True)
-        try:
-            await self.scs.cpu_reset()
-        finally:
+        so the core comes up halted; restore it after.
+
+        Emits `(reset, pre/post)` with `kind="cpu"` so subscribers
+        (auto-reload consoles, RTT rebind, logging) can react."""
+        async with self.event_emitter("reset", kind="cpu", stop=stop):
             if stop:
-                await self.scs.set_reset_catch(False)
+                await self.scs.set_reset_catch(True)
+            try:
+                await self.scs.cpu_reset()
+            finally:
+                if stop:
+                    await self.scs.set_reset_catch(False)
 
     async def reg_read(self, regs):
         registers = [self.lookup_register(r) for r in regs]

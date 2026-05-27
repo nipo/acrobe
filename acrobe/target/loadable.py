@@ -43,24 +43,34 @@ class Loadable(Node):
 
     async def write(self, source, *, do_erase=False, do_verify=False,
                     do_start=False, update=True, assume_clean=False):
-        m = (await coerce_memory_map(source)).simplified()
-        await self.pre_program(do_erase=do_erase, assume_clean=assume_clean)
+        target_path = self.parent.path if self.parent else ""
+        async with self.event_emitter(
+                "program",
+                target=target_path,
+                do_erase=do_erase,
+                do_verify=do_verify) as notifier:
+            m = (await coerce_memory_map(source)).simplified()
+            await self.pre_program(do_erase=do_erase, assume_clean=assume_clean)
 
-        for region in sorted(self.regions):
-            region_m = m.within(region.address, region.end)
-            if not region_m:
-                continue
-            total = region.programming_total(region_m)
-            with region.progress("program", total, "B") as bar:
-                async for offset, data in region.plan_update(region_m):
-                    await region.write(offset, data)
-                    bar.advance(len(data))
+            for region in sorted(self.regions):
+                region_m = m.within(region.address, region.end)
+                if not region_m:
+                    continue
+                total = region.programming_total(region_m)
+                written = 0
+                with region.progress("program", total, "B") as bar:
+                    async for offset, data in region.plan_update(region_m):
+                        await region.write(offset, data)
+                        bar.advance(len(data))
+                        written += len(data)
+                await notifier.progress(
+                    region=region.path, written=written, total=total)
 
-        success = True
-        if do_verify:
-            success = await self.verify(m)
+            success = True
+            if do_verify:
+                success = await self.verify(m)
 
-        await self.post_program(success=success, do_start=do_start)
+            await self.post_program(success=success, do_start=do_start)
 
     async def read(self, begin=0, end=None) -> MemoryMap:
         regions = sorted(self.regions)

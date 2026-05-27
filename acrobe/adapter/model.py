@@ -81,6 +81,14 @@ class UsbEnumerator:
 
     def __init__(self):
         self.__ctx = None
+        # Hotplug-watch state. Lazily populated by start_watch();
+        # cleared by stop_watch.
+        self.__watch_task = None
+        self.__hotplug_iter = None
+        # (bus, address) → adapter name, populated on connect and
+        # consulted on disconnect so the disconnected emit uses
+        # the right name.
+        self.__known_by_addr: dict[tuple[int, int], str] = {}
 
     def __ensure_ctx(self):
         if self.__ctx is None:
@@ -165,6 +173,125 @@ class UsbEnumerator:
                 continue
             results.append((info, adapter_cls, desc, serial))
         return results
+
+    async def __resolve_name(self, desc) -> str | None:
+        """Find an adapter name that descriptor `desc` would
+        produce if summoned. None if no registered AdapterInfo
+        matches or if the device declines probing."""
+        for info, adapters in adapter_db.registry.items():
+            if not info.matches(desc):
+                continue
+            for adapter_cls in adapters:
+                serial = await self.__probe(desc, adapter_cls)
+                if serial is _SKIP:
+                    continue
+                return make_adapter_name(info, serial)
+        return None
+
+    @staticmethod
+    def __source_path(name: str, root_name: str = "HwRoot") -> str:
+        return f"{root_name}/{name}"
+
+    async def __seed_known_devices(self):
+        """Populate the (bus, address) → name map with currently-
+        attached recognised adapters. Lets disconnect events that
+        happen shortly after watch-start be matched to a name."""
+        for desc in self.__ctx.device_filter():
+            name = await self.__resolve_name(desc)
+            if name is not None:
+                self.__known_by_addr[(desc.bus, desc.address)] = name
+
+    async def __handle_hotplug(self, event) -> None:
+        """Translate one ausb hotplug event into an event-bus emit."""
+        import ausb
+        from ..event import Event, get_bus
+        device = getattr(event, "device", None)
+        if device is None:
+            return
+        key = (device.bus, device.address)
+        if isinstance(event, ausb.ConnectionEvent):
+            name = await self.__resolve_name(device)
+            if name is None:
+                return
+            self.__known_by_addr[key] = name
+            await get_bus().emit(Event(
+                source=self.__source_path(name),
+                action="connected",
+                phase=None,
+                properties={
+                    "bus": device.bus,
+                    "address": device.address,
+                    "vendor_id": device.vendor_id,
+                    "product_id": device.product_id,
+                }))
+        elif isinstance(event, ausb.DisconnectionEvent):
+            name = self.__known_by_addr.pop(key, None)
+            if name is None:
+                return
+            await get_bus().emit(Event(
+                source=self.__source_path(name),
+                action="disconnected",
+                phase=None,
+                properties={
+                    "bus": device.bus,
+                    "address": device.address,
+                }))
+
+    async def __watch_loop(self):
+        """Drain hotplug events from ausb and dispatch each to the
+        bus. Per-event exceptions are caught so one bad event
+        doesn't kill the watcher."""
+        try:
+            async for event in self.__hotplug_iter:
+                try:
+                    await self.__handle_hotplug(event)
+                except BaseException:
+                    import logging
+                    logging.getLogger("acrobe.adapter.usb").warning(
+                        "hotplug handler failed for %r",
+                        event, exc_info=True)
+        except asyncio.CancelledError:
+            pass
+
+    async def start_watch(self):
+        """Enable USB hotplug observation. Emits `(connected, None)`
+        and `(disconnected, None)` on the bus for recognised
+        adapters; unrecognised USB devices are ignored.
+
+        Source path is `HwRoot/<adapter-name>` — the path the
+        adapter would have if summoned. Subscribers interested in
+        a specific adapter subscribe by that path.
+
+        Idempotent — calling twice is a no-op."""
+        if self.__watch_task is not None:
+            return
+        # Re-create the context with hotplug enabled. The original
+        # was built `enable_hotplug=False` to avoid the background
+        # libusb thread on the polling-only path.
+        if self.__ctx is not None:
+            await self.__close_ctx()
+        import ausb
+        from ..lifecycle import on_shutdown
+        self.__ctx = ausb.Context(enable_hotplug=True)
+        on_shutdown(self.__close_ctx)
+        self.__known_by_addr = {}
+        await self.__seed_known_devices()
+        self.__hotplug_iter = self.__ctx.hotplug_events()
+        self.__watch_task = asyncio.ensure_future(self.__watch_loop())
+
+    async def stop_watch(self):
+        """Stop the watcher. Idempotent."""
+        if self.__hotplug_iter is not None:
+            self.__hotplug_iter.close()
+            self.__hotplug_iter = None
+        if self.__watch_task is not None:
+            self.__watch_task.cancel()
+            try:
+                await self.__watch_task
+            except (asyncio.CancelledError, BaseException):
+                pass
+            self.__watch_task = None
+        self.__known_by_addr.clear()
 
 
 class HwRoot(Node):
