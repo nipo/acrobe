@@ -59,7 +59,7 @@ def remote_server_app():
     return make_app(_build_remote_tree())
 
 
-def _make_local_root(server_url: str, tmp_path) -> HwRoot:
+async def _make_local_root(server_url: str, tmp_path) -> HwRoot:
     cfg_path = tmp_path / "acrobe.conf"
     cfg_path.write_text(textwrap.dedent(f"""
         wire:
@@ -70,6 +70,7 @@ def _make_local_root(server_url: str, tmp_path) -> HwRoot:
     config = Configuration(path=cfg_path)
     root = HwRoot()
     root.add_enumerator(WireEnumerator(configuration=config))
+    await root.ensure_started()
     return root
 
 
@@ -79,7 +80,7 @@ def _make_local_root(server_url: str, tmp_path) -> HwRoot:
 async def test_wire_namespace_lists_configured_servers(remote_server_app,
                                                       tmp_path):
     async with TestServer(remote_server_app) as server:
-        local = _make_local_root(str(server.make_url("/")), tmp_path)
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
 
         wire_ns = await local.child_summon("wire")
         assert wire_ns.name == "wire"
@@ -89,7 +90,7 @@ async def test_wire_namespace_lists_configured_servers(remote_server_app,
 @pytest.mark.asyncio
 async def test_wire_walks_remote_root(remote_server_app, tmp_path):
     async with TestServer(remote_server_app) as server:
-        local = _make_local_root(str(server.make_url("/")), tmp_path)
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
 
         srv = await local.child_summon("wire", "server0")
         # The remote root advertises its own children (the adapter).
@@ -100,7 +101,7 @@ async def test_wire_walks_remote_root(remote_server_app, tmp_path):
 @pytest.mark.asyncio
 async def test_wire_drills_to_deep_remote_path(remote_server_app, tmp_path):
     async with TestServer(remote_server_app) as server:
-        local = _make_local_root(str(server.make_url("/")), tmp_path)
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
 
         chain = await local.child_summon(
             "wire", "server0", "ub3-trwjmby0", "jtag", "chain")
@@ -116,7 +117,7 @@ async def test_wire_shortcut_name_resolves_via_remote_redirect(
     """The remote server 302s shortcuts; the REST client follows them
     and the local proxy lands on the canonical node."""
     async with TestServer(remote_server_app) as server:
-        local = _make_local_root(str(server.make_url("/")), tmp_path)
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
 
         node = await local.child_summon(
             "wire", "server0", "ub3-", "jtag")  # "ub3-" matches via substring
@@ -128,7 +129,7 @@ async def test_wire_shortcut_name_resolves_via_remote_redirect(
 async def test_wire_rejects_unknown_server(remote_server_app, tmp_path):
     from acrobe.db import NoMatch
     async with TestServer(remote_server_app) as server:
-        local = _make_local_root(str(server.make_url("/")), tmp_path)
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
 
         with pytest.raises(NoMatch):
             await local.child_summon("wire", "no-such-server")

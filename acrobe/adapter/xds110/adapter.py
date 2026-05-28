@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 
 from ...db import NoMatch
-from ..model import Adapter, AdapterInfo, adapter_db, make_adapter_name
+from ..model import Adapter, AdapterInfo, adapter_db
 from . import protocol
 from .transport import XDS110Transport
 
@@ -44,36 +44,25 @@ class XDS110Adapter(Adapter):
     the firmware's state-aware vocabulary (XDS_GOTO_STATE,
     XDS_JTAG_SCAN, XDS_CYCLE_TCK). SWD lands in a later commit."""
 
-    supported_interfaces = ["jtag"]
+    def __init__(self, name: str, info: AdapterInfo, descriptor):
+        super().__init__(name, info, descriptor)
+        self.__device = None
+        self.__transport = None
+        self.version = None
+        # TCK ``delay_count`` programmed at open, consumed by the JTAG
+        # sub-interface so it can avoid a redundant XDS_SET_TCK on its
+        # first flush.
+        self.__delay_count = 0
 
-    def __init__(self, name: str, info: AdapterInfo, device,
-                 transport: XDS110Transport, version: protocol.Version,
-                 delay_count: int):
-        super().__init__(name)
-        self.__info = info
-        self.__device = device
-        self.__transport = transport
-        self.version = version
-        # Track the TCK ``delay_count`` programmed at open so the
-        # JTAG sub-interface can avoid a redundant XDS_SET_TCK on
-        # its first flush. Updated only by sub-interfaces that
-        # subsequently change the rate.
-        self.__delay_count = delay_count
+    def child_hints(self):
+        return ["jtag"]
 
-    @classmethod
-    async def open(cls, descriptor) -> "XDS110Adapter":
+    async def __ensure_open(self) -> None:
+        if self.__transport is not None:
+            return
+        descriptor = self.descriptor
         device = descriptor.open()
-        try:
-            serial_raw = device.serial
-        except Exception:
-            serial_raw = None
-
-        info = next(
-            i for i in _INFOS
-            if i.vid == descriptor.vendor_id
-            and i.pid == descriptor.product_id)
-        name = make_adapter_name(info, serial_raw)
-        logger = logging.getLogger(name)
+        logger = logging.getLogger(self.name)
 
         topology = _USB_TOPOLOGY[(descriptor.vendor_id, descriptor.product_id)]
         transport = await XDS110Transport.from_device(
@@ -124,7 +113,10 @@ class XDS110Adapter(Adapter):
             + protocol.Bytes.pack_u32(protocol.MODE_JTAG),
             response_payload_size=protocol.ERROR_CODE_LEN)
 
-        return cls(name, info, device, transport, version, delay_count)
+        self.__device = device
+        self.__transport = transport
+        self.version = version
+        self.__delay_count = delay_count
 
     @staticmethod
     async def __set_tck(transport: XDS110Transport, delay_count: int) -> None:
@@ -163,6 +155,7 @@ class XDS110Adapter(Adapter):
         return protocol.Version(firmware=firmware, hardware=hardware)
 
     async def child_spawn(self, name):
+        await self.__ensure_open()
         if name == "jtag":
             from .jtag import XDS110JtagInterface
             return XDS110JtagInterface(
@@ -171,6 +164,8 @@ class XDS110Adapter(Adapter):
         raise NoMatch("interface", name)
 
     async def close(self):
+        if self.__transport is None:
+            return
         try:
             await self.__transport.command(
                 bytes([protocol.Opcode.XDS_DISCONNECT]),

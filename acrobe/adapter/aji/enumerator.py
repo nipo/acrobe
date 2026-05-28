@@ -5,18 +5,18 @@ matched name is ``"aji"``: anything else gets passed through to the
 next enumerator. The broker handles the rest of the path.
 """
 
-from ...db import NoMatch
+from ..model import Enumerator, enumerator_db
 from .broker import AjiBroker
 
 
-class AjiEnumerator:
-    """Returns an :class:`AjiBroker` for the literal name ``"aji"``."""
+class AjiEnumerator(Enumerator):
+    """Attaches the single :class:`AjiBroker` namespace node. AJI
+    servers aren't broadcast-discoverable, so there's nothing to scan
+    — the broker resolves `aji/<host>/...` on demand."""
 
-    async def spawn(self, name: str) -> AjiBroker:
-        if name != "aji":
-            raise NoMatch("adapter", name)
-        return AjiBroker()
+    async def populate(self, hw_root):
+        if not hw_root.has_child("aji"):
+            hw_root.child_add(AjiBroker())
 
-    async def scan(self) -> list:
-        # No network discovery: AJI servers aren't broadcast-discoverable.
-        return []
+
+enumerator_db.register("aji")(AjiEnumerator)

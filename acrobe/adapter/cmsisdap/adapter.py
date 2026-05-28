@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 
 from ...db import NoMatch
-from ..model import Adapter, AdapterInfo, adapter_db, make_adapter_name
+from ..model import Adapter, AdapterInfo, adapter_db
 from . import protocol
 from .transport import CmsisDapTransport
 
@@ -37,33 +37,28 @@ class CmsisDapAdapter(Adapter):
     transport into the abstract :class:`acrobe.protocol.swd.Interface`
     and :class:`acrobe.protocol.jtag.JtagInterface` machinery."""
 
-    supported_interfaces = ["swd", "jtag"]
+    def __init__(self, name: str, info: AdapterInfo, descriptor):
+        super().__init__(name, info, descriptor)
+        self.__transport = None
+        self.vendor_name = None
+        self.product_name = None
+        self.fw_version = None
+        self.capabilities = 0
+        self.packet_size = 0
+        self.packet_count = 1
 
-    def __init__(self, name: str, info: AdapterInfo, transport: CmsisDapTransport,
-                 vendor_name: str, product_name: str, fw_version: str,
-                 capabilities: int, packet_size: int, packet_count: int):
-        super().__init__(name)
-        self.__info = info
-        self.__transport = transport
-        self.vendor_name = vendor_name
-        self.product_name = product_name
-        self.fw_version = fw_version
-        self.capabilities = capabilities
-        self.packet_size = packet_size
-        self.packet_count = packet_count
+    def child_hints(self):
+        return ["swd", "jtag"]
 
-    @classmethod
-    async def open(cls, descriptor) -> "CmsisDapAdapter":
-        info = next(
-            i for i in _CMSIS_DAP_INFOS
-            if i.vid == descriptor.vendor_id
-            and i.pid == descriptor.product_id)
+    async def __ensure_open(self) -> None:
+        if self.__transport is not None:
+            return
+        descriptor = self.descriptor
         try:
             serial_raw = descriptor.serial
         except Exception:
             serial_raw = None
-        name = make_adapter_name(info, serial_raw)
-        logger = logging.getLogger(name)
+        logger = logging.getLogger(self.name)
 
         transport = CmsisDapTransport.from_descriptor(
             descriptor.vendor_id, descriptor.product_id,
@@ -96,9 +91,13 @@ class CmsisDapAdapter(Adapter):
                     caps, ", ".join(cap_names) or "(none)",
                     packet_size, packet_count)
 
-        return cls(name, info, transport,
-                   vendor_name, product_name, fw_version,
-                   caps, packet_size, packet_count)
+        self.__transport = transport
+        self.vendor_name = vendor_name
+        self.product_name = product_name
+        self.fw_version = fw_version
+        self.capabilities = caps
+        self.packet_size = packet_size
+        self.packet_count = packet_count
 
     # -- DAP_Info helpers -------------------------------------------
 
@@ -137,6 +136,7 @@ class CmsisDapAdapter(Adapter):
     # -- Sub-interface dispatch -------------------------------------
 
     async def child_spawn(self, name):
+        await self.__ensure_open()
         if name == "swd":
             from .swd import CmsisDapSwDp
             return CmsisDapSwDp(self.__transport, self.capabilities,
@@ -150,6 +150,8 @@ class CmsisDapAdapter(Adapter):
         raise NoMatch("interface", name)
 
     async def close(self):
+        if self.__transport is None:
+            return
         await self.__transport.close()
 
 

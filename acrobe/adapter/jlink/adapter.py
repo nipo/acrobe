@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 
 from ...db import NoMatch
-from ..model import Adapter, AdapterInfo, adapter_db, make_adapter_name
+from ..model import Adapter, AdapterInfo, adapter_db
 from . import protocol
 from .transport import JLinkTransport
 
@@ -42,36 +42,25 @@ class JLinkAdapter(Adapter):
     Phase 1 doesn't yet implement child_spawn; it surfaces the
     adapter and its capabilities in ``info adapters``."""
 
-    supported_interfaces = ["jtag", "swd"]
-
-    def __init__(self, name: str, info: AdapterInfo, device,
-                 transport: JLinkTransport, firmware_version: str,
-                 hardware_version: tuple[int, int, int, int],
-                 caps: bytes, register_handle: int | None):
-        super().__init__(name)
-        self.__info = info
-        self.__device = device
-        self.__transport = transport
-        self.firmware_version = firmware_version
-        self.hardware_version = hardware_version
-        self.caps = caps
+    def __init__(self, name: str, info: AdapterInfo, descriptor):
+        super().__init__(name, info, descriptor)
+        self.__device = None
+        self.__transport = None
+        self.firmware_version = None
+        self.hardware_version = (0, 0, 0, 0)
+        self.caps = b""
         # Connection handle returned by CMD_REGISTER, if we claimed
         # one. Closed back out via CMD_REGISTER(unregister) on close.
-        self.__register_handle = register_handle
+        self.__register_handle = None
 
-    @classmethod
-    async def open(cls, descriptor) -> "JLinkAdapter":
-        device = descriptor.open()
-        try:
-            serial_raw = device.serial
-        except Exception:
-            serial_raw = None
+    def child_hints(self):
+        return ["jtag", "swd"]
 
-        info = next(
-            i for i in _JLINK_INFOS
-            if i.vid == descriptor.vendor_id
-            and i.pid == descriptor.product_id)
-        name = make_adapter_name(info, serial_raw)
+    async def __ensure_open(self):
+        if self.__transport is not None:
+            return
+        device = self.descriptor.open()
+        name = self.name
         logger = logging.getLogger(name)
 
         transport = await JLinkTransport.from_device(device, logger=logger)
@@ -157,11 +146,15 @@ class JLinkAdapter(Adapter):
             except Exception as exc:
                 logger.warning("get_available_interfaces failed: %s", exc)
 
-        return cls(name, info, device, transport,
-                   firmware_version, hardware_version, caps,
-                   register_handle)
+        self.__device = device
+        self.__transport = transport
+        self.firmware_version = firmware_version
+        self.hardware_version = hardware_version
+        self.caps = caps
+        self.__register_handle = register_handle
 
     async def child_spawn(self, name):
+        await self.__ensure_open()
         if name == "jtag":
             from .jtag import JtagJlink
             jtag = JtagJlink(self.__transport, name="jtag")
@@ -173,6 +166,8 @@ class JLinkAdapter(Adapter):
         raise NoMatch("interface", name)
 
     async def close(self):
+        if self.__transport is None:
+            return
         if self.__register_handle is not None:
             try:
                 await self.__transport.register(False, self.__register_handle)

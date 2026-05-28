@@ -216,10 +216,13 @@ async def fake_server_and_host():
 
 class TestEnumerator:
     @pytest.mark.asyncio
-    async def test_match_only_aji(self):
-        from acrobe.db import NoMatch
-        with pytest.raises(NoMatch):
-            await AjiEnumerator().spawn("usb")
+    async def test_populate_attaches_only_aji(self):
+        root = HwRoot()
+        root.add_enumerator(AjiEnumerator())
+        await root.ensure_started()
+        names = [c.name for c in root.children]
+        assert names == ["aji"]
+        assert isinstance(root.child_lookup("aji"), AjiBroker)
 
 
 class TestPathResolution:

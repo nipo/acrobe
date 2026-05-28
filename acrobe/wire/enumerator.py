@@ -34,25 +34,26 @@ from ..db import NoMatch
 from ..node import Node
 from .client import EnumerationClient
 
+# NOTE: this module is imported during `acrobe.protocol.jtag`'s own
+# import (`from .. import wire`), so it must NOT import
+# `acrobe.adapter.model` at top level — that would pull the adapter
+# package in mid-bootstrap and cycle back into a partially-initialised
+# `protocol.jtag`. `WireEnumerator` is therefore registered in
+# `adapter.model._import_standard_enumerators` rather than here, and
+# duck-types the `Enumerator` contract instead of subclassing it.
+
 
 class WireEnumerator:
-    """`make_hw_root` wires this in alongside USB/AJI/XVC.
-
-    Matches a single name `wire`; hands back a `WireNamespace`
-    populated from the config's `wire.servers` section.
-    """
+    """Attaches the single `wire` namespace node, populated from the
+    config's `wire.servers` section. Duck-types the `Enumerator`
+    contract (see the import-cycle note at the top of this module)."""
 
     def __init__(self, configuration: Optional[Configuration] = None):
         self.__configuration = configuration or get_configuration()
 
-    async def spawn(self, name: str):
-        if name != "wire":
-            raise NoMatch("wire", name)
-        return WireNamespace(self.__configuration)
-
-    async def scan(self):
-        """No physical scan — listing belongs to `wire/`'s child_hints."""
-        return []
+    async def populate(self, hw_root):
+        if not hw_root.has_child("wire"):
+            hw_root.child_add(WireNamespace(self.__configuration))
 
 
 class WireNamespace(Node):

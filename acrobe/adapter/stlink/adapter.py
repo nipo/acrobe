@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 
 from ...db import NoMatch
-from ..model import Adapter, AdapterInfo, adapter_db, make_adapter_name
+from ..model import Adapter, AdapterInfo, adapter_db
 from .transport import StLinkTransport
 from . import protocol
 
@@ -41,33 +41,20 @@ class StLinkAdapter(Adapter):
     JTAG / SWD layers entirely. (ST-Link doesn't expose bit-bang
     JTAG, so reuse of those layers wouldn't help anyway.)"""
 
-    supported_interfaces = ["jtag", "swd"]
+    def __init__(self, name: str, info: AdapterInfo, descriptor):
+        super().__init__(name, info, descriptor)
+        self.__device = None
+        self.__transport = None
+        self.version = None
 
-    def __init__(self, name: str, info: AdapterInfo, device,
-                 transport: StLinkTransport,
-                 version: protocol.StLinkVersion):
-        super().__init__(name)
-        self.__info = info
-        self.__device = device
-        self.__transport = transport
-        self.version = version
+    def child_hints(self):
+        return ["jtag", "swd"]
 
-    @classmethod
-    async def open(cls, descriptor) -> "StLinkAdapter":
-        device = descriptor.open()
-        try:
-            serial_raw = device.serial
-        except Exception:
-            serial_raw = None
-
-        # Pick the registered AdapterInfo whose VID+PID match this
-        # descriptor — used for the friendly adapter name.
-        info = next(
-            i for i in _STLINK_INFOS
-            if i.vid == descriptor.vendor_id
-            and i.pid == descriptor.product_id)
-        name = make_adapter_name(info, serial_raw)
-        logger = logging.getLogger(name)
+    async def __ensure_open(self) -> None:
+        if self.__transport is not None:
+            return
+        device = self.descriptor.open()
+        logger = logging.getLogger(self.name)
 
         transport = await StLinkTransport.from_device(
             device, interface_index=0, logger=logger)
@@ -85,9 +72,12 @@ class StLinkAdapter(Adapter):
         version = await transport.get_version()
         logger.info("ST-Link version: %s", version)
 
-        return cls(name, info, device, transport, version)
+        self.__device = device
+        self.__transport = transport
+        self.version = version
 
     async def child_spawn(self, name):
+        await self.__ensure_open()
         from .dp import StLinkJtagDp, StLinkSwDp
 
         if name == "jtag":
@@ -97,6 +87,8 @@ class StLinkAdapter(Adapter):
         raise NoMatch("interface", name)
 
     async def close(self):
+        if self.__transport is None:
+            return
         await self.__transport.close()
         self.__device.handle.close()
 

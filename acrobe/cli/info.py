@@ -1,7 +1,7 @@
 import asyncclick as click
 
 from . import base
-from ..adapter.model import make_adapter_name
+from ..adapter.model import Adapter
 from ..node import Node
 from ..protocol.jtag import Chain, Tap
 from ..util.pretty import base2
@@ -35,6 +35,9 @@ def component_dump(comp, prefix=""):
     if isinstance(comp, Node):
         for c in comp.children:
             component_dump(c, prefix + "  ")
+        for hint in comp.child_hints():
+            if comp.child_lookup(hint) is None:
+                click.echo(f"{prefix}  ({hint})")
 
 
 @base.cli.group(help="Informational")
@@ -46,24 +49,15 @@ async def info():
 @click.pass_context
 async def adapters(ctx):
     hw_root = ctx.obj.hw_root
-    any_found = False
-    for enum in hw_root.enumerators:
-        found = await enum.scan()
-        if not found:
-            continue
-        any_found = True
-        for info, adapter_cls, desc, serial in found:
-            name = make_adapter_name(info, serial)
-            interfaces = ", ".join(adapter_cls.supported_interfaces)
-            if desc is not None and hasattr(desc, "vendor_id"):
-                ident = f"{desc.vendor_id:04x}:{desc.product_id:04x}"
-            elif hasattr(info, "path"):
-                ident = info.path
-            else:
-                ident = ""
-            click.echo(f"  {name}  {ident}  interfaces: {interfaces}")
-    if not any_found:
+    await hw_root.ensure_started()
+    found = hw_root.children_of_class(Adapter)
+    if not found:
         click.echo("No recognized adapters found.")
+        return
+    for adapter in found:
+        interfaces = ", ".join(adapter.child_hints())
+        click.echo(f"  {adapter.name}  {adapter.ident}  "
+                   f"interfaces: {interfaces}")
 
 
 @info.command(help="Resolve root path, discover, dump component tree")

@@ -16,7 +16,7 @@ Usage::
     asyncio.run(main())
 """
 
-from .adapter.model import make_hw_root
+from .adapter.model import get_hw_root
 from .plugin import load_plugins
 
 
@@ -32,7 +32,8 @@ async def roots(*paths):
     """
     load_plugins()
 
-    hw_root = make_hw_root()
+    hw_root = get_hw_root()
+    await hw_root.ensure_started()
 
     result = []
     for path in paths:

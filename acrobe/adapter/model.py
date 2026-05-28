@@ -1,6 +1,6 @@
 import asyncio
 
-from ..db import Db, NoMatch
+from ..db import Db
 from ..node import Node
 
 
@@ -41,6 +41,13 @@ class AdapterInfo:
 
 adapter_db = Db("adapter", eq_func=AdapterInfo.matches)
 
+# Enumerator factories register here so the standard set is pluggable
+# (out-of-tree enumerators add themselves via the `acrobe_plugin`
+# import path). Keyed by a short name; the value is a zero-argument
+# callable returning an Enumerator instance. `make_hw_root` walks the
+# registry and instantiates every entry.
+enumerator_db = Db("enumerator")
+
 
 def make_adapter_name(info, serial):
     """Build a lowercase component name from adapter info and serial."""
@@ -50,9 +57,26 @@ def make_adapter_name(info, serial):
 
 
 class Adapter(Node):
-    """Base adapter. Subclasses override open() and child_spawn()."""
+    """Base adapter — a live but unopened Node holding device identity.
 
-    supported_interfaces = []
+    An adapter is attached to `HwRoot` by its enumerator with identity
+    only (name, `AdapterInfo`, USB descriptor); it holds no device
+    handle yet. `start()` (run when the adapter is attached to the
+    started root) may do a transient open to interrogate the device
+    and cache the result for `child_hints()`. The long-lived session
+    handle is acquired lazily when an interface child is first
+    summoned — held by the adapter when the device multiplexes
+    concurrent interfaces, or by the interface child when it must be a
+    singleton.
+
+    Subclasses keep the `(name, info, descriptor)` constructor shape
+    so `UsbEnumerator` can build them generically.
+    """
+
+    def __init__(self, name, info=None, descriptor=None):
+        super().__init__(name)
+        self.info = info
+        self.descriptor = descriptor
 
     @classmethod
     def serial_mangle(cls, serial):
@@ -64,20 +88,48 @@ class Adapter(Node):
         """Runtime check with open device handle. Return True if compatible."""
         return True
 
-    @classmethod
-    async def open(cls, descriptor):
-        """Open adapter from USB descriptor. Override in subclass."""
-        raise NotImplementedError
+    def child_hints(self):
+        """Interface (or board) names that can be summoned from this
+        adapter. Replaces the former `supported_interfaces` class
+        attribute. Sync, no IO — read off state cached by `start()`."""
+        return []
+
+    @property
+    def ident(self):
+        """Short identity string for `info adapters` (e.g. `0403:6015`
+        for USB). Empty when the medium has no descriptor."""
+        d = self.descriptor
+        if d is not None and hasattr(d, "vendor_id"):
+            return f"{d.vendor_id:04x}:{d.product_id:04x}"
+        return ""
 
     async def close(self):
         """Release resources. Override in subclass."""
         pass
 
 
+class Enumerator:
+    """Strategy that attaches child Nodes to `HwRoot` at start.
 
-class UsbEnumerator:
-    """Scans USB bus for known adapters. Not a Node — used as a
-    spawning strategy by HwRoot."""
+    Two flavours, one contract:
+
+    * Listing enumerators (USB, TTY) scan their medium and attach one
+      unopened `Adapter` per discovered device.
+    * Broker enumerators (wire, tcp, udp, aji, xvc) attach a single
+      namespace Node that resolves host/endpoint children on demand.
+
+    `populate` is idempotent — it is the rescan path too, so it must
+    skip children already present (matched by name).
+    """
+
+    async def populate(self, hw_root):
+        raise NotImplementedError
+
+
+
+class UsbEnumerator(Enumerator):
+    """Scans the USB bus for known adapters and attaches one unopened
+    `Adapter` per match under `HwRoot`."""
 
     def __init__(self):
         self.__ctx = None
@@ -136,43 +188,23 @@ class UsbEnumerator:
         finally:
             device.handle.close()
 
-    async def spawn(self, name):
-        """Find and open an adapter matching name.
+    async def populate(self, hw_root):
+        """Attach one unopened `Adapter` per recognised USB device.
 
-        Scans USB, probes serials, matches by component name (substring).
-        Raises NoMatch if no match or ambiguous.
+        Each candidate is briefly opened to read its serial (for the
+        component name) and run the adapter's runtime `check`, then
+        closed — the adapter holds the descriptor and opens its own
+        session handle later, on first interface summon. Idempotent:
+        adapters already present (by name) are left untouched.
         """
-        matches = []
         for info, adapter_cls, desc in self.__iter_matches():
             serial = await self.__probe(desc, adapter_cls)
             if serial is _SKIP:
                 continue
-            component_name = make_adapter_name(info, serial)
-            if name.lower() in component_name:
-                matches.append((adapter_cls, desc, component_name))
-
-        if not matches:
-            raise NoMatch("adapter", name)
-        if len(matches) > 1:
-            names = ", ".join(m[2] for m in matches)
-            raise NoMatch("adapter", f"{name} (ambiguous: {names})")
-
-        adapter_cls, desc, _name = matches[0]
-        return await adapter_cls.open(desc)
-
-    async def scan(self):
-        """List all recognized USB adapters with serial numbers.
-
-        Opens each device briefly to read serial and run check,
-        then closes. Returns list of (AdapterInfo, adapter_cls, descriptor, serial).
-        """
-        results = []
-        for info, adapter_cls, desc in self.__iter_matches():
-            serial = await self.__probe(desc, adapter_cls)
-            if serial is _SKIP:
+            name = make_adapter_name(info, serial)
+            if hw_root.has_child(name):
                 continue
-            results.append((info, adapter_cls, desc, serial))
-        return results
+            hw_root.child_add(adapter_cls(name, info, desc))
 
     async def __resolve_name(self, desc) -> str | None:
         """Find an adapter name that descriptor `desc` would
@@ -317,14 +349,40 @@ class HwRoot(Node):
     def add_enumerator(self, enumerator):
         self.enumerators.append(enumerator)
 
-    async def child_spawn(self, name):
-        errors = []
+    def has_child(self, name):
+        """Exact-name membership test for enumerator dedup. Unlike
+        `child_lookup`, this never substring-matches — two adapters
+        whose names share a prefix (`jlink-ob-123` / `jlink-ob-1234`)
+        must both attach."""
+        return any(c.name == name for c in self.children)
+
+    async def start(self):
+        """Populate the tree from every enumerator, then start each
+        attached child.
+
+        Enumerator population and per-adapter start are isolated: one
+        medium that fails to scan, or one device that refuses a
+        transient interrogation, degrades to a warning and leaves the
+        rest of the tree intact. Children are started here (rather than
+        via the `child_add` auto-start path) so that by the time
+        `start()` returns every adapter has run `start()` and cached
+        whatever `child_hints()` needs.
+        """
         for enum in self.enumerators:
             try:
-                return await enum.spawn(name)
-            except NoMatch as e:
-                errors.append(e)
-        raise NoMatch("adapter", name)
+                await enum.populate(self)
+            except Exception:
+                self.logger.warning(
+                    "enumerator %s failed to populate",
+                    type(enum).__name__, exc_info=True)
+        children = list(self.children)
+        results = await asyncio.gather(
+            *(c.ensure_started() for c in children),
+            return_exceptions=True)
+        for child, result in zip(children, results):
+            if isinstance(result, BaseException):
+                self.logger.warning(
+                    "adapter %s failed to start: %s", child.name, result)
 
     def request_discovery(self):
         """Schedule a `TargetDiscovery` sweep over this tree.
@@ -356,44 +414,73 @@ class HwRoot(Node):
             await self.__ensure_discovery().run(self)
 
 
-def make_hw_root():
-    """Build an HwRoot wired with the standard set of enumerators.
+enumerator_db.register("usb")(UsbEnumerator)
 
-    Always includes USB. Adds the TTY enumerator on platforms that
-    support it (POSIX); silently skipped elsewhere. Adds the AJI
-    enumerator so paths starting with ``aji/<host>`` resolve to a
-    remote AJI server (e.g. Quartus jtagd). Adds the XVC enumerator
-    for ``xvc/<host>[:port]/<chain>/...`` paths against a remote
-    Xilinx Virtual Cable server. This is the canonical entry point
-    for CLI commands that take a `-r` path.
-    """
-    root = HwRoot()
-    root.add_enumerator(UsbEnumerator())
-    try:
-        from .tty import TtyEnumerator
-        root.add_enumerator(TtyEnumerator())
-    except ImportError:
-        pass
-    try:
-        from .aji import AjiEnumerator
-        root.add_enumerator(AjiEnumerator())
-    except ImportError:
-        pass
-    try:
-        from .xvc import XvcEnumerator
-        root.add_enumerator(XvcEnumerator())
-    except ImportError:
-        pass
+
+def _import_standard_enumerators():
+    """Import the standard enumerator modules so their
+    `enumerator_db.register` calls fire. Each is optional — a missing
+    optional dependency drops that medium, not the whole root."""
+    import importlib
+    for module in (".tty", ".aji", ".xvc", ".tcp", ".udp"):
+        try:
+            importlib.import_module(module, package=__package__)
+        except ImportError:
+            pass
+    # The wire enumerator can't self-register: it is imported during
+    # `protocol.jtag`'s bootstrap and must not pull the adapter package
+    # in at top level. Register it here instead, after imports settle.
     try:
         from ..wire.enumerator import WireEnumerator
-        root.add_enumerator(WireEnumerator())
     except ImportError:
-        pass
-    from .tcp import TcpEnumerator
-    root.add_enumerator(TcpEnumerator())
-    from .udp import UdpEnumerator
-    root.add_enumerator(UdpEnumerator())
+        return
+    if "wire" not in enumerator_db.registry:
+        enumerator_db.register("wire")(WireEnumerator)
+
+
+def make_hw_root():
+    """Build an HwRoot wired with every registered enumerator.
+
+    The standard set (USB, TTY, AJI, XVC, TCP, UDP, wire) registers
+    itself in `enumerator_db`; out-of-tree adapters add more through
+    the `acrobe_plugin` import path. This is the builder behind the
+    `get_hw_root()` singleton and is also used directly by tests that
+    need a throwaway root.
+    """
+    _import_standard_enumerators()
+    root = HwRoot()
+    for factories in enumerator_db.registry.values():
+        for factory in factories:
+            try:
+                root.add_enumerator(factory())
+            except Exception:
+                root.logger.warning(
+                    "enumerator factory %r failed", factory, exc_info=True)
     return root
+
+
+__hw_root = None
+
+
+def get_hw_root():
+    """Process-wide singleton HwRoot.
+
+    Built lazily on first call (registrations only — no hardware is
+    touched until the root is started). The CLI and library entry
+    points share this instance so one USB scan and one handle per
+    adapter serve every command in the process.
+    """
+    global __hw_root
+    if __hw_root is None:
+        __hw_root = make_hw_root()
+    return __hw_root
+
+
+def reset_hw_root_for_tests():
+    """Drop the singleton so the next `get_hw_root()` rebuilds it.
+    Tests that exercise the singleton call this in teardown."""
+    global __hw_root
+    __hw_root = None
 
 
 _SKIP = object()

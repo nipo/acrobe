@@ -82,22 +82,23 @@ class CliContext:
     """
 
     def __init__(self):
-        self.__hw_root = None
         self.chained = False
 
     @property
     def hw_root(self):
-        if self.__hw_root is None:
-            from ..adapter.model import make_hw_root
-            self.__hw_root = make_hw_root()
-        return self.__hw_root
+        from ..adapter.model import get_hw_root
+        return get_hw_root()
 
     async def resolve(self, path):
         """Walk *path* through the shared :class:`HwRoot`, start its
         subtree, and return the leaf :class:`Node`."""
         from ..node import Node
+        hw_root = self.hw_root
+        # Start the root first so its enumerators have populated the
+        # adapter children child_summon will look up.
+        await hw_root.ensure_started()
         parts = path.strip("/").split("/")
-        leaf = await self.hw_root.child_summon(*parts)
+        leaf = await hw_root.child_summon(*parts)
         if isinstance(leaf, Node):
             await leaf.start_tree()
         return leaf

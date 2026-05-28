@@ -33,18 +33,12 @@ _MODE_TRANSACTOR = "jtag_swd_i2c"
 
 @adapter_db.register(AdapterInfo("Proby", vid=0x10eb, pid=0x0026))
 class ProbyAdapter(Adapter):
-    supported_interfaces = [
-        "jtag-int",
-        "jtag-pt", "swd-pt",
-        "swd", "jtag", "i2c",
-    ]
-
-    def __init__(self, name, device, transport, engine, jtag):
-        super().__init__(name)
-        self.__device = device
-        self.__transport = transport
-        self.__engine = engine
-        self.__jtag = jtag
+    def __init__(self, name, info=None, descriptor=None):
+        super().__init__(name, info, descriptor)
+        self.__device = None
+        self.__transport = None
+        self.__engine = None
+        self.__jtag = None
         self.__loaded_mode = None
         self.__transport_a = None
         # The interface currently holding channel A (None when channel
@@ -59,28 +53,29 @@ class ProbyAdapter(Adapter):
             return None
         return str(int(serial.split(";")[-1]))
 
-    @classmethod
-    async def open(cls, descriptor):
-        device = descriptor.open()
-        try:
-            serial = cls.serial_mangle(device.serial)
-        except Exception:
-            serial = None
-        name = f"proby-{serial}" if serial else "proby"
-        import logging
-        logger = logging.getLogger(name)
+    def child_hints(self):
+        return ["jtag-int", "jtag-pt", "swd-pt", "swd", "jtag", "i2c"]
+
+    async def __ensure_open(self):
+        if self.__jtag is not None:
+            return
+        device = self.descriptor.open()
         # USB reset wipes residual FT2232 state from the previous
         # session. Without it, a Proby left in FT245 sync mode on
         # channel A (transactor firmware run) refuses to come up cleanly
         # on a fresh invocation — the bitmode-reset control request
         # alone doesn't clear all latched state.
         device.reset()
-        transport = await FtdiTransport.from_device(device, interface_index=_JTAG_CHANNEL)
-        engine = MpsseEngine(transport, logger)
+        transport = await FtdiTransport.from_device(
+            device, interface_index=_JTAG_CHANNEL)
+        engine = MpsseEngine(transport, self.logger)
         jtag = JtagMpsse(engine)
         resetn_bit = 1 << _RESETN_PIN
         await jtag.setup(gpio_oe=resetn_bit, gpio_val=resetn_bit)
-        return cls(name, device, transport, engine, jtag)
+        self.__device = device
+        self.__transport = transport
+        self.__engine = engine
+        self.__jtag = jtag
 
     async def __reprogram(self, mode):
         if self.__loaded_mode == mode:
@@ -156,6 +151,7 @@ class ProbyAdapter(Adapter):
             return interface
 
     async def child_spawn(self, name):
+        await self.__ensure_open()
         name_lower = name.lower()
 
         if name_lower == "jtag-int":
@@ -180,6 +176,8 @@ class ProbyAdapter(Adapter):
         raise NoMatch("interface", name)
 
     async def close(self):
+        if self.__jtag is None:
+            return
         await self.__channel_a_close()
         await self.__transport.close()
         self.__device.handle.close()

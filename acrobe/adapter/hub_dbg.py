@@ -18,15 +18,16 @@ class HdAdapter(FtdiJtagAdapter):
     output enable is on bit 6 (active-low: pin LOW = host drives
     SWDIO)."""
 
-    _adapter_info = _HD
     _gpio_oe = 0xeb
     _gpio_val = 0x20
 
-    supported_interfaces = ["jtag", "swd"]
+    def child_hints(self):
+        return ["jtag", "swd"]
 
     async def child_spawn(self, name):
         if name == "swd":
-            iface = SwdMpsse(self._engine, oen_pin=6)
+            engine = await self._ensure_engine()
+            iface = SwdMpsse(engine, oen_pin=6)
             await iface.setup(gpio_oe=0xe3, gpio_val=0xc0)
             return iface
         return await super().child_spawn(name)

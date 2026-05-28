@@ -119,7 +119,7 @@ def _build_remote_tree():
     return root
 
 
-def _make_local_root(server_url, tmp_path):
+async def _make_local_root(server_url, tmp_path):
     cfg = tmp_path / "acrobe.conf"
     cfg.write_text(textwrap.dedent(f"""
         wire:
@@ -129,6 +129,7 @@ def _make_local_root(server_url, tmp_path):
     """).strip())
     root = HwRoot()
     root.add_enumerator(WireEnumerator(configuration=Configuration(path=cfg)))
+    await root.ensure_started()
     return root
 
 
@@ -138,7 +139,7 @@ async def test_remote_tap_class_identity(tmp_path):
     Agilex5E instance — same as the local case would."""
     app = make_app(_build_remote_tree())
     async with TestServer(app) as server:
-        local = _make_local_root(str(server.make_url("/")), tmp_path)
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
         try:
             leaf = await local.child_summon(
                 "wire", "srv", "fakeadapter", "jtag", "chain", "0")
@@ -160,7 +161,7 @@ async def test_chip_flow_discovers_target(tmp_path):
     """The exact flow `acrobe chip` runs, against a remote Agilex5E."""
     app = make_app(_build_remote_tree())
     async with TestServer(app) as server:
-        local = _make_local_root(str(server.make_url("/")), tmp_path)
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
         try:
             leaf = await local.child_summon(
                 "wire", "srv", "fakeadapter", "jtag", "chain", "0")

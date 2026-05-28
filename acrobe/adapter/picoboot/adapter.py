@@ -19,7 +19,7 @@ from ...db import NoMatch
 from ...component.raspberry.picoboot_transport import (
     PicobootUsbTransport, USB_VID_RPI, USB_PID_RP2040_BOOTSEL,
 )
-from ..model import Adapter, AdapterInfo, adapter_db, make_adapter_name
+from ..model import Adapter, AdapterInfo, adapter_db
 
 
 _INFOS = (
@@ -39,42 +39,33 @@ class PicobootAdapter(Adapter):
     RP2040 Target probe builds a PicobootPuppet against.
     """
 
-    supported_interfaces = ["picoboot"]
+    def __init__(self, name: str, info: AdapterInfo, descriptor):
+        super().__init__(name, info, descriptor)
+        self.__device = None
+        self.__transport = None
 
-    def __init__(self, name: str, info: AdapterInfo, device,
-                 transport: PicobootUsbTransport):
-        super().__init__(name)
-        self.__info = info
-        self.__device = device
-        self.__transport = transport
+    def child_hints(self):
+        return ["picoboot"]
 
-    @classmethod
-    async def open(cls, descriptor) -> "PicobootAdapter":
-        device = descriptor.open()
-        try:
-            serial_raw = device.serial
-        except Exception:
-            serial_raw = None
-
-        info = next(
-            i for i in _INFOS
-            if i.vid == descriptor.vendor_id
-            and i.pid == descriptor.product_id)
-        name = make_adapter_name(info, serial_raw)
-        logger = logging.getLogger(name)
-
-        transport = await PicobootUsbTransport.from_device(
+    async def __ensure_open(self) -> None:
+        if self.__transport is not None:
+            return
+        device = self.descriptor.open()
+        logger = logging.getLogger(self.name)
+        self.__transport = await PicobootUsbTransport.from_device(
             device, logger=logger)
-
-        return cls(name, info, device, transport)
+        self.__device = device
 
     async def child_spawn(self, name):
+        await self.__ensure_open()
         if name == "picoboot":
             from ...component.raspberry.picoboot import Picoboot
             return Picoboot(self.__transport, name="picoboot")
         raise NoMatch("interface", name)
 
     async def close(self):
+        if self.__transport is None:
+            return
         await self.__transport.close()
         self.__device.handle.close()
 

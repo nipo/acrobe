@@ -6,7 +6,6 @@ from .ftdi.activity import ActivityLed
 # FT4232H has 4 channels; JTAG is channel A.
 @adapter_db.register(AdapterInfo("ub3", vid=0x09fb, pid=0x6026))
 class UsbBlaster3Adapter(FtdiJtagAdapter):
-    _adapter_info = AdapterInfo("ub3", vid=0x09fb, pid=0x6026)
     _channel = 0
     _gpio_oe = 0xfb
     _gpio_val = 0xfa

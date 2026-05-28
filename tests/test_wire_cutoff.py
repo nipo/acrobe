@@ -81,7 +81,7 @@ def _build_remote_tree():
 
 # --- Test harness ---
 
-def _make_local_root(server_url, tmp_path):
+async def _make_local_root(server_url, tmp_path):
     cfg = tmp_path / "acrobe.conf"
     cfg.write_text(textwrap.dedent(f"""
         wire:
@@ -91,6 +91,7 @@ def _make_local_root(server_url, tmp_path):
     """).strip())
     root = HwRoot()
     root.add_enumerator(WireEnumerator(configuration=Configuration(path=cfg)))
+    await root.ensure_started()
     return root
 
 
@@ -101,7 +102,7 @@ async def test_cutoff_lands_on_wire_node_when_path_terminates_there(tmp_path):
     """Summoning the iface itself returns a proxy IS-A _TestIface."""
     app = make_app(_build_remote_tree())
     async with TestServer(app) as server:
-        local = _make_local_root(str(server.make_url("/")), tmp_path)
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
         try:
             iface = await local.child_summon("wire", "srv", "adapter", "iface")
             assert isinstance(iface, _TestIface)
@@ -117,7 +118,7 @@ async def test_proxy_routes_ops_over_wire(tmp_path):
     server_iface = remote.children[0].children[0]
     app = make_app(remote)
     async with TestServer(app) as server:
-        local = _make_local_root(str(server.make_url("/")), tmp_path)
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
         try:
             proxy = await local.child_summon(
                 "wire", "srv", "adapter", "iface")
@@ -136,7 +137,7 @@ async def test_below_cutoff_walks_locally_via_target_child_spawn(tmp_path):
     RemoteProxyNode fetched via REST."""
     app = make_app(_build_remote_tree())
     async with TestServer(app) as server:
-        local = _make_local_root(str(server.make_url("/")), tmp_path)
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
         try:
             child = await local.child_summon(
                 "wire", "srv", "adapter", "iface", "named-child")
@@ -155,7 +156,7 @@ async def test_no_wire_node_in_path_falls_back_to_rest_enumeration(tmp_path):
     from acrobe.wire import RemoteProxyNode
     app = make_app(_build_remote_tree())
     async with TestServer(app) as server:
-        local = _make_local_root(str(server.make_url("/")), tmp_path)
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
         try:
             adapter = await local.child_summon("wire", "srv", "adapter")
             assert isinstance(adapter, RemoteProxyNode)

@@ -69,6 +69,7 @@ class EnumerationServer:
         on hardware-touching start() side effects.
         """
         async with self.__probe_lock:
+            await self.hw_root.ensure_started()
             node = await self.hw_root.child_summon(*parts)
             if isinstance(node, Node):
                 await node.start_tree()

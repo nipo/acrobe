@@ -28,6 +28,7 @@ from ..db import NoMatch
 from ..lifecycle import cancel_shutdown, on_shutdown
 from ..node import Node
 from ..protocol.datagram import Datagram, Recv, Send
+from .model import Enumerator, enumerator_db
 
 
 _HOST_PORT_RE = re.compile(
@@ -156,13 +157,12 @@ class UdpBroker(Node):
         return UdpDatagram(host=host, port=port, name=name)
 
 
-class UdpEnumerator:
-    """Enumerator that hands out the singleton :class:`UdpBroker`."""
+class UdpEnumerator(Enumerator):
+    """Attaches the single :class:`UdpBroker` namespace node."""
 
-    async def spawn(self, name: str) -> UdpBroker:
-        if name != "udp":
-            raise NoMatch("adapter", name)
-        return UdpBroker()
+    async def populate(self, hw_root):
+        if not hw_root.has_child("udp"):
+            hw_root.child_add(UdpBroker())
 
-    async def scan(self) -> list:
-        return []
+
+enumerator_db.register("udp")(UdpEnumerator)

@@ -28,6 +28,7 @@ from ..db import NoMatch
 from ..lifecycle import cancel_shutdown, on_shutdown
 from ..node import Node
 from ..protocol.pipe import Pipe, Read, Write
+from .model import Enumerator, enumerator_db
 
 
 _HOST_PORT_RE = re.compile(
@@ -149,13 +150,12 @@ class TcpBroker(Node):
         return TcpPipe(host=host, port=port, name=name)
 
 
-class TcpEnumerator:
-    """Enumerator that hands out the singleton :class:`TcpBroker`."""
+class TcpEnumerator(Enumerator):
+    """Attaches the single :class:`TcpBroker` namespace node."""
 
-    async def spawn(self, name: str) -> TcpBroker:
-        if name != "tcp":
-            raise NoMatch("adapter", name)
-        return TcpBroker()
+    async def populate(self, hw_root):
+        if not hw_root.has_child("tcp"):
+            hw_root.child_add(TcpBroker())
 
-    async def scan(self) -> list:
-        return []
+
+enumerator_db.register("tcp")(TcpEnumerator)

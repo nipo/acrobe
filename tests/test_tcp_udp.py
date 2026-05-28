@@ -4,11 +4,21 @@ import asyncio
 
 import pytest
 
-from acrobe.adapter.model import make_hw_root
-from acrobe.adapter.tcp import TcpBroker, TcpPipe
-from acrobe.adapter.udp import UdpBroker, UdpDatagram
+from acrobe.adapter.model import HwRoot
+from acrobe.adapter.tcp import TcpBroker, TcpEnumerator, TcpPipe
+from acrobe.adapter.udp import UdpBroker, UdpDatagram, UdpEnumerator
 from acrobe.protocol.datagram import Datagram
 from acrobe.protocol.pipe import Pipe
+
+
+async def _net_root():
+    """A started HwRoot with just the TCP and UDP brokers — avoids
+    the USB/TTY scans a full `make_hw_root` would trigger."""
+    root = HwRoot()
+    root.add_enumerator(TcpEnumerator())
+    root.add_enumerator(UdpEnumerator())
+    await root.ensure_started()
+    return root
 
 
 async def _tcp_echo_handler(reader: asyncio.StreamReader,
@@ -39,7 +49,7 @@ async def _start_tcp_echo():
 async def test_tcp_pipe_roundtrip_via_hw_root():
     server, port = await _start_tcp_echo()
     try:
-        root = make_hw_root()
+        root = await _net_root()
         node = await root.child_summon("tcp", f"127.0.0.1:{port}")
         assert isinstance(node, TcpPipe)
         assert isinstance(node, Pipe)
@@ -57,7 +67,7 @@ async def test_tcp_pipe_roundtrip_via_hw_root():
 
 
 async def test_tcp_broker_rejects_bad_endpoint():
-    root = make_hw_root()
+    root = await _net_root()
     broker = await root.child_summon("tcp")
     assert isinstance(broker, TcpBroker)
     with pytest.raises(Exception):
@@ -77,7 +87,7 @@ async def test_pipe_db_dispatch_via_child_spawn():
     try:
         server, port = await _start_tcp_echo()
         try:
-            root = make_hw_root()
+            root = await _net_root()
             wrapped = await root.child_summon(
                 "tcp", f"127.0.0.1:{port}", "wrapped")
             assert isinstance(wrapped, _PipeWrapper)
@@ -118,7 +128,7 @@ async def _start_udp_echo():
 async def test_udp_datagram_roundtrip_via_hw_root():
     transport, port = await _start_udp_echo()
     try:
-        root = make_hw_root()
+        root = await _net_root()
         node = await root.child_summon("udp", f"127.0.0.1:{port}")
         assert isinstance(node, UdpDatagram)
         assert isinstance(node, Datagram)
@@ -137,7 +147,7 @@ async def test_udp_datagram_roundtrip_via_hw_root():
 
 
 async def test_udp_broker_rejects_bad_endpoint():
-    root = make_hw_root()
+    root = await _net_root()
     broker = await root.child_summon("udp")
     assert isinstance(broker, UdpBroker)
     with pytest.raises(Exception):
@@ -156,7 +166,7 @@ async def test_datagram_db_dispatch_via_child_spawn():
     try:
         transport, port = await _start_udp_echo()
         try:
-            root = make_hw_root()
+            root = await _net_root()
             wrapped = await root.child_summon(
                 "udp", f"127.0.0.1:{port}", "wrapped")
             assert isinstance(wrapped, _DgramWrapper)

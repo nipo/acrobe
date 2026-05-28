@@ -25,7 +25,7 @@ from ..db import NoMatch
 from ..protocol.serial import (
     SerialPort, SerialConfig, Parity, StopBits, FlowControl, Signals,
 )
-from .model import Adapter, AdapterInfo, make_adapter_name
+from .model import Adapter, Enumerator, enumerator_db
 
 
 # Baud rate → termios constant. Unions of Linux/macOS constants; only
@@ -426,11 +426,16 @@ elif sys.platform == "darwin":
 class TtyAdapter(Adapter):
     """Adapter wrapping a single platform serial device path."""
 
-    supported_interfaces = ["serial"]
-
     def __init__(self, name: str, path: str):
         super().__init__(name)
         self.__path = path
+
+    @property
+    def ident(self):
+        return self.__path
+
+    def child_hints(self):
+        return ["serial"]
 
     async def child_spawn(self, name):
         if name.lower() == "serial":
@@ -483,32 +488,15 @@ def _list_tty_paths() -> list[tuple[str, str]]:
     return results
 
 
-class TtyEnumerator:
-    """Scans the local filesystem for serial devices."""
+class TtyEnumerator(Enumerator):
+    """Scans the local filesystem for serial devices and attaches one
+    `TtyAdapter` per discovered path."""
 
-    async def spawn(self, name):
-        matches = [(n, p) for n, p in _list_tty_paths()
-                   if name.lower() in n.lower()]
-        if not matches:
-            raise NoMatch("adapter", name)
-        if len(matches) > 1:
-            names = ", ".join(n for n, _ in matches)
-            raise NoMatch("adapter", f"{name} (ambiguous: {names})")
-        comp_name, path = matches[0]
-        adapter = TtyAdapter(comp_name, path)
-        return adapter
-
-    async def scan(self):
-        """Yield (info, adapter_cls, descriptor, serial) like UsbEnumerator.
-
-        For ttys there's no USB-style descriptor, and the component
-        name already fully identifies the device — we pass None as
-        the serial so make_adapter_name returns info.name unchanged.
-        We stash the path in a custom attribute for the CLI to show.
-        """
-        results = []
+    async def populate(self, hw_root):
         for comp_name, path in _list_tty_paths():
-            info = AdapterInfo(comp_name)
-            info.path = path
-            results.append((info, TtyAdapter, None, None))
-        return results
+            if hw_root.has_child(comp_name):
+                continue
+            hw_root.child_add(TtyAdapter(comp_name, path))
+
+
+enumerator_db.register("tty")(TtyEnumerator)

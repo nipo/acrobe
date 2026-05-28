@@ -1,36 +1,42 @@
-from ...db import Db, NoMatch
-from ..model import Adapter, AdapterInfo, adapter_db, make_adapter_name
+from ...db import Db
+from ..model import Adapter, AdapterInfo, adapter_db
 
 
 @adapter_db.register(AdapterInfo("ftdi", vid=0x0403, manufacturer="FTDI"))
 class GenericFtdiAdapter(Adapter):
     """Generic FTDI adapter for chips with default FTDI descriptors.
 
-    Does not claim any interface or set any bitmode on open.
-    Board-specific drivers register in board_db and handle
-    interface setup themselves.
+    Claims no interface and sets no bitmode itself. Board-specific
+    drivers register in `board_db` and are summoned by name
+    (`ftdi-XXXX/icepizero/jtag`); they drive the USB handle, which
+    this adapter opens lazily on first board summon.
     """
 
     board_db = Db("ftdi_board")
 
-    _adapter_info = AdapterInfo("ftdi", vid=0x0403, manufacturer="FTDI")
+    def __init__(self, name, info=None, descriptor=None):
+        super().__init__(name, info, descriptor)
+        self.__device = None
 
-    def __init__(self, name, device):
-        super().__init__(name)
-        self.device = device
+    def child_hints(self):
+        return list(self.board_db.registry.keys())
 
-    @classmethod
-    async def open(cls, descriptor):
-        device = descriptor.open()
-        try:
-            serial = device.serial
-        except Exception:
-            serial = None
-        name = make_adapter_name(cls._adapter_info, serial)
-        return cls(name, device)
+    async def ensure_open(self):
+        """Open the USB device handle if not already open and return
+        it. Boards call this before touching `self.device`."""
+        if self.__device is None:
+            self.__device = self.descriptor.open()
+        return self.__device
+
+    @property
+    def device(self):
+        assert self.__device is not None, "FTDI device not opened"
+        return self.__device
 
     async def child_spawn(self, name):
         return await self.board_db.acall(name, self)
 
     async def close(self):
-        self.device.handle.close()
+        if self.__device is not None:
+            self.__device.handle.close()
+            self.__device = None

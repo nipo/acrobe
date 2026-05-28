@@ -11,8 +11,6 @@ class SipeedAdapter(FtdiJtagAdapter):
     but filters on manufacturer string.
     """
 
-    _adapter_info = AdapterInfo(
-        "sp", vid=0x0403, pid=0x6010, manufacturer="Sipeed")
     _channel = 0
     _gpio_oe = 0
     _gpio_val = 0
