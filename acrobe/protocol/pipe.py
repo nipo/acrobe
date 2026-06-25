@@ -50,6 +50,20 @@ class Read:
     size: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class ReadSome:
+    """Read between 1 and `max_size` bytes — whatever the transport has
+    available, like a socket ``recv``. The future resolves to a
+    non-empty ``bytes`` (shorter than `max_size` is normal) or to empty
+    ``bytes`` on end-of-stream.
+
+    Framing layers (HDLC, …) sit on top of an unframed `Pipe` and must
+    consume "whatever arrived" rather than a fixed count, which `Read`
+    cannot express without risking a deadlock on a partial frame."""
+
+    max_size: int
+
+
 class Pipe(Batcher, Node):
     """Abstract byte-stream transport.
 
@@ -80,6 +94,14 @@ class Pipe(Batcher, Node):
         ``size=None`` requests "at least one byte, possibly more"
         streaming semantics; see :class:`Read` for the contract."""
         return self.post(Read(size if size is None else int(size)))
+
+    def read_some(self, max_size: int):
+        """Post a ReadSome op. Returns a Future resolving to ``bytes``
+        (1..max_size bytes, or empty on EOF)."""
+        return self.post(ReadSome(int(max_size)))
+
+    async def child_spawn(self, name):
+        return await self.db.acall(name, self)
 
     async def flush_ops(self, batch):
         raise NotImplementedError(

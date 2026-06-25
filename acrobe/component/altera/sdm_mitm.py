@@ -102,9 +102,7 @@ class SdmMitm(JtagInterface):
             elif isinstance(op, Shift):
                 self.__tdi += op.tdi
 
-                tdo_value = (future.result()
-                             if future.done() and not future.exception()
-                             else None)
+                tdo_value = await future
                 if op.read_tdo and tdo_value is not None:
                     self.__tdo += tdo_value
                 else:

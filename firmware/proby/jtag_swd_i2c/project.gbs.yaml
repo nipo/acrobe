@@ -1,0 +1,47 @@
+name: blink
+
+root:
+  name: topcell
+  sources:
+    - file_type: vhdl
+      files:
+        - topcell.pkg.vhd
+        - main.vhd
+        - clk_gen_spartan6.vhd
+        - wrapper.vhd
+    - file_type: xilinx-ucf
+      files:
+        - ../pinout/ftdi_fifo.ucf
+        - ../pinout/io0_dbg.ucf
+        - ../pinout/io1_i2c.ucf
+        - ../pinout/user.ucf
+        - ../pinout/clk.ucf
+#        - clocks.ucf
+        - dbg_timing.ucf
+  deps:
+    - nsl_bnoc.framed
+    - nsl_bnoc.sized
+    - nsl_bnoc.routed
+    - nsl_bnoc.control_status
+    - nsl_ti.cc
+    - nsl_spi.transactor
+    - nsl_i2c.i2c
+    - nsl_i2c.transactor
+    - nsl_jtag.jtag
+    - nsl_jtag.transactor
+    - nsl_coresight.transactor
+    - nsl_hwdep.reset
+    - nsl_clocking.async
+    - nsl_indication.activity
+    - nsl_ftdi.ft245
+
+output:
+  - name: synthesis
+    topcell: wrapper
+    backend_config:
+      gbs.builtin.ise:
+        target:
+          part: xc6slx9-2tqg144
+    outputs:
+      - type: ise-bitstream
+        path: ../../../acrobe/adapter/proby/fw/jtag_swd_i2c.bit.gz

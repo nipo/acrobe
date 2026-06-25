@@ -430,12 +430,6 @@ def _import_standard_enumerators():
     # The wire enumerator can't self-register: it is imported during
     # `protocol.jtag`'s bootstrap and must not pull the adapter package
     # in at top level. Register it here instead, after imports settle.
-    try:
-        from ..wire.enumerator import WireEnumerator
-    except ImportError:
-        return
-    if "wire" not in enumerator_db.registry:
-        enumerator_db.register("wire")(WireEnumerator)
 
 
 def make_hw_root():

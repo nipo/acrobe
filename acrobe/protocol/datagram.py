@@ -80,6 +80,9 @@ class Datagram(Batcher, Node):
         Batcher.__init__(self)
         Node.__init__(self, name)
 
+    async def child_spawn(self, name):
+        return await self.db.acall(name, self)
+
     def send(self, data: bytes, context: Any = None):
         """Post a Send op. Returns a Future resolving to ``None``."""
         return self.post(Send(bytes(data), context))
