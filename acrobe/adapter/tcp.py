@@ -150,12 +150,10 @@ class TcpBroker(Node):
         return TcpPipe(host=host, port=port, name=name)
 
 
+@enumerator_db.register("tcp")
 class TcpEnumerator(Enumerator):
     """Attaches the single :class:`TcpBroker` namespace node."""
 
     async def populate(self, hw_root):
         if not hw_root.has_child("tcp"):
             hw_root.child_add(TcpBroker())
-
-
-enumerator_db.register("tcp")(TcpEnumerator)
