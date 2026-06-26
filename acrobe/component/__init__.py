@@ -14,3 +14,4 @@ from . import arm  # noqa: F401
 from . import renesas  # noqa: F401
 from . import ti  # noqa: F401
 from . import raspberry  # noqa: F401
+from . import hdlc  # noqa: F401

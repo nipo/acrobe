@@ -27,8 +27,9 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass
 
-from ....protocol.datagram import Datagram, Send, Recv
-from ....util.crc import Crc
+from ..protocol.datagram import Datagram, Send, Recv
+from ..protocol.pipe import Pipe
+from ..util.crc import Crc
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,7 @@ class HdlcAddr:
     control: int
 
 
+@Pipe.db.register("hdlc")
 class Hdlc(Datagram):
     """Datagram over a `Pipe` backend with HDLC framing and FCS.
 
@@ -146,6 +148,19 @@ class Hdlc(Datagram):
             if future is None or future.done():
                 continue
             future.set_result((frame, None))
+
+    async def child_spawn(self, name):
+        # ``addr<NN>`` stacks the 2-byte address/control header layer,
+        # defaulting the address to <NN> (hex). Anything else defers to
+        # the Datagram handler registry.
+        if name.lower().startswith("addr"):
+            try:
+                address = int(name[4:], 16)
+            except ValueError:
+                pass
+            else:
+                return HdlcHeader(self, default_address=address)
+        return await super().child_spawn(name)
 
 
 class HdlcHeader(Datagram):
