@@ -126,10 +126,11 @@ class DomainFilter(logging.Filter):
 class Formatter(logging.Formatter):
     """Log formatter with optional ANSI colors and timestamps."""
 
-    def __init__(self, *, color=True, timestamp=False):
+    def __init__(self, *, color=True, timestamp=False, short_name=False):
         super().__init__()
         self._color = color
         self._timestamp = timestamp
+        self._short_name = short_name
 
     def format(self, record):
         msg = record.getMessage()
@@ -142,6 +143,8 @@ class Formatter(logging.Formatter):
             msg = f"{msg}\n{record.stack_info}"
 
         name = record.name
+        if self._short_name:
+            name = name.rsplit(".", 1)[-1]
 
         if self._timestamp:
             elapsed = record.relativeCreated / 1000.0
@@ -251,7 +254,7 @@ _ACROBE_HANDLER_MARKER = "_acrobe_cli_handler"
 
 def setup(*, level=logging.WARNING, color=True, timestamp=False,
           silent=(), silent_re=None, only_re=None,
-          progress=None, stream=None):
+          progress=None, stream=None, short_name=False):
     """Configure crobe logging with a StreamHandler.
 
     Convenience function for CLI setup. Creates and attaches a
@@ -272,6 +275,7 @@ def setup(*, level=logging.WARNING, color=True, timestamp=False,
         only_re: regex pattern - only matching names shown
         progress: ProgressDelegate instance (default: NullProgress)
         stream: output stream (default: stderr)
+        short_name: print short name prefixes
     """
     root = logging.getLogger()
     # Drop any handler we installed in a previous setup() call.
@@ -280,7 +284,7 @@ def setup(*, level=logging.WARNING, color=True, timestamp=False,
             root.removeHandler(h)
 
     handler = logging.StreamHandler(stream)
-    handler.setFormatter(Formatter(color=color, timestamp=timestamp))
+    handler.setFormatter(Formatter(color=color, timestamp=timestamp, short_name=short_name))
     handler.addFilter(DomainFilter(
         silent=silent, silent_re=silent_re, only_re=only_re))
     setattr(handler, _ACROBE_HANDLER_MARKER, True)

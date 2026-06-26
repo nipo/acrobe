@@ -118,6 +118,7 @@ class CliContext:
 @click.option('-v', '--verbose', count=True, help="More verbosity")
 @click.option('-q', '--quiet', count=True, help="Less verbosity (hide progress bars)")
 @click.option('-t', '--timestamp', is_flag=True, help="Add timestamps to log")
+@click.option('-s', '--short-name', is_flag=True, help="Log with short origin name")
 @click.option('-b', '--no-color', is_flag=True, help="Don't color log")
 @click.option('--silent', multiple=True, type=str,
               help="Silent one component by name")
@@ -127,7 +128,7 @@ class CliContext:
               help="Only show components matching regex")
 @click.pass_context
 async def cli(ctx, verbose, quiet, timestamp, no_color,
-              silent, silent_re, only_re):
+              silent, silent_re, only_re, short_name):
     if ctx.obj is None:
         ctx.obj = CliContext()
 
@@ -167,6 +168,7 @@ async def cli(ctx, verbose, quiet, timestamp, no_color,
         silent=silent,
         silent_re=silent_re,
         only_re=only_re,
+        short_name=short_name,
         progress=progress,
     )
 
