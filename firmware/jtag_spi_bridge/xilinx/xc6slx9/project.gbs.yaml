@@ -1,5 +1,4 @@
-name: GW1N-9
-description: jtag_spi_bridge for GW1N-9
+name: blink
 
 root:
   name: top
@@ -9,9 +8,9 @@ root:
         - ../../src/func.pkg.vhd
         - ../../src/jtag_spi.vhd
         - ../boundary.vhd
-    - file_type: gowin-cst
+    - file_type: xilinx-ucf
       files:
-        - pins.cst
+        - pinout.ucf
   deps:
     - nsl_hwdep.clock
     - nsl_hwdep.reset
@@ -20,17 +19,18 @@ root:
     - nsl_jtag.fifo_transport
     - nsl_indication.activity
 
+
 output:
   - name: synthesis
     topcell: boundary
-    filter_vars:
-      vendor: gowin
-      target: synthesis
     target:
-      part: GW1N-UV9UG256C6/I5#C
+      part: xc6slx9-2tqg144
     backend_config:
-      gbs.builtin.gowin:
-        part: GW1N-UV9UG256C6/I5#C
+      gbs.builtin.ise: {}
     outputs:
-      - type: gowin-fs+gzip
-        path: ../../../../acrobe/component/gowin/fw/0x0100481b_jtag_spi.fs.gz
+      - type: ise-synthesis-report
+        path: synthesis-report.html
+      - type: ise-pnr-report
+        path: pnr-report.html
+      - type: ise-bitstream+gzip
+        path: ../../../../acrobe/component/xilinx/fw/0x04001093_jtag_spi.bit.gz

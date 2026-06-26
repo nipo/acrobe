@@ -1,5 +1,5 @@
-name: jtag_spi_bridge-0x0001681b
-description: 
+name: GW5AT-15
+description: jtag_spi_bridge for GW5AT-15
 
 root:
   name: top

@@ -94,3 +94,25 @@ class Series6(Tap, JtagSramFpga, ConfigAccessPort):
     async def is_configured(self) -> bool:
         status = await self.ir_status()
         return bool(int(status) & (1 << self.IR_STATUS_BITS['done']))
+
+@Series6.application_db.register("spi")
+async def _spi(tap):
+    from pathlib import Path
+    from ...db import NoMatch as _NoMatch
+    from ...vfs.fs import FileNode
+    from ..jtag_spi_bridge import jtag_spi_bridge
+    from . import formats
+
+    idcode_masked = tap.idcode & 0x0FFFFFFF
+    fw_path = Path(__file__).parent / "fw" / f"{idcode_masked:#010x}_jtag_spi.bit.gz"
+    if not fw_path.exists():
+        print("nope")
+        raise _NoMatch("spi firmware", f"0x{idcode_masked:08x}")
+    leaf = FileNode(fw_path.name, str(fw_path))
+    await leaf.start()
+    view = await leaf.child_summon("bitstream")
+    await tap.load(view)
+    # NOTE: leaf is intentionally not stopped — view holds a
+    # reference to leaf's source for future reads (none here, but
+    # consistent with the lifetime model). Process exit closes it.
+    return jtag_spi_bridge(tap, base_freq=30e6)

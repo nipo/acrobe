@@ -1,0 +1,33 @@
+name: blink
+
+root:
+  name: top
+  sources:
+    - file_type: vhdl
+      files:
+        - ../../src/func.pkg.vhd
+        - ../../src/jtag_spi.vhd
+        - ../boundary_a7.vhd
+    - file_type: xilinx-xdc
+      files:
+        - pinout.xdc
+  deps:
+    - nsl_hwdep.clock
+    - nsl_hwdep.reset
+    - nsl_spi.transactor
+    - nsl_bnoc.framed
+    - nsl_jtag.fifo_transport
+    - nsl_indication.activity
+
+output:
+  - name: synthesis
+    topcell: boundary
+    target:
+      part: xc7a35t-1ftg256
+    outputs:
+      - type: vivado-synthesis-report
+        path: synthesis-report.html
+      - type: vivado-pnr-report
+        path: pnr-report.html
+      - type: vivado-bitstream+gzip
+        path: ../../../../acrobe/component/xilinx/fw/0x0362d093_jtag_spi.bit.gz

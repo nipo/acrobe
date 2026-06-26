@@ -1,0 +1,40 @@
+name: jtag-spi-bridge
+description: JTAG to SPI bridge generic tool
+
+settings:
+  max_parallel_projects: 4
+  stop_on_failure: false
+
+projects:
+
+  # Does not work, recent gowin eda do not define GW_JTAG for gw1n
+  # (older versions do, though
+  - name: gowin_gw1n-9c
+    path: gowin/gw1n-9c
+    tags: [gowin]
+    skip: true
+
+  # YMMV with yosys
+  - name: lattice_ecp5-25k
+    path: lattice/ecp5-25k
+    tags: [lattice, yosys]
+    skip: true
+
+  - name: gowin_gw5a-15t
+    path: gowin/gw5a-15t
+    tags: [gowin]
+  - name: gowin_gw5a-25a
+    path: gowin/gw5a-25a
+    tags: [gowin]
+  - name: xilinx_xc6slx16
+    path: xilinx/xc6slx16
+    tags: [xilinx, ise]
+  - name: xilinx_xc6slx9
+    path: xilinx/xc6slx9
+    tags: [xilinx, ise]
+  - name: xilinx_xc7a15t
+    path: xilinx/xc7a15t
+    tags: [xilinx, vivado]
+  - name: xilinx_xc7a35t
+    path: xilinx/xc7a35t
+    tags: [xilinx, vivado]
