@@ -12,3 +12,4 @@ from . import xds110  # noqa: F401
 from . import hub_dbg  # noqa: F401
 from . import picoboot  # noqa: F401
 from . import tcp  # noqa: F401
+from . import udp  # noqa: F401

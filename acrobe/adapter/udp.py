@@ -157,12 +157,10 @@ class UdpBroker(Node):
         return UdpDatagram(host=host, port=port, name=name)
 
 
+@enumerator_db.register("udp")
 class UdpEnumerator(Enumerator):
     """Attaches the single :class:`UdpBroker` namespace node."""
 
     async def populate(self, hw_root):
         if not hw_root.has_child("udp"):
             hw_root.child_add(UdpBroker())
-
-
-enumerator_db.register("udp")(UdpEnumerator)
