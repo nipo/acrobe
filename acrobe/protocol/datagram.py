@@ -43,6 +43,11 @@ class Send:
     data: bytes
     context: Any = None
 
+    def __repr__(self):
+        if self.context is not None:
+            return f"Send('{self.data.hex()}', {self.context!r})"
+        return f"Send('{self.data.hex()}')"
+    
 
 @dataclass(frozen=True, slots=True)
 class Recv:
@@ -59,6 +64,10 @@ class Recv:
 
     context: Any = None
 
+    def __repr__(self):
+        if self.context is not None:
+            return f"Recv({self.context!r})"
+        return "Recv()"
 
 class Datagram(Batcher, Node):
     """Abstract framed-message transport.
