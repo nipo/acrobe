@@ -32,6 +32,7 @@ class JtagTransactor:
     #   1000_0001  IR_CAPTURE
     #   1000_0010  SWD_TO_JTAG
     #   1000_0011  DIVISOR      host appends 1 byte (8-bit divisor-1)
+    #   1000_0111  DELAY      host appends 1 byte (8-bit delay)    
     #   1000_010x  SYS_RESET    bit[0]=assert
     CMD_SHIFT_BYTE   = 0x00
     CMD_SHIFT_BYTE_W = 0x40
@@ -44,6 +45,7 @@ class JtagTransactor:
     CMD_SWD_TO_JTAG  = 0x82
     CMD_DIVISOR      = 0x83
     CMD_SYS_RESET    = 0x84
+    CMD_DELAY        = 0x87    
     CMD_RTI          = 0x90
     CMD_RESET        = 0x98
     CMD_RTI8         = 0xa0
@@ -64,7 +66,9 @@ class JtagTransactor:
         d = max(0, int(self.base_freq / 1e6) - 1)
         self.__divisor = min(d, 0xff)
         self.__rate_dirty = True
-
+        self.__delay = 0
+        self.__delay_dirty = True
+        
     # ------------------------------------------------------------------
     # Configuration
     # ------------------------------------------------------------------
@@ -80,6 +84,12 @@ class JtagTransactor:
             self.__divisor = d
             self.__rate_dirty = True
         return self.base_freq / ((self.__divisor + 1) * 2)
+
+    def delay_update(self, delay: int) -> int:
+        # Update the delay value
+        self.__delay = delay
+        self.__delay_dirty = True
+        return self.__delay
 
     def context_force_refresh(self) -> None:
         self.__rate_dirty = True
@@ -99,6 +109,12 @@ class JtagTransactor:
             rsp_size += 1
             self.__rate_dirty = False
 
+        if self.__delay_dirty:
+            cmd.append(self.CMD_DELAY)
+            cmd.append(self.__delay & 0xff)
+            rsp_size += 1
+            self.__delay_dirty = False            
+            
         for op_idx, (op, _future) in enumerate(batch):
             rsp_size = self.__encode_one(op, op_idx, cmd, rsp_size, gather)
 

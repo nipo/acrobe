@@ -199,6 +199,19 @@ class ProbyJtagInterface(jtag.JtagInterface):
             return 0.0
         return self.__codec.freq_update(freq)
 
+    def delay_update(self, delay):
+        if self.__codec is None:
+            return 0
+        return self.__codec.delay_update(delay)
+
+    def option_set(self, key, value):
+        """Generic node option support: ``delay=int`` registers a
+        user delay"""
+        if key == "delay":
+            self.delay_update(value)
+            return
+        super().option_set(key, value)    
+
 
 class _ProbyI2cAdapter(Batcher, Node):
     """Lower adapter posted to by `i2c.Interface.flush_ops`.
