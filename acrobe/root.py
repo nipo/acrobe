@@ -4,19 +4,20 @@ Provides a convenience function to resolve a component path string
 into a started component, suitable for use in scripts and interactive
 sessions (e.g. ``python -i``, IPython, ptpython).
 
-Usage::
+A script defines an ``async def main()`` and is run with
+``acrobe run script.py [args…]``: acrobe brings the event loop,
+logging, plugin loading and lifecycle teardown, sets ``sys.argv``,
+and awaits ``main()``. Usage::
 
-    import asyncio
     from acrobe.root import root
 
     async def main():
         tap = await root("proby-9/jtag/tap0")
         # … interact with tap …
-
-    asyncio.run(main())
 """
 
 from .adapter.model import get_hw_root
+from .node import Node
 from .plugin import load_plugins
 
 
@@ -39,6 +40,8 @@ async def roots(*paths):
     for path in paths:
         parts = path.strip("/").split("/")
         leaf = await hw_root.child_summon(*parts)
+        if isinstance(leaf, Node):
+            await leaf.start_tree()
         result.append(leaf)
     return result
 
