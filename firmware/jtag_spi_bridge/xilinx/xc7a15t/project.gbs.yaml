@@ -1,0 +1,30 @@
+name: jtag_spi_bridge-0x0362e093
+description: jtag_spi_bridge for Artix7-15T
+
+root:
+  name: top
+  sources:
+    - file_type: vhdl
+      files:
+        - ../boundary_a7.vhd
+    - file_type: xilinx-xdc
+      files:
+        - pinout.xdc
+  deps:
+    - nsl_io.io
+    - nsl_hwdep.reset
+    - nsl_hwdep.clock
+    - jtag_spi.bridge
+
+output:
+  - name: synthesis
+    topcell: boundary
+    target:
+      part: xc7a15t-1ftg256
+    outputs:
+      - type: synthesis-report
+        path: synthesis-report.html
+      - type: pnr-report
+        path: pnr-report.html
+      - type: bitstream+gzip
+        path: ../../../../acrobe/component/xilinx/fw/0x0362e093_jtag_spi.bit.gz

@@ -1,0 +1,30 @@
+name: GW5AT-15
+description: jtag_spi_bridge for GW5AT-15
+
+root:
+  name: top
+  sources:
+    - file_type: vhdl
+      files:
+        - ../boundary.vhd
+    - file_type: gowin-cst
+      files:
+        - pins.cst
+  deps:
+    - nsl_io.io
+    - nsl_hwdep.reset
+    - nsl_hwdep.clock
+    - jtag_spi.bridge
+
+output:
+  - name: synthesis
+    topcell: boundary
+    target:
+      part: GW5AT-LV15MG132C1/I0#A
+      use_as_gpio:
+        - mspi
+        - done
+        - cpu
+    outputs:
+      - type: gowin-fs+gzip
+        path: ../../../../acrobe/component/gowin/fw/0x0001681b_jtag_spi.fs.gz

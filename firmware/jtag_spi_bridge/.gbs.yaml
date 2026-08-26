@@ -1,0 +1,5 @@
+repositories:
+  - path: impl/repository.gbs.yaml
+    loader: yaml
+  - path: ../../../nsl/lib
+    loader: nsl-tree

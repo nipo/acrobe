@@ -1,0 +1,4 @@
+name: jtag_spi_impl
+description: Implementation
+libraries:
+- path: jtag_spi

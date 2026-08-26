@@ -1,0 +1,3 @@
+repositories:
+  - path: ../../nsl/lib
+    loader: nsl-tree

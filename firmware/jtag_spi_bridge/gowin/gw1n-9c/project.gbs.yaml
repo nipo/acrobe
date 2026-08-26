@@ -1,0 +1,32 @@
+name: GW1N-9
+description: jtag_spi_bridge for GW1N-9
+
+root:
+  name: top
+  sources:
+    - file_type: vhdl
+      files:
+        - ../boundary.vhd
+    - file_type: gowin-cst
+      files:
+        - pins.cst
+  deps:
+    - nsl_io.io
+    - nsl_hwdep.reset
+    - nsl_hwdep.clock
+    - jtag_spi.bridge
+
+output:
+  - name: synthesis
+    topcell: boundary
+    exclude_dispatchers:
+      - nsl_gowin_cdc
+    target:
+      part: GW1N-UV9UG256C6/I5##gw1n9c-055
+      use_as_gpio:
+        - mspi
+        - done
+        - cpu
+    outputs:
+      - type: gowin-fs+gzip
+        path: ../../../../acrobe/component/gowin/fw/0x0100481b_jtag_spi.fs.gz

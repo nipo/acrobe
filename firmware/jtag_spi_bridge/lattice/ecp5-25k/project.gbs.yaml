@@ -1,0 +1,29 @@
+name: ECP5-25k
+description: jtag_spi_bridge for ECP5-25k
+
+root:
+  name: top
+  sources:
+    - file_type: vhdl
+      files:
+        - boundary.vhd
+    - file_type: ecp5-lpf
+      files:
+        - pins.lpf
+  deps:
+    - nsl_io.io
+    - nsl_hwdep.reset
+    - nsl_hwdep.clock
+    - jtag_spi.bridge
+
+output:
+  - name: pnr
+    topcell: boundary
+    require_backends:
+      - gbs.builtin.diamond
+    target:
+      part: lfe5u-25f-6bg256c
+    outputs:
+      - type: bitstream
+        path: ../../../../acrobe/component/lattice/fw/0x41111043_jtag_spi.bin.gz
+

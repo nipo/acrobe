@@ -1,0 +1,30 @@
+name: jtag_spi_bridge-0x04001093
+description: jtag_spi_bridge for Spartan6-LX9
+
+root:
+  name: top
+  sources:
+    - file_type: vhdl
+      files:
+        - ../boundary.vhd
+    - file_type: xilinx-ucf
+      files:
+        - pinout.ucf
+  deps:
+    - nsl_io.io
+    - nsl_hwdep.reset
+    - nsl_hwdep.clock
+    - jtag_spi.bridge
+
+output:
+  - name: synthesis
+    topcell: boundary
+    target:
+      part: xc6slx9-2tqg144
+    outputs:
+      - type: synthesis-report
+        path: synthesis-report.html
+      - type: pnr-report
+        path: pnr-report.html
+      - type: bitstream+gzip
+        path: ../../../../acrobe/component/xilinx/fw/0x04001093_jtag_spi.bit.gz
