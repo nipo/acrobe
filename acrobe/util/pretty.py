@@ -85,3 +85,25 @@ def sci_parse(string):
     else:
         exp = 0
     return float(Decimal(string) * Decimal((0, (1,), exp)))
+
+
+_TRUE = ("1", "true", "yes", "on")
+_FALSE = ("0", "false", "no", "off")
+
+
+def bool_parse(value):
+    """Parse a path-option value into a bool.
+
+    Accepts the spellings a user would reasonably type on a command
+    line: "1"/"true"/"yes"/"on" and their negatives, any case.
+    """
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    raise ValueError(
+        f"expected one of {', '.join(_TRUE + _FALSE)}, got {value!r}")
+
