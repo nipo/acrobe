@@ -1,0 +1,266 @@
+import asyncio
+import pytest
+from acrobe.node import Node
+
+
+class TestBasicTree:
+    def test_name(self):
+        c = Node("root")
+        assert c.name == "root"
+
+    def test_fqdn_root(self):
+        c = Node("root")
+        assert c.fqdn == "root"
+
+    def test_fqdn_nested(self):
+        root = Node("root")
+        child = Node("child")
+        root.child_add(child)
+        assert child.fqdn == "root.child"
+
+    def test_child_add(self):
+        root = Node("root")
+        child = Node("child")
+        root.child_add(child)
+        assert child in root.children
+        assert child.parent is root
+
+    @pytest.mark.asyncio
+    async def test_child_remove(self):
+        root = Node("root")
+        child = Node("child")
+        root.child_add(child)
+        await root.child_remove(child)
+        assert child not in root.children
+        assert child.parent is None
+
+    def test_add_already_parented_raises(self):
+        root = Node("root")
+        other = Node("other")
+        child = Node("child")
+        root.child_add(child)
+        with pytest.raises(AssertionError):
+            other.child_add(child)
+
+    @pytest.mark.asyncio
+    async def test_remove_wrong_parent_raises(self):
+        root = Node("root")
+        other = Node("other")
+        child = Node("child")
+        root.child_add(child)
+        with pytest.raises(AssertionError):
+            await other.child_remove(child)
+
+    def test_children_returns_copy(self):
+        root = Node("root")
+        child = Node("child")
+        root.child_add(child)
+        children = root.children
+        children.clear()
+        assert len(root.children) == 1
+
+
+class TestTreeSearch:
+    def setup_method(self):
+        self.root = Node("root")
+        self.a = Node("a")
+        self.b = Node("b")
+        self.a1 = Node("a1")
+        self.root.child_add(self.a)
+        self.root.child_add(self.b)
+        self.a.child_add(self.a1)
+
+    def test_children_find(self):
+        found = self.root.children_find(lambda c: c.name.startswith("a"))
+        assert self.a in found
+        assert self.a1 in found
+        assert self.b not in found
+
+    def test_children_find_include_self(self):
+        found = self.root.children_find(lambda c: True, include_self=True)
+        assert self.root in found
+
+    def test_children_of_class(self):
+        class SpecialNode(Node):
+            pass
+
+        root = Node("root")
+        special = SpecialNode("special")
+        normal = Node("normal")
+        root.child_add(special)
+        root.child_add(normal)
+
+        found = root.children_of_class(SpecialNode)
+        assert special in found
+        assert normal not in found
+
+    def test_parent_of_class(self):
+        class Adapter(Node):
+            pass
+
+        adapter = Adapter("adapter")
+        child = Node("child")
+        grandchild = Node("grandchild")
+        adapter.child_add(child)
+        child.child_add(grandchild)
+
+        assert grandchild.parent_of_class(Adapter) is adapter
+
+    def test_parent_of_class_not_found(self):
+        root = Node("root")
+        child = Node("child")
+        root.child_add(child)
+
+        class Missing(Node):
+            pass
+
+        with pytest.raises(LookupError):
+            child.parent_of_class(Missing)
+
+
+class TestChildrenChanged:
+    def test_called_on_add(self):
+        calls = []
+
+        class Tracking(Node):
+            def children_changed(self):
+                calls.append("changed")
+
+        root = Tracking("root")
+        root.child_add(Node("child"))
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_called_on_remove(self):
+        calls = []
+
+        class Tracking(Node):
+            def children_changed(self):
+                calls.append("changed")
+
+        root = Tracking("root")
+        child = Node("child")
+        root.child_add(child)
+        calls.clear()
+        await root.child_remove(child)
+        assert len(calls) == 1
+
+
+class TestAsyncLifecycle:
+    @pytest.mark.asyncio
+    async def test_start_tree(self):
+        order = []
+
+        class Tracked(Node):
+            async def start(self):
+                order.append(self.name)
+
+        root = Tracked("root")
+        child = Tracked("child")
+        grandchild = Tracked("grandchild")
+        root.child_add(child)
+        child.child_add(grandchild)
+
+        await root.start_tree()
+        # Top-down: root first, then child, then grandchild
+        assert order == ["root", "child", "grandchild"]
+        assert root.started
+        assert child.started
+        assert grandchild.started
+
+    @pytest.mark.asyncio
+    async def test_stop_tree(self):
+        order = []
+
+        class Tracked(Node):
+            async def stop(self):
+                order.append(self.name)
+
+        root = Tracked("root")
+        child = Tracked("child")
+        root.child_add(child)
+
+        await root.start_tree()
+        await root.stop_tree()
+        # Top-down: root first, then child
+        assert order == ["root", "child"]
+        assert not root.started
+        assert not child.started
+
+    @pytest.mark.asyncio
+    async def test_start_adds_children(self):
+        """start() may add children during discovery; they should be started too."""
+
+        class Discoverer(Node):
+            async def start(self):
+                self.child_add(Node("discovered"))
+
+        root = Discoverer("root")
+        await root.start_tree()
+        # child_add during start schedules start_tree via ensure_future
+        await asyncio.sleep(0)
+        assert len(root.children) == 1
+        assert root.children[0].name == "discovered"
+        assert root.children[0].started
+
+    @pytest.mark.asyncio
+    async def test_partial_teardown(self):
+        root = Node("root")
+        a = Node("a")
+        b = Node("b")
+        root.child_add(a)
+        root.child_add(b)
+
+        await root.start_tree()
+        assert a.started and b.started
+
+        await a.stop_tree()
+        assert not a.started
+        assert b.started  # b unaffected
+
+    @pytest.mark.asyncio
+    async def test_child_add_starts_when_parent_started(self):
+        """Adding a child to a started parent schedules start_tree."""
+        order = []
+
+        class Tracked(Node):
+            async def start(self):
+                order.append(self.name)
+
+        root = Tracked("root")
+        await root.start_tree()
+        assert root.started
+
+        child = Tracked("child")
+        grandchild = Tracked("grandchild")
+        child.child_add(grandchild)
+        root.child_add(child)
+        # Let scheduled start_tree run
+        await asyncio.sleep(0)
+        assert child.started
+        assert grandchild.started
+        assert order == ["root", "child", "grandchild"]
+
+    @pytest.mark.asyncio
+    async def test_child_remove_stops_subtree(self):
+        """Removing a child stops its entire subtree."""
+        order = []
+
+        class Tracked(Node):
+            async def stop(self):
+                order.append(self.name)
+
+        root = Tracked("root")
+        child = Tracked("child")
+        grandchild = Tracked("grandchild")
+        root.child_add(child)
+        child.child_add(grandchild)
+
+        await root.start_tree()
+        assert child.started and grandchild.started
+
+        await root.child_remove(child)
+        assert not child.started
+        assert not grandchild.started
+        assert child.parent is None
+        assert order == ["child", "grandchild"]
