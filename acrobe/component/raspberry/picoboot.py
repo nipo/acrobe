@@ -73,7 +73,7 @@ import asyncio
 import struct
 from typing import Protocol, runtime_checkable
 
-from ...engine import Batcher
+from ...engine import Batcher, BackgroundLowering
 from ...node import Node
 from ...protocol import memory
 from ...target.puppet import PuppetBase
@@ -92,7 +92,7 @@ class PicobootTransport(Protocol):
     async def exec(self, pc: int) -> None: ...
 
 
-class Picoboot(memory.Interface, memory.BackgroundLowering, Batcher, Node):
+class Picoboot(memory.Interface, BackgroundLowering, Batcher, Node):
     """RP2040 PICOBOOT bootloader as a component Node.
 
     Holds the USB transport and exposes the chip's whole address

@@ -21,8 +21,9 @@ from __future__ import annotations
 import struct
 
 from ...component.arm.mem_ap import MemAp
+from ...engine import BackgroundLowering
 from ...protocol.memory import (
-    BackgroundLowering, Read8, Read16, Read32, Write8, Write16, Write32,
+    Read8, Read16, Read32, Write8, Write16, Write32,
 )
 
 

@@ -1,6 +1,6 @@
 import asyncio
 import pytest
-from acrobe.engine import Batcher
+from acrobe.engine import Batcher, BackgroundLowering
 from acrobe.node import Node
 
 
@@ -163,3 +163,71 @@ class TestReentrancy:
         # Let the spawned op flush
         await asyncio.sleep(0)
         assert b.call_count == 2
+
+
+# -- BackgroundLowering --------------------------------------------
+
+class SlowBackend(BackgroundLowering, _NodeBatcher):
+    """Backend whose lowering awaits, the case BackgroundLowering exists for."""
+
+    def __init__(self):
+        super().__init__("slow")
+        self.order: list = []
+        self.raise_on: object = None
+        self.leave_unresolved = False
+
+    async def flush_ops(self, batch):
+        self.dispatch(batch)
+
+    async def run_ops(self, batch):
+        await asyncio.sleep(0.01)
+        for op, future in batch:
+            self.order.append(op)
+            if self.raise_on is not None and op == self.raise_on:
+                raise IOError("backend down")
+            if self.leave_unresolved:
+                continue
+            future.set_result(None)
+
+
+class TestBackgroundLowering:
+    @pytest.mark.asyncio
+    async def test_flush_ops_does_not_block(self):
+        node = SlowBackend()
+        f = node.post("first")
+        # The flush task ran, but the backend is still sleeping.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not f.done()
+        await f
+
+    @pytest.mark.asyncio
+    async def test_batches_keep_submission_order(self):
+        node = SlowBackend()
+        first = node.post("first")
+        await asyncio.sleep(0)
+        second = node.post("second")
+        await asyncio.gather(first, second)
+        assert node.order == ["first", "second"]
+
+    @pytest.mark.asyncio
+    async def test_backend_exception_reaches_every_future(self):
+        node = SlowBackend()
+        node.raise_on = "first"
+        with pytest.raises(IOError, match="backend down"):
+            await node.post("first")
+
+    @pytest.mark.asyncio
+    async def test_unresolved_future_fails_loudly(self):
+        node = SlowBackend()
+        node.leave_unresolved = True
+        with pytest.raises(RuntimeError, match="unresolved"):
+            await node.post("first")
+
+    @pytest.mark.asyncio
+    async def test_run_ops_is_abstract(self):
+        class Bare(BackgroundLowering):
+            pass
+
+        with pytest.raises(NotImplementedError):
+            await Bare().run_ops([])

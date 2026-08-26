@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import struct
 
-from ..engine import Batcher
+from ..engine import Batcher, BackgroundLowering
 from ..node import Node, Readable, Writable, Addressable
 from ..protocol import memory
 from ..protocol.spi import Shift
@@ -40,7 +40,7 @@ _JEDEC_MANUFACTURERS = {
 }
 
 
-class SpiFlash(memory.Interface, memory.BackgroundLowering, Batcher,
+class SpiFlash(memory.Interface, BackgroundLowering, Batcher,
                Node, Writable, Addressable):  # Writable extends Readable
     """SPI NOR flash device.
 

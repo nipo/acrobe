@@ -31,9 +31,10 @@ one of the emulation mixins bridges the gap:
   inherits blob support unchanged.
 * :class:`RegisterFromBulk` goes the other way, serving register
   accessors from 1/2/4-byte blob ops.
-* :class:`BackgroundLowering` adapts a plain-coroutine backend (USB
-  command set, SPI command sequence) to the no-IO-in-``flush_ops``
-  contract.
+
+Backends whose lowering has to await (a USB command set, an SPI
+command sequence with busy polling) reach the no-IO-in-``flush_ops``
+contract through :class:`acrobe.engine.BackgroundLowering`.
 
 Read decomposition has two strategies, selected per implementer via
 the ``decomposition`` class attribute:
@@ -450,44 +451,3 @@ class RegisterFromBulk(Interface):
         payload = (value & ((1 << (size_bytes * 8)) - 1)).to_bytes(
             size_bytes, self.register_endianness)
         return self.submit(WriteBlob(addr, payload))
-
-
-class BackgroundLowering:
-    """Run a batch against a plain-coroutine backend.
-
-    Some address spaces sit on a command-oriented backend — a USB
-    vendor command set, an SPI command sequence with busy polling —
-    rather than on another Batcher, so their lowering has to await.
-    ``dispatch(batch)`` hands the batch to a background task and
-    returns immediately, keeping ``flush_ops`` free of IO; a lock
-    holds batches in submission order.
-
-    Subclasses implement :meth:`run_ops`, which may await freely and
-    must resolve every non-None future.
-    """
-
-    __lock: asyncio.Lock | None = None
-
-    def dispatch(self, batch) -> None:
-        if self.__lock is None:
-            self.__lock = asyncio.Lock()
-        asyncio.ensure_future(self.__drain(batch, self.__lock))
-
-    async def __drain(self, batch, lock: asyncio.Lock) -> None:
-        async with lock:
-            try:
-                await self.run_ops(batch)
-            except Exception as exc:
-                self.__reject(batch, exc)
-            else:
-                self.__reject(batch, None)
-
-    def __reject(self, batch, exc: BaseException | None) -> None:
-        for op, future in batch:
-            if future is None or future.done():
-                continue
-            future.set_exception(exc if exc is not None else RuntimeError(
-                f"{type(self).__name__} left {op!r} unresolved"))
-
-    async def run_ops(self, batch):
-        raise NotImplementedError
