@@ -177,9 +177,13 @@ class Interface(Batcher, FreqCapper, Node):
         return sorted(self.child_db.registry)
 
     @staticmethod
-    def __normalize(op):
+    def normalize(op):
         """Return (Transaction, single).  ``single`` means the caller
-        passed a naked item and expects an unwrapped result."""
+        passed a naked item and expects an unwrapped result.
+
+        Public because an interface that owns the wire overrides
+        ``flush_ops`` outright and still has to honour the
+        adapter-sees-Transactions-only contract."""
         if isinstance(op, Transaction):
             return op, False
         if isinstance(op, (Transfer, WaitAck)):
@@ -189,7 +193,7 @@ class Interface(Batcher, FreqCapper, Node):
     async def flush_ops(self, batch):
         forwarded = []
         for op, future in batch:
-            tx, single = self.__normalize(op)
+            tx, single = self.normalize(op)
             forwarded.append((self.__adapter.post(tx), future, single))
 
         for af, mf, single in forwarded:

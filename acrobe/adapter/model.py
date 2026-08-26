@@ -422,7 +422,8 @@ def _import_standard_enumerators():
     `enumerator_db.register` calls fire. Each is optional — a missing
     optional dependency drops that medium, not the whole root."""
     import importlib
-    for module in (".tty", ".aji", ".xvc", ".tcp", ".udp", ".stream_endpoint"):
+    for module in (".tty", ".aji", ".xvc", ".tcp", ".udp",
+                   ".stream_endpoint", ".linux.i2cdev"):
         try:
             importlib.import_module(module, package=__package__)
         except ImportError:
