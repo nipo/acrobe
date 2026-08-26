@@ -1,0 +1,243 @@
+NOTE "CREATOR" "bool subrange test";
+NOTE "DEVICE" "test";
+NOTE "STAPL_VERSION" "JESD71";
+NOTE "JAM_VERSION" "2.0";
+
+ACTION TEST = DO_TEST;
+
+DATA subrange_data;
+
+' Source: $A5 = 1010_0101 (bit 0 = LSB = 1)
+BOOLEAN src[8] = $A5;
+
+' Non-palindromic source for chain test
+' $E1 = 1110_0001
+BOOLEAN src2[8] = $E1;
+
+' $BEEF for wider tests
+BOOLEAN w[16] = $BEEF;
+
+' $CF for self-copy tests
+BOOLEAN ns_init[8] = $CF;
+
+' zero nibble
+BOOLEAN zero4[4] = $0;
+
+' $DEADBEEF for wide subrange
+BOOLEAN big[32] = $DEADBEEF;
+
+' Mutable targets
+BOOLEAN r1[4];
+BOOLEAN r2[4];
+BOOLEAN d3[8];
+BOOLEAN d4[8];
+BOOLEAN r5[1];
+BOOLEAN r6[8];
+BOOLEAN r7[8];
+BOOLEAN ov[8];
+BOOLEAN ns[8];
+BOOLEAN d10[8];
+BOOLEAN mid[4];
+BOOLEAN d11[8];
+BOOLEAN r12[16];
+
+ENDDATA;
+
+PROCEDURE DO_TEST USES subrange_data;
+
+' ============================================================
+' 1. Read upper nibble: src[7..4]
+'    $A5 bits [7..4] = 1010 -> r1 = 0,1,0,1
+' ============================================================
+r1[3..0] = src[7..4];
+PRINT "1. src[7..4]:";
+PRINT " r1[0]=", r1[0], " r1[1]=", r1[1], " r1[2]=", r1[2], " r1[3]=", r1[3];
+EXPORT "r1_0", r1[0];
+EXPORT "r1_1", r1[1];
+EXPORT "r1_2", r1[2];
+EXPORT "r1_3", r1[3];
+
+' ============================================================
+' 2. Read lower nibble: src[3..0]
+'    $A5 bits [3..0] = 0101 -> r2 = 1,0,1,0
+' ============================================================
+r2[3..0] = src[3..0];
+PRINT "2. src[3..0]:";
+PRINT " r2[0]=", r2[0], " r2[1]=", r2[1], " r2[2]=", r2[2], " r2[3]=", r2[3];
+EXPORT "r2_0", r2[0];
+EXPORT "r2_1", r2[1];
+EXPORT "r2_2", r2[2];
+EXPORT "r2_3", r2[3];
+
+' ============================================================
+' 3. Write lower nibble to upper position
+'    src[3..0] = 0101 placed at d3[7..4]
+'    d3 = 0101_0101 = bits: 1,0,1,0,1,0,1,0 (from bit 0)
+' ============================================================
+d3[7..0] = src[7..0];
+d3[7..4] = src[3..0];
+PRINT "3. d3=src then d3[7..4]=src[3..0]:";
+PRINT " d3: ", d3[0], d3[1], d3[2], d3[3], d3[4], d3[5], d3[6], d3[7];
+EXPORT "d3_0", d3[0];
+EXPORT "d3_1", d3[1];
+EXPORT "d3_2", d3[2];
+EXPORT "d3_3", d3[3];
+EXPORT "d3_4", d3[4];
+EXPORT "d3_5", d3[5];
+EXPORT "d3_6", d3[6];
+EXPORT "d3_7", d3[7];
+
+' ============================================================
+' 4. Write upper nibble to lower position
+'    src[7..4] = 1010 placed at d4[3..0]
+'    d4 = 1010_1010 = bits: 0,1,0,1,0,1,0,1
+' ============================================================
+d4[7..0] = src[7..0];
+d4[3..0] = src[7..4];
+PRINT "4. d4=src then d4[3..0]=src[7..4]:";
+PRINT " d4: ", d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7];
+EXPORT "d4_0", d4[0];
+EXPORT "d4_1", d4[1];
+EXPORT "d4_2", d4[2];
+EXPORT "d4_3", d4[3];
+EXPORT "d4_4", d4[4];
+EXPORT "d4_5", d4[5];
+EXPORT "d4_6", d4[6];
+EXPORT "d4_7", d4[7];
+
+' ============================================================
+' 5. Single-bit subrange: src[5..5]
+'    $A5 bit 5 = 1
+' ============================================================
+r5[0..0] = src[5..5];
+PRINT "5. src[5..5]: r5[0]=", r5[0];
+EXPORT "r5_0", r5[0];
+
+' ============================================================
+' 6. Full array copy: src[7..0]
+' ============================================================
+r6[7..0] = src[7..0];
+PRINT "6. full copy src[7..0]:";
+PRINT " r6: ", r6[0], r6[1], r6[2], r6[3], r6[4], r6[5], r6[6], r6[7];
+EXPORT "r6_0", r6[0];
+EXPORT "r6_1", r6[1];
+EXPORT "r6_2", r6[2];
+EXPORT "r6_3", r6[3];
+EXPORT "r6_4", r6[4];
+EXPORT "r6_5", r6[5];
+EXPORT "r6_6", r6[6];
+EXPORT "r6_7", r6[7];
+
+' ============================================================
+' 7. Wider source: 16-bit $BEEF, extract bits [11..4]
+'    $BEEF = 1011_1110_1110_1111
+'    bits [11..4] = 1110_1110 = $EE
+'    r7 bits: 0,1,1,1,0,1,1,1 (from bit 0)
+' ============================================================
+r7[7..0] = w[11..4];
+PRINT "7. w=$BEEF, w[11..4]:";
+PRINT " r7: ", r7[0], r7[1], r7[2], r7[3], r7[4], r7[5], r7[6], r7[7];
+EXPORT "r7_0", r7[0];
+EXPORT "r7_1", r7[1];
+EXPORT "r7_2", r7[2];
+EXPORT "r7_3", r7[3];
+EXPORT "r7_4", r7[4];
+EXPORT "r7_5", r7[5];
+EXPORT "r7_6", r7[6];
+EXPORT "r7_7", r7[7];
+
+' ============================================================
+' 8. Overlapping self-copy: ov[5..2] = ov[3..0]
+'    $A5 = 1010_0101
+'    ov[3..0] = 0101, written to [5..2]
+'    Result: bit7=1,bit6=0,bit5=0,bit4=1,bit3=0,bit2=1,bit1=0,bit0=1
+'    = 1001_0101 = $95
+' ============================================================
+ov[7..0] = src[7..0];
+ov[5..2] = ov[3..0];
+PRINT "8. ov=src then ov[5..2]=ov[3..0]:";
+PRINT " ov: ", ov[0], ov[1], ov[2], ov[3], ov[4], ov[5], ov[6], ov[7];
+EXPORT "ov_0", ov[0];
+EXPORT "ov_1", ov[1];
+EXPORT "ov_2", ov[2];
+EXPORT "ov_3", ov[3];
+EXPORT "ov_4", ov[4];
+EXPORT "ov_5", ov[5];
+EXPORT "ov_6", ov[6];
+EXPORT "ov_7", ov[7];
+
+' ============================================================
+' 9. Non-overlapping self-copy within same array
+'    ns=$CF=1100_1111, copy bits [3..0] to [7..4]
+'    ns[3..0] = 1111, placed at ns[7..4]
+'    Result: 1111_1111 = $FF
+' ============================================================
+ns[7..0] = ns_init[7..0];
+ns[7..4] = ns[3..0];
+PRINT "9. ns=$CF then ns[7..4]=ns[3..0]:";
+PRINT " ns: ", ns[0], ns[1], ns[2], ns[3], ns[4], ns[5], ns[6], ns[7];
+EXPORT "ns_0", ns[0];
+EXPORT "ns_1", ns[1];
+EXPORT "ns_2", ns[2];
+EXPORT "ns_3", ns[3];
+EXPORT "ns_4", ns[4];
+EXPORT "ns_5", ns[5];
+EXPORT "ns_6", ns[6];
+EXPORT "ns_7", ns[7];
+
+' ============================================================
+' 10. Partial write: clear middle bits
+'     d10 = $FF, zero out d10[5..2]
+'     Result: 1100_0011 = $C3
+' ============================================================
+d10[7..0] = #11111111;
+d10[5..2] = zero4[3..0];
+PRINT "10. d10=$FF then d10[5..2]=0:";
+PRINT " d10: ", d10[0], d10[1], d10[2], d10[3], d10[4], d10[5], d10[6], d10[7];
+EXPORT "d10_0", d10[0];
+EXPORT "d10_1", d10[1];
+EXPORT "d10_2", d10[2];
+EXPORT "d10_3", d10[3];
+EXPORT "d10_4", d10[4];
+EXPORT "d10_5", d10[5];
+EXPORT "d10_6", d10[6];
+EXPORT "d10_7", d10[7];
+
+' ============================================================
+' 11. Chain copy through intermediate
+'     src2=$E1=1110_0001
+'     src2[7..4] = 1110 -> mid[3..0]
+'     mid[3..0] -> d11[7..4]
+' ============================================================
+mid[3..0] = src2[7..4];
+d11[7..4] = mid[3..0];
+PRINT "11. src2=$E1 -> mid -> d11:";
+PRINT " mid: ", mid[0], mid[1], mid[2], mid[3];
+PRINT " d11: ", d11[0], d11[1], d11[2], d11[3], d11[4], d11[5], d11[6], d11[7];
+EXPORT "mid_0", mid[0];
+EXPORT "mid_1", mid[1];
+EXPORT "mid_2", mid[2];
+EXPORT "mid_3", mid[3];
+EXPORT "d11_4", d11[4];
+EXPORT "d11_5", d11[5];
+EXPORT "d11_6", d11[6];
+EXPORT "d11_7", d11[7];
+
+' ============================================================
+' 12. Wide subrange: extract 16 bits from 32-bit array
+'     $DEADBEEF bits [23..8]
+'     $DEADBEEF = DE AD BE EF
+'     byte layout LSB first: EF BE AD DE
+'     bits [23..8] = bytes 1,2 = BE AD = $ADBE
+' ============================================================
+r12[15..0] = big[23..8];
+PRINT "12. big=$DEADBEEF, big[23..8]:";
+PRINT " r12[0]=", r12[0], " r12[7]=", r12[7], " r12[8]=", r12[8], " r12[15]=", r12[15];
+EXPORT "r12_0", r12[0];
+EXPORT "r12_7", r12[7];
+EXPORT "r12_8", r12[8];
+EXPORT "r12_15", r12[15];
+
+EXIT 0;
+ENDPROC;
+CRC 0;
