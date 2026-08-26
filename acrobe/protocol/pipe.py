@@ -1,0 +1,116 @@
+"""Pipe — abstract byte-stream transport.
+
+A `Pipe` is a full-duplex, byte-accurate transport. Reads return
+exactly the bytes requested; writes deliver every byte. There is no
+framing, no addressing, no message boundary on the wire.
+
+Like the rest of acrobe's protocol layers, `Pipe` is a
+``Batcher + Node``: callers post `Read` / `Write` op dataclasses via
+`post(op)` (or the `read` / `write` shortcuts) and receive futures
+that resolve when the op completes. Concrete subclasses implement
+`flush_ops` to drive the underlying transport (USB bulk pair, TCP
+socket, telnet stream, …).
+
+Call sites use the futures transparently::
+
+    data = await pipe.read(n)
+    await pipe.write(payload)
+
+— so existing code keeps the same shape.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..db import Db
+from ..engine import Batcher
+from ..node import Node
+
+
+@dataclass(frozen=True, slots=True)
+class Write:
+    """Write `data` to the pipe. Future resolves to ``None``."""
+
+    data: bytes
+
+    def __str__(self):
+        if len(self.data) > 32:
+            b = self.data[:32].hex()+f"... ({len(self.data)} bytes)"
+        else:
+            b = self.data.hex()
+        return f"Write({b})"
+
+    __repr__ = __str__
+
+@dataclass(frozen=True, slots=True)
+class Read:
+    """Read bytes from the pipe.
+
+    If `size` is an ``int``, the future resolves to exactly `size`
+    bytes. If `size` is ``None``, the future resolves as soon as at
+    least one byte has arrived, with whatever the underlying
+    transport made available — useful for streaming protocols where
+    the caller cannot pre-compute a frame size. Implementations
+    never resolve with an empty ``bytes`` for ``size=None``; they
+    raise (typically :class:`EOFError`) when the transport closes."""
+
+    size: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReadSome:
+    """Read between 1 and `max_size` bytes — whatever the transport has
+    available, like a socket ``recv``. The future resolves to a
+    non-empty ``bytes`` (shorter than `max_size` is normal) or to empty
+    ``bytes`` on end-of-stream.
+
+    Framing layers (HDLC, …) sit on top of an unframed `Pipe` and must
+    consume "whatever arrived" rather than a fixed count, which `Read`
+    cannot express without risking a deadlock on a partial frame."""
+
+    max_size: int
+
+
+class Pipe(Batcher, Node):
+    """Abstract byte-stream transport.
+
+    Concrete subclasses (USB bulk, TCP, telnet, in-memory loopback)
+    implement :meth:`flush_ops` to translate batched `Read` /
+    `Write` ops into transport-level operations.
+
+    A `Pipe` is also a bridge point: handlers registered against
+    :attr:`db` are spawned via ``child_summon(name)`` and receive the
+    pipe as their parent transport (e.g. a JOP / NSL session, a
+    Telnet wrapper). This mirrors crobe's ``Pipe.child_spawn`` →
+    ``db.call(name, self)`` dispatch.
+    """
+
+    db = Db("Pipe handler")
+
+    def __init__(self, name: str = "pipe"):
+        Batcher.__init__(self)
+        Node.__init__(self, name)
+
+    def write(self, data: bytes):
+        """Post a Write op. Returns a Future resolving to ``None``."""
+        return self.post(Write(bytes(data)))
+
+    def read(self, size: int | None = None):
+        """Post a Read op. Returns a Future resolving to ``bytes``.
+
+        ``size=None`` requests "at least one byte, possibly more"
+        streaming semantics; see :class:`Read` for the contract."""
+        return self.post(Read(size if size is None else int(size)))
+
+    def read_some(self, max_size: int):
+        """Post a ReadSome op. Returns a Future resolving to ``bytes``
+        (1..max_size bytes, or empty on EOF)."""
+        return self.post(ReadSome(int(max_size)))
+
+    async def child_spawn(self, name):
+        return await self.db.acall(name, self)
+
+    async def flush_ops(self, batch):
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement flush_ops")
