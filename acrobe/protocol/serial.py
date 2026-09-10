@@ -97,6 +97,24 @@ class SerialPort(Pipe, ABC):
         super().__init__(name)
         self._on_signals_cbs = []
         self._on_linestate_cbs = []
+        # Line configuration requested through path options
+        # ("serial(rate=1000000)"), applied by the concrete port once
+        # the device is open.
+        self._pending_config: dict = {}
+
+    def option_set(self, key, value):
+        if key in ("rate", "baud"):
+            self._pending_config["baud"] = int(value)
+        else:
+            super().option_set(key, value)
+
+    async def apply_pending_config(self):
+        """Apply path-option line configuration, if any. Concrete
+        ports call this once the device is open."""
+        if not self._pending_config:
+            return
+        cfg = await self.config_get()
+        await self.config_set(cfg.with_(**self._pending_config))
 
     @abstractmethod
     async def config_set(self, cfg: SerialConfig) -> SerialConfig:

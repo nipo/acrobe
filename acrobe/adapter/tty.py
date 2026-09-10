@@ -167,6 +167,7 @@ class TtySerialPort(SerialPort):
             self.__modem_supported = False
         if self.__modem_supported:
             self.__signal_task = asyncio.create_task(self.__signal_poll_loop())
+        await self.apply_pending_config()
 
     async def stop(self):
         if self.__signal_task is not None:
