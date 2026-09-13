@@ -30,6 +30,11 @@ CMD_GET_CAPS            = 0xE8  # 32-bit capability bitfield
 CMD_GET_EXT_CAPS        = 0xED  # 256-bit extended capabilities
 CMD_GET_HW_VERSION      = 0xF0  # 4-byte hardware version (LE u32)
 
+# CMD_REGISTER's response is variable-length, but the firmware always
+# sends at least this many bytes; the 8-byte header that starts it
+# tells how much more (if any) follows.
+REGISTER_MIN_SIZE       = 0x4C
+
 
 # --- Target interface (TIF) selectors ------------------------------
 

@@ -31,6 +31,7 @@ class JLinkTransport:
         self.__ep_out = ep_out
         self.__ep_in = ep_in
         self.__mps = mps
+        self.__rx = bytearray()
         self.__lock = asyncio.Lock()
         self.__logger = logger
         # JTAG_IO_V3 (with status byte) is only available on hardware
@@ -112,22 +113,23 @@ class JLinkTransport:
         await self.__ep_out.write(data)
 
     async def __read(self, length: int) -> bytes:
-        """Read at least ``length`` bytes from the bulk-IN endpoint.
+        """Read exactly ``length`` bytes from the bulk-IN endpoint.
 
-        Issues MPS-sized reads in a loop and accumulates the result.
-        A short packet (< MPS bytes) is the device's way of saying
-        "frame is over" — stop reading even if we have fewer than
-        ``length`` total bytes; the caller decides whether that's
-        an error. Truncates to ``length`` on return."""
-        if length == 0:
-            return b""
-        out = bytearray()
-        while len(out) < length:
-            chunk = await self.__ep_in.read(self.__mps)
-            out.extend(chunk)
-            if len(chunk) < self.__mps:
-                break
-        return bytes(out[:length])
+        A response is not necessarily one USB transfer: JTAG_IO ends
+        its TDO payload with a short packet and sends the trailing
+        status byte in a transfer of its own, with a zero-length
+        packet in between when the payload is a multiple of MPS. So a
+        short packet does not delimit a response — only the byte
+        count the command's format dictates does.
+
+        Reads are MPS-sized (a smaller buffer would overflow on a
+        full packet); whatever arrives past ``length`` stays queued
+        for the next read."""
+        while len(self.__rx) < length:
+            self.__rx.extend(await self.__ep_in.read(self.__mps))
+        out = bytes(self.__rx[:length])
+        del self.__rx[:length]
+        return out
 
     # -- High-level commands ---------------------------------------
 
@@ -240,22 +242,16 @@ class JLinkTransport:
             0, 0, 0, handle & 0xFFFF)
         async with self.__lock:
             await self.__write(payload)
-            # Response is variable length — read one MPS-or-larger
-            # buffer; the loop terminates on the device's short-packet
-            # marker.
-            resp = await self.__read(2048)
-        if len(resp) < 8:
-            raise protocol.JLinkError(
-                f"REGISTER short response: got {len(resp)} bytes")
-        new_handle, count, entry_size, info_size = struct.unpack_from(
-            "<HHHH", resp, 0)
-        expected = 8 + count * entry_size + info_size
-        if len(resp) < expected:
-            raise protocol.JLinkError(
-                f"REGISTER response truncated: got {len(resp)} bytes, "
-                f"expected {expected} (handle=0x{new_handle:04x}, "
-                f"count={count}, entry_size={entry_size}, "
-                f"info_size={info_size})")
+            # The header declares the response size, but the firmware
+            # never sends less than REGISTER_MIN_SIZE: read that much
+            # first, then whatever the header asks for beyond it, so
+            # the stream stays aligned for the next command.
+            resp = await self.__read(protocol.REGISTER_MIN_SIZE)
+            new_handle, count, entry_size, info_size = struct.unpack_from(
+                "<HHHH", resp, 0)
+            expected = 8 + count * entry_size + info_size
+            if expected > protocol.REGISTER_MIN_SIZE:
+                await self.__read(expected - protocol.REGISTER_MIN_SIZE)
         return new_handle
 
     async def get_hw_status(self) -> dict:
@@ -310,10 +306,6 @@ class JLinkTransport:
             self.__logger.protocol(
                 "JTAG_IO tdo=%s (%d bytes)",
                 resp[:8].hex(), len(resp))
-        if len(resp) < resp_size:
-            raise protocol.JLinkError(
-                f"JTAG_IO short response: got {len(resp)} bytes, "
-                f"expected {resp_size}")
         if self.jtag_io_v3:
             status = resp[num_bytes]
             if status != 0:
