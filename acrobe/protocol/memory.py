@@ -51,6 +51,7 @@ import asyncio
 import struct
 from dataclasses import dataclass
 
+from ..db import Db
 from ..engine import chain_future
 
 
@@ -306,6 +307,13 @@ class Interface:
     Surfaces that reach their backend without batching (a pure
     forwarder) override the individual accessors instead of relying on
     ``submit``.
+
+    A memory bus has no discovery of its own, so devices living on it
+    are summoned by name: ``child_db`` maps a client name to a factory
+    called with ``(bus, name)``, reachable as ``<any memory bus>/<name>``
+    when the bus is a :class:`~acrobe.node.Node`. The factory takes
+    its placement (base offset, ...) from path options and raises
+    :class:`~acrobe.db.NoMatch` to defer to another handler.
     """
 
     REGISTER_OPS = frozenset({Read8, Read16, Read32,
@@ -313,6 +321,14 @@ class Interface:
     BULK_OPS = frozenset({ReadBlob, WriteBlob})
 
     ops: frozenset = frozenset()
+
+    child_db = Db("Memory bus client")
+
+    async def child_spawn(self, name):
+        return await self.child_db.acall(name, self, name)
+
+    def child_hints(self):
+        return sorted(self.child_db.registry)
 
     def submit(self, op):
         if type(op) not in self.ops:
