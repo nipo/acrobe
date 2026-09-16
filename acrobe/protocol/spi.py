@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
+from .. import wire
 from ..engine import Batcher
 from ..freq_capper import FreqCapper
 from ..node import Node
@@ -23,6 +24,7 @@ from ..db import Db, NoMatch
 # bits as it should capture.
 
 
+@wire.op("d0e60766-f3c2-435c-94e1-7b14162766ae")
 @dataclass(frozen=True, slots=True)
 class Cs:
     """Chip select control.
@@ -41,6 +43,7 @@ class Cs:
         return "<Cs None>"
 
 
+@wire.op("7e3fefe3-3521-4b5c-b830-b38f3f22d568")
 @dataclass(frozen=True, slots=True)
 class Shift:
     """SPI data shift operation.
@@ -78,11 +81,17 @@ class Shift:
         return f"<Shift {size} read={self.read_miso}>"
 
 
+@wire.op("b7d47cd3-8f54-4433-ad91-c320859abea8")
 @dataclass(frozen=True, slots=True)
 class Transaction:
-    """Sequence of shifts held under one chip-select assertion."""
+    """Sequence of shifts held under one chip-select assertion.
 
-    shifts: tuple
+    Registered as a Transportable so the whole SPI op set can travel,
+    although no node lists it in ``uses`` yet: it is :class:`Target`'s
+    op, and Target is not a wire cutoff.
+    """
+
+    shifts: tuple[Shift, ...]
 
     def __post_init__(self):
         if not isinstance(self.shifts, tuple):
@@ -99,6 +108,19 @@ class Transaction:
 
 # --- SPI Interface ---
 
+
+def _interface_proxy_init(name: str, metadata: dict) -> dict:
+    """Constructor kwargs for a client-side :class:`Interface` proxy.
+
+    The proxy routes batches over the wire instead of lowering them,
+    so the adapter the local constructor demands is never reached.
+    """
+    return {"adapter": None, "name": name}
+
+
+@wire.node("af0dd095-8bc4-4b67-808b-e5ce7c31092b",
+           uses=[Cs, Shift],
+           init=_interface_proxy_init)
 class Interface(Batcher, FreqCapper, Node):
     """SPI bus. Forwards Cs/Shift ops to adapter.
 
@@ -107,6 +129,16 @@ class Interface(Batcher, FreqCapper, Node):
     override :meth:`FreqCapper.freq_update`. Subclasses whose clock
     hardware only comes up in start() call :meth:`freq_reapply`
     there to push caps recorded before that point.
+
+    A chip-select run survives batching, locally and over the wire.
+    :meth:`Target.flush_ops` posts Cs(assert), the shifts and
+    Cs(None) with no await in between, so nothing else can enqueue
+    among them and the flush task, which drains the whole pending
+    queue at once, always sees the run whole. Remotely the client's
+    batch becomes one Request, and the server dispatch posts every
+    op of a Request into this node synchronously before the node
+    flushes; the run therefore never straddles two batches and CS
+    never drops mid-transaction.
     """
 
     def __init__(self, adapter, name="spi"):
