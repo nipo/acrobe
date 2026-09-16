@@ -33,6 +33,7 @@ from ..configuration import Configuration, get_configuration
 from ..db import NoMatch
 from ..node import Node
 from .client import EnumerationClient
+from .registry import RegistryEntry
 
 # NOTE: this module is imported during `acrobe.protocol.jtag`'s own
 # import (`from .. import wire`), so it must NOT import
@@ -88,12 +89,17 @@ class _Cutoff:
     `depth` is the index into the segment list passed to
     child_summon — segments 0..depth land on the remote @wire.node;
     segments depth+1.. are walked locally on the proxy.
+
+    `entry` is the local registry entry matching the remote node's
+    `wire_uuid`; `metadata` is what the remote reported for it, and
+    feeds `entry.init` when the proxy is constructed.
     """
     depth: int
-    target_class: type
+    entry: RegistryEntry
     remote_path: str
     connect_url: str
     name: str
+    metadata: dict
 
 
 class RemoteServerRoot(Node):
@@ -198,22 +204,24 @@ class RemoteServerRoot(Node):
                 continue
             deepest = _Cutoff(
                 depth=depth,
-                target_class=entry.cls,
+                entry=entry,
                 remote_path=info["path"],
                 connect_url=connect_url,
-                name=info["name"])
+                name=info["name"],
+                metadata=dict(info.get("metadata", {})))
         return deepest
 
     async def __open_proxy(self, cutoff: _Cutoff):
         """Open a WS to the cutoff and build a local proxy that
-        IS-A `cutoff.target_class`."""
+        IS-A the registered class."""
         from . import default_registry
         from .client import WireClient, make_remote_proxy
 
         wire_client = await WireClient.connect(
             cutoff.connect_url, default_registry())
+        init_kwargs = cutoff.entry.init(cutoff.name, cutoff.metadata)
         return make_remote_proxy(
-            cutoff.target_class, wire_client, name=cutoff.name)
+            cutoff.entry.cls, wire_client, **init_kwargs)
 
     async def child_spawn(self, name: str):
         info = await self.__fetch(name)

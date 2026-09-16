@@ -16,7 +16,7 @@ decorators. Tests that need isolation construct their own.
 """
 
 import uuid as uuid_lib
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .codec import _Codec, build_codec
 
@@ -25,22 +25,32 @@ class RegistryError(Exception):
     """Raised at decoration time when a class can't be registered."""
 
 
+def default_init(name: str, metadata: dict) -> dict:
+    """Constructor kwargs for a node proxy whose `__init__` only takes
+    a name."""
+    return {"name": name}
+
+
 class RegistryEntry:
     """Per-registered-class record.
 
     Holds the canonical UUID, the kind (`op`/`error`/`node`), the
-    codec, and (for nodes) the `uses` set of referenced UUIDs.
+    codec, and (for nodes) the `uses` set of referenced UUIDs plus
+    the `init` hook turning a remote node's name and metadata into
+    constructor kwargs for the client-side proxy.
     """
 
-    __slots__ = ("cls", "type_uuid", "kind", "codec", "uses")
+    __slots__ = ("cls", "type_uuid", "kind", "codec", "uses", "init")
 
     def __init__(self, cls: type, type_uuid: uuid_lib.UUID, kind: str,
-                 codec: _Codec | None, uses: tuple = ()):
+                 codec: _Codec | None, uses: tuple = (),
+                 init: Callable[[str, dict], dict] | None = None):
         self.cls = cls
         self.type_uuid = type_uuid
         self.kind = kind
         self.codec = codec
         self.uses = uses
+        self.init = init
 
     def __repr__(self):
         return (f"<RegistryEntry {self.kind} {self.cls.__name__} "
@@ -59,7 +69,9 @@ class Registry:
         self.__by_class: dict[type, RegistryEntry] = {}
 
     def register(self, cls: type, kind: str, type_uuid_str: str,
-                 uses: Iterable[type] = ()) -> RegistryEntry:
+                 uses: Iterable[type] = (),
+                 init: Callable[[str, dict], dict] | None = None
+                 ) -> RegistryEntry:
         try:
             type_uuid = uuid_lib.UUID(type_uuid_str)
         except (ValueError, AttributeError, TypeError) as exc:
@@ -81,16 +93,21 @@ class Registry:
         if kind == "node":
             uses_tuple = tuple(self.__validate_node_use(cls, u) for u in uses)
             codec = None
+            init_fn = init or default_init
         elif kind in ("op", "error", "value"):
             if list(uses):
                 raise RegistryError(
                     f"{cls.__name__}: 'uses' is only valid on @wire.node")
+            if init is not None:
+                raise RegistryError(
+                    f"{cls.__name__}: 'init' is only valid on @wire.node")
             codec = build_codec(cls, self)
             uses_tuple = ()
+            init_fn = None
         else:
             raise RegistryError(f"unknown kind {kind!r}")
 
-        entry = RegistryEntry(cls, type_uuid, kind, codec, uses_tuple)
+        entry = RegistryEntry(cls, type_uuid, kind, codec, uses_tuple, init_fn)
         self.__by_uuid[type_uuid] = entry
         self.__by_class[cls] = entry
         # Annotate the class with the registry mapping when the
@@ -178,12 +195,18 @@ def value(type_uuid: str):
     return decorator
 
 
-def node(type_uuid: str, *, uses=()):
+def node(type_uuid: str, *, uses=(), init=None):
     """Register a Node+Batcher class as a Transportable node.
 
     `uses` lists the op and error classes this node may exchange over
     the wire. Mixed list — no semantic split between commands and
     errors at the node level.
+
+    `init` is called as `init(name, metadata)` when the enumerator
+    builds a client-side proxy of this class, and returns the kwargs
+    for `cls.__init__`. `metadata` is the remote node's metadata as
+    reported by REST enumeration. Classes whose constructor needs
+    more than a name declare it here. Defaults to `{"name": name}`.
     """
     def decorator(cls):
         from ..node import Node
@@ -195,6 +218,7 @@ def node(type_uuid: str, *, uses=()):
             raise RegistryError(
                 f"{cls.__name__}: @wire.node target must subclass Batcher "
                 f"(only Batchers are transportable in v1)")
-        _default_registry.register(cls, "node", type_uuid, uses=uses)
+        _default_registry.register(cls, "node", type_uuid, uses=uses,
+                                   init=init)
         return cls
     return decorator

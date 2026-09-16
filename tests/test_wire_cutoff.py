@@ -70,12 +70,43 @@ class _TestIface(Node, Batcher):
         raise NoMatch("test iface child", name)
 
 
+@wire.op("70000000-0000-4000-8000-000000000002")
+@dataclass
+class _WindowRead:
+    offset: int
+
+
+@wire.node("70000000-0000-4000-8000-0000000000fe",
+           uses=[_WindowRead],
+           init=lambda name, metadata: {"base": metadata["base"],
+                                        "name": name})
+class _TestWindow(Node, Batcher):
+    """@wire.node whose constructor needs a value only the remote knows.
+
+    The client-side proxy gets it from the metadata the server
+    publishes, through the registered `init` hook."""
+
+    def __init__(self, base, name="window"):
+        Node.__init__(self, name)
+        Batcher.__init__(self)
+        self.base = base
+        self.metadata = {"base": base}
+        self.posted = []
+
+    async def flush_ops(self, batch):
+        for op, fut in batch:
+            self.posted.append(op)
+            if not fut.done():
+                fut.set_result(self.base + op.offset)
+
+
 def _build_remote_tree():
     iface = _TestIface(name="iface")
     adapter = Node("adapter")
     adapter.child_add(iface)
     root = Node("HwRoot")
     root.child_add(adapter)
+    root.child_add(_TestWindow(base=0x4000_0000, name="window"))
     return root
 
 
@@ -161,5 +192,25 @@ async def test_no_wire_node_in_path_falls_back_to_rest_enumeration(tmp_path):
             adapter = await local.child_summon("wire", "srv", "adapter")
             assert isinstance(adapter, RemoteProxyNode)
             assert adapter.info["wire_uuid"] is None
+        finally:
+            await local.stop_tree()
+
+
+@pytest.mark.asyncio
+async def test_proxy_construction_uses_registered_init_hook(tmp_path):
+    """A @wire.node whose __init__ takes more than a name is built
+    from the metadata the server reports for it."""
+    remote = _build_remote_tree()
+    server_window = remote.children[1]
+    app = make_app(remote)
+    async with TestServer(app) as server:
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
+        try:
+            proxy = await local.child_summon("wire", "srv", "window")
+            assert isinstance(proxy, _TestWindow)
+            assert proxy.name == "window"
+            assert proxy.base == 0x4000_0000
+            assert await proxy.post(_WindowRead(offset=0x20)) == 0x4000_0020
+            assert len(server_window.posted) == 1
         finally:
             await local.stop_tree()
