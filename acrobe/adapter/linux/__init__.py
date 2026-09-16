@@ -4,5 +4,7 @@ An embedded host is often the SPI/I²C master itself: the SoC's
 controllers surface as ``/dev/spidevX.Y`` and ``/dev/i2c-N`` and need
 no external probe. These modules expose them as ordinary acrobe
 adapters, so everything above layer 1 — SFDP flash discovery, the
-I²C memory presets, targets, the CLI — works unchanged.
+I²C memory presets, targets, the CLI — works unchanged. ``/dev/mem``
+windows expose the SoC's own physical address space as a memory bus
+for peripherals the host reaches directly.
 """

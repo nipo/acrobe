@@ -423,7 +423,8 @@ def _import_standard_enumerators():
     optional dependency drops that medium, not the whole root."""
     import importlib
     for module in (".tty", ".aji", ".xvc", ".tcp", ".udp",
-                   ".stream_endpoint", ".linux.spidev", ".linux.i2cdev"):
+                   ".stream_endpoint", ".linux.spidev", ".linux.i2cdev",
+                   ".linux.devmem"):
         try:
             importlib.import_module(module, package=__package__)
         except ImportError:
