@@ -312,3 +312,139 @@ def test_decode_accepts_immutable_containers_from_tag_payload():
     assert type(container) is dict
     assert type(container["items"]) is list
     assert container["items"] == [inst]
+
+
+# Unions of registered Transportables
+
+def _union_registry():
+    """Registry holding two op types usable as union members."""
+    reg = Registry()
+
+    @dataclass
+    class Alpha:
+        value: int
+
+    @dataclass
+    class Beta:
+        text: str
+
+    _register_op(reg, Alpha, "b1111111-1111-4111-8111-111111111111")
+    _register_op(reg, Beta, "b2222222-2222-4222-8222-222222222222")
+    return reg, Alpha, Beta
+
+
+def test_roundtrip_union_of_registered_types():
+    reg, Alpha, Beta = _union_registry()
+
+    @dataclass
+    class Holder:
+        item: Alpha | Beta
+
+    entry = _register_op(reg, Holder, "b3333333-3333-4333-8333-333333333333")
+    for item in (Alpha(value=7), Beta(text="hi")):
+        inst = Holder(item=item)
+        assert from_bytes(to_bytes(inst, entry.codec), entry.codec) == inst
+
+    assert entry.codec.encode(Holder(item=Alpha(value=7))) == [[0, [7]]]
+    assert entry.codec.encode(Holder(item=Beta(text="hi"))) == [[1, ["hi"]]]
+    assert entry.codec.referenced_types == {Alpha, Beta}
+
+
+def test_roundtrip_optional_union():
+    reg, Alpha, Beta = _union_registry()
+
+    @dataclass
+    class Holder:
+        item: Alpha | Beta | None = None
+
+    entry = _register_op(reg, Holder, "b4444444-4444-4444-8444-444444444444")
+    for item in (None, Alpha(value=1), Beta(text="x")):
+        inst = Holder(item=item)
+        assert from_bytes(to_bytes(inst, entry.codec), entry.codec) == inst
+    assert entry.codec.encode(Holder()) == [None]
+
+
+def test_roundtrip_tuple_of_union():
+    reg, Alpha, Beta = _union_registry()
+
+    @dataclass
+    class Holder:
+        items: tuple[Alpha | Beta, ...]
+
+    entry = _register_op(reg, Holder, "b5555555-5555-4555-8555-555555555555")
+    inst = Holder(items=(Alpha(value=3), Beta(text="y"), Alpha(value=4)))
+    decoded = from_bytes(to_bytes(inst, entry.codec), entry.codec)
+    assert decoded == inst
+    assert isinstance(decoded.items, tuple)
+
+
+def test_roundtrip_list_of_union():
+    reg, Alpha, Beta = _union_registry()
+
+    @dataclass
+    class Holder:
+        items: list[Alpha | Beta]
+
+    entry = _register_op(reg, Holder, "b6666666-6666-4666-8666-666666666666")
+    inst = Holder(items=[Beta(text="a"), Alpha(value=2)])
+    assert from_bytes(to_bytes(inst, entry.codec), entry.codec) == inst
+
+
+def test_union_decode_accepts_tuple_pair():
+    """cbor2 hands tuples back for arrays nested inside a tag."""
+    reg, Alpha, Beta = _union_registry()
+
+    @dataclass
+    class Holder:
+        item: Alpha | Beta
+
+    entry = _register_op(reg, Holder, "b7777777-7777-4777-8777-777777777777")
+    assert entry.codec.decode(((1, ("z",)),)) == Holder(item=Beta(text="z"))
+
+
+def test_union_of_primitives_raises():
+    reg, _, _ = _union_registry()
+
+    @dataclass
+    class Holder:
+        item: int | str
+
+    with pytest.raises(CodecError, match="only Optional"):
+        _register_op(reg, Holder, "b8888888-8888-4888-8888-888888888888")
+
+
+def test_union_mixing_registered_and_primitive_raises():
+    reg, Alpha, _ = _union_registry()
+
+    @dataclass
+    class Holder:
+        item: Alpha | int
+
+    with pytest.raises(CodecError, match="only Optional"):
+        _register_op(reg, Holder, "b9999999-9999-4999-8999-999999999999")
+
+
+def test_union_bad_variant_index_raises():
+    reg, Alpha, Beta = _union_registry()
+
+    @dataclass
+    class Holder:
+        item: Alpha | Beta
+
+    entry = _register_op(reg, Holder, "ba111111-1111-4111-8111-111111111111")
+    with pytest.raises(CodecError, match="out of range"):
+        entry.codec.decode([[2, [0]]])
+    with pytest.raises(CodecError, match="variant, payload"):
+        entry.codec.decode([[0]])
+
+
+def test_union_encode_of_foreign_value_raises():
+    reg, Alpha, Beta = _union_registry()
+
+    @dataclass
+    class Holder:
+        item: Alpha | Beta
+
+    entry = _register_op(reg, Holder, "ba222222-2222-4222-8222-222222222222")
+    with pytest.raises(CodecError, match="not a member"):
+        entry.codec.encode(Holder(item=object()))

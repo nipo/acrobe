@@ -15,6 +15,8 @@ Supported field types (introspection path):
 
 * primitives: `int`, `str`, `bytes`, `bool`, `float`, `NoneType`
 * `Optional[X]` (i.e. `X | None`)
+* a union of two or more registered Transportables, optionally with
+  `None`, encoded as `[variant_index, payload]`
 * `list[X]`
 * `dict[K, V]` with primitive K
 * `tuple[X, ...]` (homogeneous) and `tuple[A, B, C]` (heterogeneous fixed)
@@ -143,20 +145,25 @@ def _resolve_field_codec(annotation: Any, registry, owner: str, fname: str):
 
     if origin in (typing.Union, types.UnionType):
         non_none = [a for a in args if a is not type(None)]
-        if len(non_none) != 1 or len(args) != 2:
+        optional = len(non_none) != len(args)
+        if len(non_none) == 1 and optional:
+            inner_enc, inner_dec, refs = _resolve_field_codec(
+                non_none[0], registry, owner, fname)
+
+            def enc(v, _e=inner_enc):
+                return None if v is None else _e(v)
+
+            def dec(v, _d=inner_dec):
+                return None if v is None else _d(v)
+
+            return enc, dec, refs
+
+        entries = [_union_member_entry(a, registry) for a in non_none]
+        if len(non_none) < 2 or any(e is None for e in entries):
             raise CodecError(
                 f"{owner}.{fname}: only Optional[X] unions are "
                 f"supported, got {annotation!r}")
-        inner_enc, inner_dec, refs = _resolve_field_codec(
-            non_none[0], registry, owner, fname)
-
-        def enc(v, _e=inner_enc):
-            return None if v is None else _e(v)
-
-        def dec(v, _d=inner_dec):
-            return None if v is None else _d(v)
-
-        return enc, dec, refs
+        return _union_codec(entries, optional, owner, fname)
 
     if origin is list:
         if len(args) != 1:
@@ -210,6 +217,74 @@ def _resolve_field_codec(annotation: Any, registry, owner: str, fname: str):
         f"{owner}.{fname}: type {annotation!r} is not codec-supported. "
         f"Either use a primitive, a registered Transportable, or one of "
         f"the supported generics (Optional/list/dict/tuple).")
+
+
+def _union_member_entry(member: Any, registry):
+    """Registry entry for one union member, or None when the member
+    can't take part in a tagged union."""
+    if not isinstance(member, type):
+        return None
+    entry = registry.try_lookup_by_class(member)
+    if entry is None or entry.kind not in ("op", "error", "value"):
+        return None
+    return entry
+
+
+def _union_codec(entries: list, optional: bool, owner: str, fname: str):
+    """Build (encode_fn, decode_fn, referenced_types) for a union of
+    registered Transportables.
+
+    Encoded form is `[variant_index, member_payload]`, the index being
+    the member's position in annotation order. A None member of the
+    union encodes as None.
+    """
+    by_class = {entry.cls: (index, entry)
+                for index, entry in enumerate(entries)}
+    refs: set = set()
+    for entry in entries:
+        refs |= {entry.cls} | entry.codec.referenced_types
+
+    names = ", ".join(entry.cls.__name__ for entry in entries)
+
+    def enc(value):
+        if value is None:
+            if not optional:
+                raise CodecError(
+                    f"{owner}.{fname}: None is not a member of the "
+                    f"union ({names})")
+            return None
+        found = by_class.get(type(value))
+        if found is None:
+            for index, entry in enumerate(entries):
+                if isinstance(value, entry.cls):
+                    found = (index, entry)
+                    break
+        if found is None:
+            raise CodecError(
+                f"{owner}.{fname}: {type(value).__name__} is not a member "
+                f"of the union ({names})")
+        index, entry = found
+        return [index, entry.codec.encode(value)]
+
+    def dec(value):
+        if value is None:
+            if not optional:
+                raise CodecError(
+                    f"{owner}.{fname}: None is not a member of the "
+                    f"union ({names})")
+            return None
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            raise CodecError(
+                f"{owner}.{fname}: expected a [variant, payload] pair for "
+                f"union ({names}), got {value!r}")
+        index = value[0]
+        if not isinstance(index, int) or not 0 <= index < len(entries):
+            raise CodecError(
+                f"{owner}.{fname}: union variant {index!r} out of range for "
+                f"({names})")
+        return entries[index].codec.decode(value[1])
+
+    return enc, dec, refs
 
 
 def _identity(value):
