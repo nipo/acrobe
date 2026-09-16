@@ -217,8 +217,10 @@ class Session:
                     f"session catalog")
             entry = self.registry.lookup_by_class(cls)
             return entry.codec.decode(value.value)
-        if isinstance(value, list):
+        # cbor2 yields tuples and frozendicts for containers nested
+        # inside a CBOR tag.
+        if isinstance(value, (list, tuple)):
             return [self.decode_value(v) for v in value]
-        if isinstance(value, dict):
+        if isinstance(value, (dict, cbor2.frozendict)):
             return {k: self.decode_value(v) for k, v in value.items()}
         return value

@@ -249,3 +249,66 @@ def test_node_uses_node_raises():
     with pytest.raises(RegistryError, match="is a node"):
         reg.register(
             B, "node", "f2222222-2222-2222-2222-222222222222", uses=[A])
+
+
+def test_decode_accepts_immutable_containers_from_tag_payload():
+    """cbor2 decodes arrays and maps nested inside a CBOR tag as
+    tuple and frozendict; the codec and the session must accept them."""
+    import cbor2
+
+    from acrobe.engine import Batcher
+    from acrobe.node import Node
+    from acrobe.wire.session import Session
+
+    reg = Registry()
+
+    @dataclass
+    class Inner:
+        value: int
+
+    @dataclass
+    class Outer:
+        ints: list[int]
+        named: dict[str, int]
+        inner: Inner
+
+    class Host(Node, Batcher):
+        def __init__(self):
+            Node.__init__(self, "host")
+            Batcher.__init__(self)
+
+    _register_op(reg, Inner, "a1111111-1111-4111-8111-111111111111")
+    outer_entry = _register_op(
+        reg, Outer, "a2222222-2222-4222-8222-222222222222")
+    reg.register(Host, "node", "a3333333-3333-4333-8333-333333333333",
+                 uses=[Inner, Outer])
+
+    session = Session(reg)
+    session.build_catalog(Host)
+
+    inst = Outer(ints=[1, 2, 3], named={"a": 10, "b": 20},
+                 inner=Inner(value=7))
+
+    tagged = cbor2.loads(cbor2.dumps(session.encode_value(inst)))
+    assert isinstance(tagged, cbor2.CBORTag)
+    assert isinstance(tagged.value, tuple)
+
+    decoded = outer_entry.codec.decode(tagged.value)
+    assert decoded == inst
+    assert type(decoded.ints) is list
+    assert type(decoded.named) is dict
+
+    via_session = session.decode_value(tagged)
+    assert via_session == inst
+    assert type(via_session.ints) is list
+    assert type(via_session.named) is dict
+
+    nested = cbor2.loads(cbor2.dumps(
+        cbor2.CBORTag(60000, {"items": [session.encode_value(inst)]})))
+    assert isinstance(nested.value, cbor2.frozendict)
+    assert isinstance(nested.value["items"], tuple)
+
+    container = session.decode_value(nested.value)
+    assert type(container) is dict
+    assert type(container["items"]) is list
+    assert container["items"] == [inst]

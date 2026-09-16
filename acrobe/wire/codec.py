@@ -94,7 +94,8 @@ class _DataclassCodec(_Codec):
         return [f.encode(getattr(instance, f.name)) for f in self.fields]
 
     def decode(self, data: Any):
-        if not isinstance(data, list) or len(data) != len(self.fields):
+        # cbor2 yields tuples for arrays nested inside a CBOR tag.
+        if not isinstance(data, (list, tuple)) or len(data) != len(self.fields):
             raise CodecError(
                 f"{self.cls.__name__}: expected {len(self.fields)}-element "
                 f"array, got {data!r}")
