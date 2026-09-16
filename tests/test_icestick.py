@@ -165,9 +165,10 @@ class TestSpiMpsse:
 
         target = iface.child_lookup("cs0")
         read = spi.Shift(3, read_miso=True)
-        await target.transaction(spi.Shift(b"\x9f", read_miso=False), read)
+        results = await target.transaction(
+            spi.Shift(b"\x9f", read_miso=False), read)
 
-        assert read.miso == bytes([0xef, 0x40, 0x18])
+        assert bytes(results[1]) == bytes([0xef, 0x40, 0x18])
         cmd = transport.writes[0]
         assert bytes([mpsse_cmd.WRITE | mpsse_cmd.WRITE_NEG | mpsse_cmd.READ,
                       2, 0, 0, 0, 0]) in cmd

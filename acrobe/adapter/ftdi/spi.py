@@ -7,6 +7,7 @@ from .mpsse import (
     MpsseEngine, GetBitsLow, SetBitsLow, ShiftBytes,
     ThreePhase, Adaptive, Loopback, ClockDiv5, ClockDivisor,
 )
+from ...bitstring import BitString
 from ...protocol import spi
 
 
@@ -135,7 +136,13 @@ class SpiMpsse(spi.Interface):
                 self.__emit_cs(mpsse_ops, op)
                 entries.append((op, future, None))
             elif isinstance(op, spi.Shift):
-                entries.append((op, future, self.__emit_shift(mpsse_ops, op)))
+                try:
+                    span = self.__emit_shift(mpsse_ops, op)
+                except ValueError as exc:
+                    if future is not None and not future.done():
+                        future.set_exception(exc)
+                    continue
+                entries.append((op, future, span))
             elif future is not None and not future.done():
                 future.set_exception(TypeError(
                     f"SpiMpsse cannot lower {type(op).__name__}"))
@@ -163,16 +170,15 @@ class SpiMpsse(spi.Interface):
 
     @staticmethod
     def __resolve(entries, mpsse_ops):
-        """Populate `Shift.miso` from the MPSSE ops each shift was
-        lowered to, and resolve every batch future. A reading shift
-        resolves with its miso bytes, anything else with None."""
+        """Resolve every batch future from the MPSSE ops its op was
+        lowered to. A reading shift resolves with its captured MISO,
+        anything else with None."""
         for op, future, span in entries:
             miso = None
             if span is not None:
                 start, end = span
-                miso = b"".join(m.data for m in mpsse_ops[start:end])
-            if isinstance(op, spi.Shift):
-                op.miso = miso
+                blob = b"".join(m.data for m in mpsse_ops[start:end])
+                miso = BitString(blob, len(op.mosi))
             if future is not None and not future.done():
                 future.set_result(miso)
 
@@ -202,10 +208,11 @@ class SpiMpsse(spi.Interface):
     def __emit_shift(self, mpsse_ops, op):
         """Emit the MPSSE shifts for one SPI shift. Returns the
         (start, end) range of ops carrying MISO, or None."""
-        data = op.mosi if isinstance(op.mosi, (bytes, bytearray)) \
-            else bytes(op.mosi)
-        if not data:
-            return None
+        bits = len(op.mosi)
+        if bits % 8:
+            raise ValueError(
+                f"SpiMpsse shifts whole bytes; got {bits} bits")
+        data = bytes(op.mosi)
         start = len(mpsse_ops)
         for offset in range(0, len(data), self.MAX_SHIFT):
             mpsse_ops.append(ShiftBytes(

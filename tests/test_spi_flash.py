@@ -1,6 +1,7 @@
 import asyncio
 import pytest
 from acrobe.component.spi_flash import SpiFlash
+from acrobe.bitstring import BitString
 from acrobe.protocol.spi import Cs, Shift, Interface
 from acrobe.engine import Batcher
 from acrobe.node import Node
@@ -26,13 +27,12 @@ class MockSpiAdapter(Batcher, Node):
             if isinstance(op, Shift) and op.read_miso:
                 if self._read_responses:
                     rsp = self._read_responses.pop(0)
-                    if len(rsp) < op.byte_count:
-                        op.miso = rsp + bytes(op.byte_count - len(rsp))
-                    else:
-                        op.miso = rsp[:op.byte_count]
+                    rsp = rsp[:op.byte_count].ljust(op.byte_count, b"\x00")
                 else:
-                    op.miso = bytes(op.byte_count)
-            future.set_result(op)
+                    rsp = bytes(op.byte_count)
+                future.set_result(BitString(rsp, len(op.mosi)))
+            else:
+                future.set_result(None)
 
 
 def _make_flash(adapter=None):
@@ -93,7 +93,7 @@ class TestSpiFlashCommands:
 
         # Should have sent CMD_WRITE_ENABLE (0x06)
         shift_ops = [op for op in adapter.ops if isinstance(op, Shift)]
-        assert any(op.mosi == b"\x06" for op in shift_ops)
+        assert any(bytes(op.mosi) == b"\x06" for op in shift_ops)
 
 
 class TestSpiFlashRead:
@@ -134,7 +134,7 @@ class TestSpiFlashRead:
         # Command should be: 0x0b (fast read) + 3 addr bytes + 1 dummy
         assert len(cmd_shifts) >= 1
         first_cmd = cmd_shifts[0]
-        assert first_cmd.mosi[0:1] == b"\x0b"
+        assert bytes(first_cmd.mosi)[0:1] == b"\x0b"
 
 
 class TestSpiFlashErase:
@@ -149,7 +149,7 @@ class TestSpiFlashErase:
 
         # Should have: write_enable cmd, erase cmd, status read
         shift_ops = [op for op in adapter.ops if isinstance(op, Shift)]
-        mosi_bytes = [op.mosi for op in shift_ops if not op.read_miso]
+        mosi_bytes = [bytes(op.mosi) for op in shift_ops if not op.read_miso]
         # Write enable (0x06) + sector erase (0x20 + 3 addr bytes)
         assert any(m == b"\x06" for m in mosi_bytes)
         assert any(m[0:1] == b"\x20" for m in mosi_bytes)
@@ -166,7 +166,7 @@ class TestSpiFlashProgram:
         await flash.page_program(0x000000, b"\xaa\xbb\xcc\xdd")
 
         shift_ops = [op for op in adapter.ops if isinstance(op, Shift)]
-        mosi_bytes = [op.mosi for op in shift_ops if not op.read_miso]
+        mosi_bytes = [bytes(op.mosi) for op in shift_ops if not op.read_miso]
         # Write enable (0x06)
         assert any(m == b"\x06" for m in mosi_bytes)
         # Page program (0x02 + addr + data)
@@ -187,8 +187,8 @@ class TestSpiFlashProgram:
         await flash.program(0x000002, b"\x01\x02\x03\x04\x05\x06")
 
         shift_ops = [op for op in adapter.ops if isinstance(op, Shift)]
-        pp_cmds = [op.mosi for op in shift_ops
-                   if not op.read_miso and op.mosi[0:1] == b"\x02"]
+        pp_cmds = [bytes(op.mosi) for op in shift_ops
+                   if not op.read_miso and bytes(op.mosi)[0:1] == b"\x02"]
         # 6 bytes at addr 2 with page_size=4: first 2 bytes (to boundary), then 4 bytes
         assert len(pp_cmds) == 2
 

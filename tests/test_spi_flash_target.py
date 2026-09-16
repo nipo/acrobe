@@ -1,6 +1,7 @@
 """Tests for SPI flash target and discovery."""
 
 import pytest
+from acrobe.bitstring import BitString
 from acrobe.component.spi_flash import SpiFlash
 from acrobe.memory_map import MemoryMap
 from acrobe.node import Node
@@ -25,9 +26,8 @@ class FakeSpiTarget:
 
     async def transaction(self, *shifts):
         self.transactions.append(shifts)
-        for s in shifts:
-            if s.read_miso:
-                s.miso = bytes(s.byte_count)
+        return tuple(BitString(0, len(s.mosi)) if s.read_miso else None
+                     for s in shifts)
 
 
 class FakeSpiFlash(SpiFlash):

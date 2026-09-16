@@ -23,6 +23,7 @@ import errno
 import glob
 import os
 
+from ...bitstring import BitString
 from ...db import NoMatch
 from ...engine import BackgroundLowering
 from ...protocol import spi
@@ -278,10 +279,12 @@ class SpidevInterface(spi.Interface, BackgroundLowering):
             await asyncio.to_thread(self.__execute, steps)
         for run in runs:
             for shift in run.shifts:
-                miso = (None if shift.frags is None
-                        else b"".join(bytes(msg.rx[at:at + size])
-                                      for msg, at, size in shift.frags))
-                shift.op.miso = miso
+                if shift.frags is None:
+                    miso = None
+                else:
+                    blob = b"".join(bytes(msg.rx[at:at + size])
+                                    for msg, at, size in shift.frags)
+                    miso = BitString(blob, len(shift.op.mosi))
                 if shift.future is not None and not shift.future.done():
                     shift.future.set_result(miso)
         for future in plain:
@@ -340,13 +343,10 @@ class SpidevInterface(spi.Interface, BackgroundLowering):
         return runs, plain
 
     def __mosi_bytes(self, op) -> bytes:
-        mosi = op.mosi
-        if isinstance(mosi, (bytes, bytearray)):
-            return bytes(mosi)
-        if len(mosi) % 8:
+        if len(op.mosi) % 8:
             raise ValueError(
-                f"{self.path} shifts whole bytes; got {len(mosi)} bits")
-        return bytes(mosi)
+                f"{self.path} shifts whole bytes; got {len(op.mosi)} bits")
+        return bytes(op.mosi)
 
     def __plan(self, runs):
         """Turn runs into an ordered list of SetMode / SpiMessage steps."""

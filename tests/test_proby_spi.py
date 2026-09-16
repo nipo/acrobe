@@ -208,7 +208,7 @@ class TestProbySpiTraffic:
                                          read_miso=True))
         deselect = interface.post(Cs(None))
 
-        assert await read_back == b"\xff\xef\x40\x18"
+        assert bytes(await read_back) == b"\xff\xef\x40\x18"
         assert await select is None
         assert await write_only is None
         assert await deselect is None
@@ -228,8 +228,8 @@ class TestProbySpiTraffic:
         interface = await make_interface(device)
 
         await interface.post(Shift(b"\x01\x02", read_miso=True))
-        assert await interface.post(Shift(b"\x03\x04", read_miso=True)) \
-            == b"\x5a\x5a"
+        assert bytes(await interface.post(
+            Shift(b"\x03\x04", read_miso=True))) == b"\x5a\x5a"
 
         assert device.spi_commands == [
             bytes([0x22, 0x37, 0xc1, 0x01, 0x02]),
@@ -260,8 +260,9 @@ class TestProbySpiTraffic:
         interface = await make_interface(device)
         target = interface.child_lookup("cs0")
 
-        shifts = await target.transaction(Shift(b"\x9f\x00", read_miso=True))
-        assert shifts[0].miso == b"\x20\xba"
+        results = await target.transaction(
+            Shift(b"\x9f\x00", read_miso=True))
+        assert bytes(results[0]) == b"\x20\xba"
         assert device.spi_commands == [
             bytes([0x22, 0x37, 0x00, 0xc1, 0x9f, 0x00, 0x07])
         ]

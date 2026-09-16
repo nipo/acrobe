@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from ....bitstring import BitString
 from ....protocol.spi import Cs, Shift
 
 
@@ -148,6 +149,10 @@ class SpiTransactor:
                 continue
 
             if isinstance(op, Shift):
+                if len(op.mosi) % 8:
+                    raise ValueError(
+                        f"SpiTransactor shifts whole bytes; "
+                        f"got {len(op.mosi)} bits")
                 mosi_bytes = bytes(op.mosi)
                 if op.read_miso:
                     base_cmd = self.CMD_SHIFT_INOUT
@@ -177,17 +182,12 @@ class SpiTransactor:
                 response[g.rsp_offset:g.rsp_offset + g.length])
 
         for op_idx, (op, future) in enumerate(batch):
+            miso = None
             if isinstance(op, Shift) and op.read_miso:
-                miso = bytes(per_op.get(op_idx, b""))
-                op.miso = miso
-                if future is not None and not future.done():
-                    future.set_result(miso)
-                continue
-
-            if isinstance(op, Shift):
-                op.miso = None
+                blob = bytes(per_op.get(op_idx, b""))
+                miso = BitString(blob, len(op.mosi))
             if future is not None and not future.done():
-                future.set_result(None)
+                future.set_result(miso)
 
 from ....engine import Batcher
 from ....node import Node

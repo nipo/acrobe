@@ -39,6 +39,7 @@ import asyncio
 import struct
 from typing import Awaitable, Callable
 
+from ...bitstring import BitString
 from ...protocol import spi
 from ...target.puppet import Puppet
 
@@ -210,8 +211,10 @@ class Rp2040Spi(spi.Interface):
                 rx_slots.append((op, future, None, 0))
                 continue
             # shift
-            tx_data = (op.mosi if isinstance(op.mosi, bytes)
-                       else bytes(op.mosi))
+            if len(op.mosi) % 8:
+                raise ValueError(
+                    f"Rp2040Spi shifts whole bytes; got {len(op.mosi)} bits")
+            tx_data = bytes(op.mosi)
             this_tx_ptr = cur_tx
             tx_blob.extend(tx_data)
             cur_tx += len(tx_data)
@@ -234,7 +237,9 @@ class Rp2040Spi(spi.Interface):
     def __dispatch_results(entries, rx_slots, rx_base, rx_data):
         for (kind, op, future), (_, _, rx_addr, count) in zip(
                 entries, rx_slots):
+            miso = None
             if kind == "shift" and rx_addr is not None:
                 off = rx_addr - rx_base
-                op.miso = bytes(rx_data[off:off + count])
-            future.set_result(None)
+                miso = BitString(bytes(rx_data[off:off + count]),
+                                 len(op.mosi))
+            future.set_result(miso)

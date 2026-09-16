@@ -7,7 +7,7 @@ from acrobe.bitstring import BitString
 
 
 class MockSpiAdapter(Batcher, Node):
-    """Records ops and populates Shift.miso with dummy data."""
+    """Records ops and answers reading shifts with zero bits."""
 
     def __init__(self, name: str = "mock-spi"):
         Batcher.__init__(self)
@@ -18,8 +18,9 @@ class MockSpiAdapter(Batcher, Node):
         for op, future in batch:
             self.ops.append(op)
             if isinstance(op, Shift) and op.read_miso:
-                op.miso = bytes(op.byte_count)
-            future.set_result(op)
+                future.set_result(BitString(0, len(op.mosi)))
+            else:
+                future.set_result(None)
 
 
 class TestCsOp:
@@ -42,20 +43,31 @@ class TestCsOp:
 class TestShiftOp:
     def test_bytes_input(self):
         op = Shift(b"\xaa\xbb", read_miso=True)
-        assert op.mosi == b"\xaa\xbb"
+        assert bytes(op.mosi) == b"\xaa\xbb"
+        assert len(op.mosi) == 16
         assert op.byte_count == 2
         assert op.read_miso is True
-        assert op.miso is None
 
     def test_int_input(self):
         op = Shift(4, read_miso=True)
         assert op.byte_count == 4
-        assert op.mosi == bytes(4)
+        assert bytes(op.mosi) == bytes(4)
 
     def test_bitstring_input(self):
         bs = BitString(0xab, 8)
         op = Shift(bs)
         assert op.byte_count == 1
+        assert op.mosi == bs
+
+    def test_bit_granular_input(self):
+        op = Shift(BitString(0x5, 3))
+        assert len(op.mosi) == 3
+        assert op.byte_count == 1
+
+    def test_frozen(self):
+        op = Shift(b"\x01")
+        with pytest.raises(Exception):
+            op.mosi = b"\x02"
 
     def test_write_only(self):
         op = Shift(b"\x01\x02", read_miso=False)
@@ -74,8 +86,7 @@ class TestInterface:
         iface = Interface(adapter)
         shift = Shift(b"\x9f", read_miso=True)
         result = await iface.post(shift)
-        assert result is shift
-        assert shift.miso == bytes(1)
+        assert result == BitString(0, 8)
         assert len(adapter.ops) == 1
 
     @pytest.mark.asyncio
@@ -95,7 +106,7 @@ class TestInterface:
         iface = Interface(adapter)
         cs = Cs(0, mode=1)
         result = await iface.post(cs)
-        assert result is cs
+        assert result is None
         assert len(adapter.ops) == 1
         assert adapter.ops[0] is cs
 
@@ -122,7 +133,7 @@ class TestTarget:
         assert cs_ops[0].value == 0  # CS assert
         assert cs_ops[1].value is None  # CS deassert
         assert len(shift_ops) == 1
-        assert result == (shift,)
+        assert result == (BitString(0, 24),)
 
     @pytest.mark.asyncio
     async def test_transaction_multiple_shifts(self):
@@ -138,8 +149,7 @@ class TestTarget:
 
         assert len(cs_ops) == 2
         assert len(shift_ops) == 2
-        assert result == (s1, s2)
-        assert s2.miso == bytes(3)
+        assert result == (None, BitString(0, 24))
 
     @pytest.mark.asyncio
     async def test_transaction_mode(self):

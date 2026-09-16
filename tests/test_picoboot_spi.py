@@ -149,13 +149,11 @@ class TestSingleTransfer:
         cs0 = iface.children_of_class(spi.Target)[0]
         shift_cmd = spi.Shift(b"\x9f", read_miso=True)
         shift_data = spi.Shift(3, read_miso=True)  # 3 zeros, read 3 bytes
-        await cs0.transaction(shift_cmd, shift_data)
+        cmd_miso, data_miso = await cs0.transaction(shift_cmd, shift_data)
         # The mock returns the same response for both transfers; the
         # interesting bit is that miso bytes were sliced per Shift.
-        assert shift_cmd.miso is not None
-        assert shift_data.miso is not None
-        assert len(shift_cmd.miso) == 1
-        assert len(shift_data.miso) == 3
+        assert len(cmd_miso) == 8
+        assert len(data_miso) == 24
 
 
 class TestCmdLayout:

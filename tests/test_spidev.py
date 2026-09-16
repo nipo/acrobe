@@ -183,7 +183,7 @@ class TestTransactions:
         iface = await make_interface(dev)
         target = iface.child_lookup("cs0")
 
-        shifts = await target.transaction(
+        results = await target.transaction(
             spi.Shift(b"\x9f", read_miso=False), spi.Shift(3))
 
         assert len(dev.messages) == 1
@@ -193,7 +193,7 @@ class TestTransactions:
         assert entry[0]["mosi"] == b"\x9f"
         # Chip select drops at the end of the transaction.
         assert entry[-1]["cs_change"] == 0
-        assert shifts[1].miso == b"\xef\x40\x18"
+        assert bytes(results[1]) == b"\xef\x40\x18"
 
     async def test_bits_per_word_is_pinned_to_eight(self, bufsiz):
         dev = FakeSpiDevice()
@@ -211,20 +211,18 @@ class TestTransactions:
     async def test_non_reading_shift_gets_no_rx_buffer(self, bufsiz):
         dev = FakeSpiDevice()
         iface = await make_interface(dev)
-        shifts = await iface.child_lookup("cs0").transaction(
+        results = await iface.child_lookup("cs0").transaction(
             spi.Shift(b"\x06", read_miso=False))
         assert dev.transfers[0]["reads"] is False
-        assert shifts[0].miso is None
+        assert results[0] is None
 
-    async def test_future_and_op_both_carry_miso(self, bufsiz):
+    async def test_future_carries_miso(self, bufsiz):
         dev = FakeSpiDevice(miso=b"\xaa\xbb")
         iface = await make_interface(dev)
-        op = spi.Shift(2)
         iface.post(spi.Cs(0, 0))
-        future = iface.post(op)
+        future = iface.post(spi.Shift(2))
         iface.post(spi.Cs(None))
-        assert await future == b"\xaa\xbb"
-        assert op.miso == b"\xaa\xbb"
+        assert bytes(await future) == b"\xaa\xbb"
 
 
 class TestChunking:
@@ -233,7 +231,8 @@ class TestChunking:
         dev = FakeSpiDevice(miso=bytes(range(256)))
         iface = await make_interface(dev)
 
-        shifts = await iface.child_lookup("cs0").transaction(spi.Shift(200))
+        results = await iface.child_lookup("cs0").transaction(
+            spi.Shift(200))
 
         assert len(dev.messages) == 4
         assert [sum(t["len"] for t in entry)
@@ -242,7 +241,7 @@ class TestChunking:
         holds = [entry[-1]["cs_change"] for _mode, entry in dev.messages]
         assert holds == [1, 1, 1, 0]
         # MISO reassembles in order across the split.
-        assert shifts[0].miso == bytes(range(200))
+        assert bytes(results[0]) == bytes(range(200))
 
     async def test_transfer_count_is_capped_per_message(self, bufsiz):
         bufsiz(1 << 20)
@@ -256,11 +255,11 @@ class TestChunking:
         bufsiz(4)
         dev = FakeSpiDevice(miso=b"\x11\x22\x33\x44\x55\x66")
         iface = await make_interface(dev)
-        shifts = await iface.child_lookup("cs0").transaction(
+        results = await iface.child_lookup("cs0").transaction(
             spi.Shift(b"\xaa\xbb\xcc", read_miso=False), spi.Shift(3))
         assert [sum(t["len"] for t in entry)
                 for _mode, entry in dev.messages] == [4, 2]
-        assert shifts[1].miso == b"\x11\x22\x33"
+        assert bytes(results[1]) == b"\x11\x22\x33"
 
 
 class TestMode:
@@ -298,8 +297,7 @@ class TestUnbracketedShifts:
         dev = FakeSpiDevice(miso=b"\x5a")
         iface = await make_interface(dev)
 
-        op = spi.Shift(1)
-        assert await iface.post(op) == b"\x5a"
+        assert bytes(await iface.post(spi.Shift(1))) == b"\x5a"
 
         mode, _entry = dev.messages[0]
         assert mode & SPI_NO_CS

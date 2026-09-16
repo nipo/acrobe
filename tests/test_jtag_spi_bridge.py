@@ -88,7 +88,6 @@ class TestSpiTransactor:
         assert cmd[0] == (0x80 | 1)  # SHIFT_OUT, 2 bytes (count-1=1)
         assert cmd[1:3] == b'\xAA\xBB'
         assert result is None
-        assert shift.miso is None
 
     @pytest.mark.asyncio
     async def test_shift_read(self):
@@ -117,8 +116,7 @@ class TestSpiTransactor:
 
         shift = Shift(3, read_miso=True)
         result = await tr.post(shift)
-        assert result == bytes([0, 1, 2])
-        assert shift.miso == bytes([0, 1, 2])
+        assert bytes(result) == bytes([0, 1, 2])
 
     @pytest.mark.asyncio
     async def test_shift_inout(self):
@@ -147,8 +145,7 @@ class TestSpiTransactor:
 
         shift = Shift(b'\x12\x34', read_miso=True)
         result = await tr.post(shift)
-        assert result == b'\xFF\xFF'
-        assert shift.miso == b'\xFF\xFF'
+        assert bytes(result) == b'\xFF\xFF'
 
     @pytest.mark.asyncio
     async def test_chunk_splitting(self):
@@ -470,8 +467,7 @@ class TestJtagFramedIntegration:
         interface.child_add(target)
 
         result = await target.transaction(Shift(b'\x9F', read_miso=True))
-        shift_result = result[0]
-        assert shift_result.miso == b'\x9F'
+        assert bytes(result[0]) == b'\x9F'
 
 
 class TestJtagSpiBridge:

@@ -181,13 +181,11 @@ class SpiFlash(memory.Interface, BackgroundLowering, Batcher,
         self.logger.protocol("<< %s %s %s %d", cmd.hex(), addr.hex(), wdata[:16].hex() if wdata else "", rsize)
 
         shifts = [Shift(mosi, read_miso=False)]
-        read_shift = None
         if rsize:
-            read_shift = Shift(rsize, read_miso=True)
-            shifts.append(read_shift)
-        await self.__target.transaction(*shifts)
+            shifts.append(Shift(rsize, read_miso=True))
+        results = await self.__target.transaction(*shifts)
 
-        rsp = read_shift.miso if read_shift else b""
+        rsp = bytes(results[-1]) if rsize else b""
         if rsp:
             self.logger.protocol(">> %s", rsp[:32].hex())
         return rsp
