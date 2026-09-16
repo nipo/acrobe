@@ -177,7 +177,7 @@ class TestInterface:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_transaction_returns_tuple(self):
+    async def test_transaction_returns_list(self):
         adapter = MockAdapter()
         iface = Interface(adapter)
         tx = Transaction((
@@ -186,7 +186,7 @@ class TestInterface:
             Transfer(0x50, size_r=4),
         ))
         result = await iface.post(tx)
-        assert result == (None, None, bytes(4))
+        assert result == [None, None, bytes(4)]
 
     @pytest.mark.asyncio
     async def test_batching_across_slaves(self):
@@ -288,7 +288,7 @@ class TestSlave:
             WaitAck(slave.addr, timeout_s=0.05),
             Transfer(slave.addr, data_w=b"\x00\xaa\xbb"),
         )
-        assert result == (None, None)
+        assert result == [None, None]
         tx = adapter.transactions[0]
         assert isinstance(tx.items[0], WaitAck)
         assert isinstance(tx.items[1], Transfer)

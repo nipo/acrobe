@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .. import wire
 from ..db import Db
 from ..engine import Batcher
 from ..freq_capper import FreqCapper
@@ -29,46 +30,60 @@ from ..node import Node
 # contract is therefore uniform — it consumes Transactions and
 # resolves the future to ``tuple[bytes | None, ...]`` aligned with
 # ``Transaction.items`` (``bytes`` for read Transfers, ``None`` for
-# write-only Transfers and WaitAcks), or raises on failure.
+# write-only Transfers and WaitAcks), or raises on failure. The
+# Interface hands the caller that sequence back as a list: a
+# Transaction result crossing acrobe.wire comes back as a list, and
+# local and remote results must compare equal.
 #
 # Per acrobe convention, op classes are frozen dataclasses; the
 # Future returned by Batcher.post() resolves to the natural result:
 #   - Transfer with size_r > 0  → bytes
 #   - Transfer write-only       → None
 #   - WaitAck                   → None
-#   - Transaction               → tuple of the above per item
+#   - Transaction               → list of the above per item
 
 
 # ---- Exceptions ----
 
+@wire.error("c998f5e3-8bb9-4f8b-b2bc-35517ea6ca42")
+@dataclass
 class AddressNack(Exception):
     """Slave did not acknowledge its address."""
 
-    def __init__(self, addr: int):
-        self.addr = addr
-        super().__init__(f"I2C address NACK at 0x{addr:02x}")
+    addr: int
+
+    def __post_init__(self):
+        super().__init__(f"I2C address NACK at 0x{self.addr:02x}")
 
 
+@wire.error("ebb5cecf-7af6-4d0f-aa34-9675ee12b7d1")
+@dataclass
 class DataNack(Exception):
     """Slave NACKed during data transfer."""
 
-    def __init__(self, addr: int):
-        self.addr = addr
-        super().__init__(f"I2C data NACK at 0x{addr:02x}")
+    addr: int
+
+    def __post_init__(self):
+        super().__init__(f"I2C data NACK at 0x{self.addr:02x}")
 
 
+@wire.error("e3214638-d2bd-4f1f-a929-bd0be473aee7")
+@dataclass
 class WaitAckTimeout(Exception):
     """WaitAck did not see an address ACK within the timeout."""
 
-    def __init__(self, addr: int, timeout_s: float):
-        self.addr = addr
-        self.timeout_s = timeout_s
+    addr: int
+    timeout_s: float
+
+    def __post_init__(self):
         super().__init__(
-            f"I2C WaitAck timeout at 0x{addr:02x} after {timeout_s}s")
+            f"I2C WaitAck timeout at 0x{self.addr:02x} "
+            f"after {self.timeout_s}s")
 
 
 # ---- Operations ----
 
+@wire.op("ba8f79d8-7b5b-4743-b8a3-21f71f425bf5")
 @dataclass(frozen=True, slots=True)
 class Transfer:
     """One atomic START..STOP bus transaction.
@@ -98,6 +113,7 @@ class Transfer:
         return f"Transfer(0x{self.addr:02x}, w={self.data_w.hex()})"
 
 
+@wire.op("39688883-9fcc-4450-9251-5c0a9de24769")
 @dataclass(frozen=True, slots=True)
 class WaitAck:
     """Probe a slave's address until it ACKs or the timeout elapses."""
@@ -116,6 +132,7 @@ class WaitAck:
         return f"WaitAck(0x{self.addr:02x}, t<={self.timeout_s}s)"
 
 
+@wire.op("00716339-4cc0-4a61-8daa-6f4a0aeaadad")
 @dataclass(frozen=True, slots=True)
 class Transaction:
     """Sequence of Transfer / WaitAck items.
@@ -124,7 +141,7 @@ class Transaction:
     the future resolves with the failing item's exception.
     """
 
-    items: tuple
+    items: tuple[Transfer | WaitAck, ...]
 
     def __post_init__(self):
         if not isinstance(self.items, tuple):
@@ -141,6 +158,19 @@ class Transaction:
 
 # ---- Interface ----
 
+def _remote_init(name, metadata):
+    """Constructor kwargs for a client-side proxy of :class:`Interface`.
+
+    The proxy replaces :meth:`Interface.flush_ops` with wire
+    forwarding, so the adapter the local constructor would post to is
+    never reached."""
+    return {"adapter": None, "name": name}
+
+
+@wire.node("79d73dce-cdb9-424e-ae19-a6a6f1fcd93f",
+           uses=[Transfer, WaitAck, Transaction,
+                 AddressNack, DataNack, WaitAckTimeout],
+           init=_remote_init)
 class Interface(Batcher, FreqCapper, Node):
     """I2C bus.
 
@@ -202,7 +232,7 @@ class Interface(Batcher, FreqCapper, Node):
             except Exception as exc:
                 mf.set_exception(exc)
                 continue
-            mf.set_result(result[0] if single else result)
+            mf.set_result(result[0] if single else list(result))
 
     def __repr__(self):
         return f"<i2c.Interface {self.name}>"
@@ -239,7 +269,7 @@ class Slave(Node):
             WaitAck(self.addr, timeout_s, interval_s))
 
     def transaction(self, *items):
-        """Future → tuple of per-item natural results."""
+        """Future → list of per-item natural results."""
         return self.__interface.post(Transaction(items))
 
     def post(self, op):

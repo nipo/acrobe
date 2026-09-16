@@ -202,7 +202,7 @@ class TestTransactions:
         )))
         # Fusing them into one ioctl would drop the STOPs between.
         assert len(dev.calls) == 3
-        assert result == (None, None, bytes(2))
+        assert result == [None, None, bytes(2)]
 
     async def test_failure_cancels_the_rest_of_its_transaction(self):
         dev = FakeI2cDevice()

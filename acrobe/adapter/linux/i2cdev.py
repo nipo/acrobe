@@ -216,7 +216,8 @@ class I2cdevInterface(i2c.Interface, BackgroundLowering):
             if isinstance(outcome, Exception):
                 future.set_exception(outcome)
             else:
-                future.set_result(outcome[0] if entry.single else outcome)
+                future.set_result(
+                    outcome[0] if entry.single else list(outcome))
 
     def __execute(self, batch):
         """Run every transaction in the batch; returns one outcome each.
