@@ -46,18 +46,21 @@ class RemoteBatcher(Batcher, Node):
 
 async def _wire_flush_ops(self, batch):
     """Shared flush_ops body for RemoteBatcher and proxy classes
-    built via make_remote_proxy. Reads `self._wire`."""
+    built via make_remote_proxy. Reads `self._wire`.
+
+    Ops enqueued through `post_no_wait` carry a None future; their
+    results are dropped."""
     ops = [op for op, _ in batch]
     try:
         response = await self._wire.send_batch(ops)
     except Exception as exc:
         for _, fut in batch:
-            if not fut.done():
+            if fut is not None and not fut.done():
                 fut.set_exception(exc)
         return
 
     for idx, (op, fut) in enumerate(batch):
-        if fut.done():
+        if fut is None or fut.done():
             continue
         if idx in response.errors:
             fut.set_exception(response.errors[idx])
@@ -71,8 +74,10 @@ def make_remote_proxy(target_class: type, wire_client: WireClient,
                       **init_kwargs: Any):
     """Build a proxy that IS-A `target_class` and routes ops over the wire.
 
-    `init_kwargs` are forwarded to `target_class.__init__` — typically
-    just `name=...` for most @wire.node-decorated Batchers.
+    `init_kwargs` are forwarded to `target_class.__init__`. The
+    enumerator builds them from the registry entry's `init` hook,
+    which defaults to `name=...`; classes needing more take their
+    extra arguments from the remote node's metadata.
 
     The returned instance:
 

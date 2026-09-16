@@ -56,9 +56,11 @@ class _WsEchoNode(Node, Batcher):
     def __init__(self):
         Node.__init__(self, "echo")
         Batcher.__init__(self)
+        self.posted = []
 
     async def flush_ops(self, batch):
         for op, fut in batch:
+            self.posted.append(op)
             if fut.done():
                 continue
             if isinstance(op, _WsEcho):
@@ -205,3 +207,24 @@ async def test_ws_rejects_non_node_path():
         from aiohttp import WSServerHandshakeError
         with pytest.raises(WSServerHandshakeError):
             await cli.session.ws_connect(str(cli.make_url("/v1/node")))
+
+
+@pytest.mark.asyncio
+async def test_ws_batch_with_post_no_wait():
+    """`post_no_wait` puts a None future in the batch; the wire flush
+    ships the op and drops its result without tripping."""
+    reg = _make_registry()
+    root, echo = _make_root_with_node()
+    app = make_app(root, registry=reg)
+
+    async with TestClient(TestServer(app)) as cli:
+        client = await WireClient.connect(
+            str(cli.make_url("/v1/node/echo")), reg,
+            http_session=cli.session)
+        try:
+            proxy = RemoteBatcher(client)
+            proxy.post_no_wait(_WsShout(text="silent"))
+            assert await proxy.post(_WsEcho(value=21)) == 42
+            assert [type(op) for op in echo.posted] == [_WsShout, _WsEcho]
+        finally:
+            await client.close()
