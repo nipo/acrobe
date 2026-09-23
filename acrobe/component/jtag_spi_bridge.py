@@ -1,7 +1,6 @@
 from ..engine import Batcher
 from ..node import Node
 from ..protocol import spi
-from .nsl.bnoc.fifo import JtagFifo
 from .nsl.bnoc.framed import JtagFramed
 from .nsl.transactor.spi import SpiTransactor
 from .nsl.jtag_continuous_transport import ContinuousTransport
@@ -27,17 +26,19 @@ class _SpiFramedAdapter(Batcher, Node):
         self.__codec.decode(batch, rsp, gather)
 
 
-def jtag_spi_bridge(tap, base_freq):
-    """Build SPI interface stack over JTAG USER DR FIFO.
+class JtagSpiBridge(spi.Interface):
+    """SPI bus behind the NSL JTAG to SPI bridge bitstream.
 
-    Stack: JtagFifo → JtagFramed → SpiTransactor → spi.Interface → spi.Target
-    """
-    #fifo = JtagFifo(tap, tap.USER_IR[0], tap.USER_IR[1])
-    #framed = JtagFramed(fifo)
-    framed = ContinuousTransport(tap, tap.USER_IR[0])
-    codec = SpiTransactor(base_freq)
-    adapter = _SpiFramedAdapter(codec, framed)
-    interface = spi.Interface(adapter, name="spi")
-    target = spi.Target(interface, cs=0, mode=0, name="cs0")
-    interface.child_add(target)
-    return interface
+    Stack: ContinuousTransport → SpiTransactor → spi.Interface → spi.Target
+
+    `base_freq` is the bridge's system clock rate, which the SPI
+    transactor divides into SCK."""
+
+    def __init__(self, tap, base_freq: float, name: str = "spi"):
+        self.__codec = SpiTransactor(base_freq)
+        framed = ContinuousTransport(tap, tap.USER_IR[0])
+        super().__init__(_SpiFramedAdapter(self.__codec, framed), name=name)
+        self.child_add(spi.Target(self, cs=0, mode=0, name="cs0"))
+
+    def freq_update(self, freq):
+        return self.__codec.freq_update(freq)

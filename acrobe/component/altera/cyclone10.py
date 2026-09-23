@@ -130,7 +130,7 @@ async def _spi(tap):
     from pathlib import Path
     from ...db import NoMatch as _NoMatch
     from ...vfs.fs import FileNode
-    from ..jtag_spi_bridge import jtag_spi_bridge
+    from ..jtag_spi_bridge import JtagSpiBridge
     from . import formats  # noqa: F401  ensure .rbf.gz parser registered
 
     idcode_masked = tap.idcode & 0x0FFFFFFF
@@ -144,7 +144,7 @@ async def _spi(tap):
     # NOTE: leaf is intentionally not stopped — view holds a
     # reference to leaf's source for future reads (none here, but
     # consistent with the lifetime model). Process exit closes it.
-    return jtag_spi_bridge(tap, base_freq=65e6)
+    return JtagSpiBridge(tap, base_freq=65e6)
 
 
 _PARTS = {

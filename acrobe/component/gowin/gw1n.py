@@ -204,7 +204,7 @@ async def _gowin_spi(tap):
     from pathlib import Path
     from ...db import NoMatch as _NoMatch
     from ...vfs.fs import FileNode
-    from ..jtag_spi_bridge import jtag_spi_bridge
+    from ..jtag_spi_bridge import JtagSpiBridge
     from . import formats  # noqa: F401  ensure .fs.gz parser registered
 
     idcode_masked = tap.idcode & 0x0FFFFFFF
@@ -218,7 +218,7 @@ async def _gowin_spi(tap):
     # NOTE: leaf is intentionally not stopped — view holds a
     # reference to leaf's source for future reads (none here, but
     # consistent with the lifetime model). Process exit closes it.
-    return jtag_spi_bridge(tap, base_freq=30e6)
+    return JtagSpiBridge(tap, base_freq=30e6)
 
 
 @Tap.db.register(*map(PartId.from_idcode, _part_ids("GW1")))

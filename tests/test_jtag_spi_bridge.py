@@ -5,12 +5,13 @@ from acrobe.protocol.datagram import Datagram, Send, Recv
 from acrobe.component.nsl.bnoc.framed import JtagFramed
 from acrobe.component.nsl.bnoc.fifo import JtagFifo
 from acrobe.component.nsl.transactor.spi import SpiTransactor
-from acrobe.component.jtag_spi_bridge import jtag_spi_bridge, _SpiFramedAdapter
+from acrobe.component.jtag_spi_bridge import JtagSpiBridge, _SpiFramedAdapter
 from acrobe.protocol.spi import Cs, Shift, Interface, Target
 from acrobe.engine import Batcher
 from acrobe.node import Node
 from acrobe.protocol.jtag import Chain, JtagInterface
 from acrobe.bitstring import BitString
+from acrobe.freq_capper import FreqCapper
 
 
 # -- MockChannel: in-memory Framed for SpiTransactor testing --
@@ -472,14 +473,29 @@ class TestJtagFramedIntegration:
 
 class TestJtagSpiBridge:
     def test_bridge_returns_interface(self):
-        """jtag_spi_bridge() returns spi.Interface with correct tree."""
+        """JtagSpiBridge is an spi.Interface with correct tree."""
         sim = FifoSimulator(status_ir=0x43)
-        iface = jtag_spi_bridge(sim, base_freq=30e6)
+        iface = JtagSpiBridge(sim, base_freq=30e6)
 
         assert isinstance(iface, Interface)
         assert len(iface.children) == 1
         assert isinstance(iface.children[0], Target)
         assert iface.children[0].cs == 0
+
+    def test_fmax_reaches_divisor(self):
+        """A frequency cap on the interface programs the transactor
+        divisor, rounding SCK down, never up."""
+        sim = FifoSimulator(status_ir=0x43)
+        iface = JtagSpiBridge(sim, base_freq=64e6)
+
+        FreqCapper.option_set(iface, "fmax", "3M")
+
+        # 64 MHz / 3 MHz: half-period of 11 clocks, divisor 10.
+        assert iface.freq == 64e6 / 22
+        assert iface.freq <= 3e6
+
+        iface.freq_cap("user", 1e6)
+        assert iface.freq == 1e6
 
 
 class _GowinLoadMock(JtagInterface):
