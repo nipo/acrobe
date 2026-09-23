@@ -78,7 +78,13 @@ begin
 --      rx_i => comm_spi.pre_fifo.cmd.ack
 --      );
   
+  -- Named in acrobe's node space (vendor 0x4ff) as the SPI bridge
+  -- (type 0x01), so a host finds it behind an SLD hub.
   jtag_io: nsl_jtag.continuous_transport.jtag_continuous_transport_tap
+    generic map(
+      node_vendor_c => 16#4ff#,
+      node_type_c => 16#01#
+      )
     port map(
       clock_i => clock_i,
       reset_n_i => reset_n_i,

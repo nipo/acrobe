@@ -17,3 +17,4 @@ from . import ti  # noqa: F401
 from . import raspberry  # noqa: F401
 from . import hdlc  # noqa: F401
 from .nsl import sld  # noqa: F401
+from . import jtag_spi_bridge  # noqa: F401

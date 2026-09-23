@@ -101,6 +101,7 @@ async def _spi(tap):
     from ...db import NoMatch as _NoMatch
     from ...vfs.fs import FileNode
     from ..jtag_spi_bridge import JtagSpiBridge
+    from ..nsl.jtag_continuous_transport import ContinuousTransport
     from . import formats
 
     idcode_masked = tap.idcode & 0x0FFFFFFF
@@ -118,4 +119,4 @@ async def _spi(tap):
     # CFGMCLK is about 50 MHz (UG380), from the oscillator whose
     # tolerance DS162 gives as +-50% (FMCCKTOL). SCK divisors are
     # computed against the fastest case.
-    return JtagSpiBridge(tap, base_freq=75e6)
+    return JtagSpiBridge(ContinuousTransport(tap, tap.USER_IR[0]), base_freq=75e6)

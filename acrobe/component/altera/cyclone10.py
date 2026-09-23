@@ -21,6 +21,12 @@ class Cyclone10(Tap, JtagSramFpga):
     irlen = 10
     max_freq = 12e6
 
+    # The oscillator is only specified through the AS DCLK it clocks,
+    # 20 to 40 MHz (C10LP51002 table 37), and runs at about twice DCLK
+    # typical; assume twice the DCLK ceiling. SCK divisors are computed
+    # against the fastest case.
+    JTAG_SPI_BRIDGE_FREQ = 80e6
+
     # DR descriptors
     DEVICE_ID = Dr(32)
     BYPASS_REG = Dr(1)
@@ -136,6 +142,10 @@ async def _spi(tap):
     from ..jtag_spi_bridge import JtagSpiBridge
     from . import formats  # noqa: F401  ensure .rbf.gz parser registered
 
+    bridge = await JtagSpiBridge.sld_find(tap)
+    if bridge is not None:
+        return bridge
+
     idcode_masked = tap.idcode & 0x0FFFFFFF
     fw_path = Path(__file__).parent / "fw" / f"0x{idcode_masked:08x}_jtag_spi.rbf.gz"
     if not fw_path.exists():
@@ -147,11 +157,11 @@ async def _spi(tap):
     # NOTE: leaf is intentionally not stopped — view holds a
     # reference to leaf's source for future reads (none here, but
     # consistent with the lifetime model). Process exit closes it.
-    # The oscillator is only specified through the AS DCLK it
-    # clocks, 20 to 40 MHz (C10LP51002 table 37), and runs at about
-    # twice DCLK typical; assume twice the DCLK ceiling. SCK divisors
-    # are computed against the fastest case.
-    return JtagSpiBridge(tap, base_freq=80e6)
+    bridge = await JtagSpiBridge.sld_find(tap)
+    if bridge is None:
+        raise RuntimeError(f"{fw_path.name} loaded, but no SPI bridge "
+                           "answers behind the SLD hub")
+    return bridge
 
 
 _PARTS = {

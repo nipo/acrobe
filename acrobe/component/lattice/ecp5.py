@@ -176,6 +176,7 @@ async def _gowin_spi(tap):
     from ...db import NoMatch as _NoMatch
     from ...vfs.fs import FileNode
     from ..jtag_spi_bridge import JtagSpiBridge
+    from ..nsl.jtag_continuous_transport import ContinuousTransport
     from . import formats  # noqa: F401  ensure .fs.gz parser registered
 
     fw_path = Path(__file__).parent / "fw" / f"{tap.idcode:#010x}_jtag_spi.bin.gz"
@@ -190,4 +191,4 @@ async def _gowin_spi(tap):
     # consistent with the lifetime model). Process exit closes it.
     # MCLK from OSCG at DIV 5 is 62 MHz, +-20%. SCK divisors are
     # computed against the fastest case.
-    return JtagSpiBridge(tap, base_freq=74.4e6)
+    return JtagSpiBridge(ContinuousTransport(tap, tap.USER_IR[0]), base_freq=74.4e6)
