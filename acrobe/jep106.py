@@ -1710,6 +1710,11 @@ name_by_id = {
     0xd38: "Space Exploration Technologies Corp",
     0xd39: "AONDEVICES Inc",
 
+    # Custom IDs for our projects
+    # 0x7f is never assigned by JEDEC
+    0x97f: "Acrobe",
+    0xb7f: "NSL",
+    0xd7f: "Gatecap",
 }
 
 def name_get(bank, id):
