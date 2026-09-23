@@ -173,24 +173,14 @@ async def sld_attach(tap):
 
 
 def applications_register(cls):
-    """Give an Altera TAP class its SLD hub, and the transports NSL runs
-    behind it.
+    """Give an Altera TAP class its SLD hub.
 
-    ``sld`` enumerates the hub and exposes its nodes as children.
-    ``bnoc_continuous_transport`` is kept as a shorthand for the one
-    gatecap continuous transport a design carries."""
+    ``sld`` enumerates the hub and exposes its nodes as children, which
+    is how NSL's transports are reached on these parts."""
 
     @cls.application_db.register("sld")
     async def _sld(tap):
         return SldHub(tap)
-
-    @cls.application_db.register("bnoc_continuous_transport")
-    async def _continuous(tap):
-        from ..nsl.sld import GATECAP_CONTINUOUS_TRANSPORT
-        from ..nsl.jtag_continuous_transport import ContinuousTransport
-        hub = await tap.child_summon("sld")
-        info = hub.node_find(GATECAP_CONTINUOUS_TRANSPORT)
-        return ContinuousTransport(tap, hub.instruction(info, 0))
 
     @cls.application_db.register("bnoc_framed_transport")
     async def _framed(tap):
