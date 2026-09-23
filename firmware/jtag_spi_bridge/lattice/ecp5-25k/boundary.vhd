@@ -1,7 +1,7 @@
 library ieee;
 use ieee.std_logic_1164.all;
 
-library work, nsl_io, nsl_hwdep, jtag_spi;
+library work, nsl_io, nsl_clocking, jtag_spi;
 
 entity boundary is
   port (
@@ -35,12 +35,12 @@ begin
       );
   spi_sck_ts_s <= '0';
   
-  internal_clock_gen: nsl_hwdep.clock.clock_internal
+  internal_clock_gen: nsl_clocking.oscillator.clock_internal
     port map(
       clock_o => clock_s
       );
 
-  internal_reset_gen: nsl_hwdep.reset.reset_at_startup
+  internal_reset_gen: nsl_clocking.reset.reset_at_startup
     port map(
       clock_i => clock_s,
       reset_n_o => reset_n_s

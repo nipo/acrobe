@@ -12,8 +12,8 @@ root:
         - pins.lpf
   deps:
     - nsl_io.io
-    - nsl_hwdep.reset
-    - nsl_hwdep.clock
+    - nsl_clocking.reset
+    - nsl_clocking.oscillator
     - jtag_spi.bridge
 
 output:

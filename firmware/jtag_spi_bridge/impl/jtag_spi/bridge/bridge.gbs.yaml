@@ -4,8 +4,7 @@ sources:
       - func.pkg.vhd
       - jtag_spi_bridge.vhd
 deps:
-  - nsl_hwdep.clock
-  - nsl_hwdep.reset
+  - nsl_clocking.async
   - nsl_spi.transactor
   - nsl_bnoc.framed
   - nsl_jtag.continuous_transport
