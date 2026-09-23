@@ -11,7 +11,9 @@ from ...bitfield import *
 from ...node import Node
 from .sdm import Sdm, Error, ConfigStatus, Command
 from .sdm_jtag import SdmJtagMixin
+from .sld_hub import applications_register, sld_attach
 
+@applications_register
 class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
     """Altera/Intel Agilex 5 FPGA with SDM.
 
@@ -72,6 +74,8 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
         configured = await self.is_configured()
         self.logger.note("IDCODE: 0x%08x, configured: %s",
                          self.idcode, configured)
+        if configured:
+            await sld_attach(self)
 
     async def load(self, source):
         """Load bitstream into Agilex 5 via SDM.
@@ -140,6 +144,8 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
         # JTAG Test-Logic-Reset. Drive one, re-probe, and let
         # `post_tlr` claim any new neighbour as gated-by-us.
         await chain.tlr_and_refresh()
+
+        await sld_attach(self)
 
     async def post_tlr(self):
         """Claim the freshly-attached neighbour TAP (if any) as

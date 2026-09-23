@@ -68,7 +68,10 @@ class ContinuousTransport(Datagram):
     """Datagram channel over an ``nsl_jtag.continuous_transport`` slave.
 
     Parent is the :class:`~acrobe.protocol.jtag.Tap` whose ``user_ir``
-    selects the continuous-transport data register.
+    selects the continuous-transport data register.  ``user_ir`` is
+    either an IR value or an instruction handle shaped like the one
+    ``Tap.ir()`` returns, for a register that takes more than an IR
+    value to reach.
     """
 
     # Wire constants (spec §4 / continuous_transport.pkg.vhd).
@@ -103,7 +106,7 @@ class ContinuousTransport(Datagram):
                  idle_poll_interval: float = 0.05):
         super().__init__(name)
         self._tap = tap
-        self._user = tap.ir(user_ir)
+        self._user = user_ir if callable(user_ir) else tap.ir(user_ir)
         self._preamble_count = max(2, int(preamble_count))
         self._tx_budget = int(tx_budget)
         self._idle_poll_interval = float(idle_poll_interval)

@@ -3,8 +3,10 @@ from ...part_id import PartId
 from ..fpga import JtagSramFpga
 from ...bitstring import BitString
 from .formats.rbf_cyclone10 import RBF_SYNC, RBF_SYNC_SWAPPED
+from .sld_hub import applications_register, sld_attach
 
 
+@applications_register
 class Cyclone10(Tap, JtagSramFpga):
     """Altera/Intel Cyclone 10 LP SRAM FPGA.
 
@@ -18,7 +20,6 @@ class Cyclone10(Tap, JtagSramFpga):
 
     irlen = 10
     max_freq = 12e6
-    USER_IR = [0x00c, 0x00e]
 
     # DR descriptors
     DEVICE_ID = Dr(32)
@@ -62,6 +63,7 @@ class Cyclone10(Tap, JtagSramFpga):
         if configured:
             usercode = int(await self.USERCODE())
             self.logger.note("UserCode: 0x%08x", usercode)
+            await sld_attach(self)
 
     async def load(self, source):
         blob = await source.read(0, source.size)
@@ -113,6 +115,7 @@ class Cyclone10(Tap, JtagSramFpga):
         await self.run(12000)
 
         self.logger.note("Configuration complete")
+        await sld_attach(self)
 
     async def erase(self):
         # Cyclone 10 LP is SRAM-only: loading a new config overwrites.
