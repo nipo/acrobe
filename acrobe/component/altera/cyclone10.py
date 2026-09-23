@@ -18,6 +18,7 @@ class Cyclone10(Tap, JtagSramFpga):
 
     irlen = 10
     max_freq = 12e6
+    USER_IR = [0x00c, 0x00e]
 
     # DR descriptors
     DEVICE_ID = Dr(32)
@@ -34,6 +35,10 @@ class Cyclone10(Tap, JtagSramFpga):
     IDCODE = Instruction(0x006, "DEVICE_ID")     # Read JTAG IDCODE
     USERCODE = Instruction(0x007, "USER_CODE")   # Read user code register
     BYPASS = Instruction(0x3FF, "BYPASS_REG")    # Standard JTAG bypass
+    #
+    # User chains, reached from fabric through the cyclone10lp_jtag atom:
+    USER0 = Instruction(0x00C, None)
+    USER1 = Instruction(0x00E, None)
     #
     # ISC (In-System Configuration) — not used for SRAM config:
     # ISC_ENABLE     = Instruction(0x071, None)  # Enter ISC mode
