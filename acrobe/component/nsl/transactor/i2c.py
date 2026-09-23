@@ -118,8 +118,8 @@ class I2cTransactor:
         if t.data_w:
             cmd.append(self.CMD_WRITE | 0)
             cmd.append((t.addr << 1) & 0xfe)  # write address
-            addr_w_off = rsp_size + 1
-            rsp_size += 2
+            addr_w_off = rsp_size
+            rsp_size += 1
 
             # Payload (chunks of MAX_CHUNK)
             data = t.data_w
@@ -137,8 +137,8 @@ class I2cTransactor:
             rsp_size += 1
             cmd.append(self.CMD_WRITE | 0)
             cmd.append((t.addr << 1) | 0x01)  # read address
-            addr_r_off = rsp_size + 1
-            rsp_size += 2
+            addr_r_off = rsp_size
+            rsp_size += 1
 
             # Reads: every chunk but the last uses READ_ACK; last byte
             # of the last chunk uses READ_NACK.
