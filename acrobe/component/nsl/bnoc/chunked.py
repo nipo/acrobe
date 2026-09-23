@@ -1,6 +1,6 @@
 """NSL bnoc chunked framing over a Pipe.
 
-Matches RTL ``nsl_bnoc.framed.framed_chunker`` /
+Matches RTL ``nsl_bnoc.chunked_link.framed_chunker`` /
 ``framed_unchunker``: a framed (LAST-marked AXI-stream) channel is
 carried over an unframed byte pipe by cutting each logical frame into
 length-prefixed chunks. Unlike ``nsl_bnoc.sized`` (a single 16-bit

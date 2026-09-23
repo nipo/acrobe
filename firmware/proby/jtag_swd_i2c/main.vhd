@@ -49,7 +49,7 @@ architecture arch of main is
   signal reset_n_sequence_received: std_ulogic;
   
   signal s_from_host, s_to_host : nsl_bnoc.framed.framed_bus_array(1 downto 0);
-  signal s_from_host_sized, s_to_host_sized : nsl_bnoc.sized.sized_bus;
+  signal s_from_host_pipe, s_to_host_pipe : nsl_bnoc.pipe.pipe_bus_t;
 
   type endpoint_comm is
   record
@@ -108,30 +108,30 @@ begin
       bus_i => ft245_i,
       bus_o => ft245_o,
 
-      in_ready_i => s_from_host_sized.ack.ready,
-      in_valid_o => s_from_host_sized.req.valid,
-      in_data_o => s_from_host_sized.req.data,
+      in_ready_i => s_from_host_pipe.ack.ready,
+      in_valid_o => s_from_host_pipe.req.valid,
+      in_data_o => s_from_host_pipe.req.data,
 
-      out_ready_o => s_to_host_sized.ack.ready,
-      out_valid_i => s_to_host_sized.req.valid,
-      out_data_i => s_to_host_sized.req.data
+      out_ready_o => s_to_host_pipe.ack.ready,
+      out_valid_i => s_to_host_pipe.req.valid,
+      out_data_i => s_to_host_pipe.req.data
       );
 
-  to_framed: nsl_bnoc.framed.framed_unchunker
+  to_framed: nsl_bnoc.chunked_link.framed_unchunker
     port map(
       reset_n_i => ft245_resetn,
       clock_i => ft245_clk,
 
       reset_n_o => reset_n_sequence_received,
       
-      in_i => s_from_host_sized.req,
-      in_o => s_from_host_sized.ack,
+      in_i => s_from_host_pipe.req,
+      in_o => s_from_host_pipe.ack,
 
       out_o => s_from_host(0).req,
       out_i => s_from_host(0).ack
       );
 
-  from_framed: nsl_bnoc.framed.framed_chunker
+  from_framed: nsl_bnoc.chunked_link.framed_chunker
     generic map(
       max_txn_length_l2_c => 11
       )
@@ -142,8 +142,8 @@ begin
       in_i => s_to_host(0).req,
       in_o => s_to_host(0).ack,
 
-      out_o => s_to_host_sized.req,
-      out_i => s_to_host_sized.ack
+      out_o => s_to_host_pipe.req,
+      out_i => s_to_host_pipe.ack
       );
   
   cmd_fifo: nsl_bnoc.framed.framed_fifo

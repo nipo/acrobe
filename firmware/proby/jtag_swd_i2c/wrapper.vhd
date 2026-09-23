@@ -2,7 +2,7 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
-library nsl_i2c, nsl_ftdi, nsl_io, nsl_hwdep;
+library nsl_i2c, nsl_ftdi, nsl_io, nsl_clocking;
 library work;
 
 entity wrapper is
@@ -39,6 +39,13 @@ end wrapper;
 architecture arch of wrapper is
   
   constant sys_clk_hz : natural := 900000000 / 9;
+
+  constant pll_config_c : nsl_clocking.pll.pll_config_t
+    := nsl_clocking.pll.pll_config(
+      input_hz => 12e6,
+      o0 => nsl_clocking.pll.pll_output(sys_clk_hz),
+      implementation => nsl_clocking.pll_backend.pll_implementation_id("DCM"));
+
   signal s_sys_clk, s_sys_resetn : std_ulogic;
 
   signal button_pressed : std_ulogic;
@@ -62,22 +69,20 @@ architecture arch of wrapper is
   
 begin
 
-  reset_gen: nsl_hwdep.reset.reset_at_startup
+  reset_gen: nsl_clocking.reset.reset_at_startup
     port map(
       clock_i => clk,
       reset_n_o => pll_resetn
       );
   
-  sys_clk_gen: nsl_clocking.pll.pll_basic
+  sys_clk_gen: nsl_clocking.pll.pll_multi
     generic map(
-      input_hz_c => 12e6,
-      output_hz_c => sys_clk_hz,
-      hw_variant_c => series67(type=dcm)
+      config_c => pll_config_c
       )
     port map(
       clock_i => clk,
       reset_n_i => pll_resetn,
-      clock_o => s_sys_clk,
+      clock_o(0) => s_sys_clk,
       locked_o => s_sys_resetn
       );
 

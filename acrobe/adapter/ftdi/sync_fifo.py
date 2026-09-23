@@ -6,7 +6,7 @@ opened in FT245 SYNCFF bitmode and exposes it as a
 byte stream between the USB bulk endpoints and the FPGA's FIFO
 controller — there is no command framing on the wire, so callers above
 the Pipe are responsible for any structure they need (typically the
-NSL bnoc Sized or Hdlc layer).
+NSL bnoc Chunked or Hdlc layer).
 
 Sized reads (``size=int``) route to the transport's exact-size
 :meth:`~acrobe.adapter.ftdi.transport.FtdiTransport.read`; unsized
