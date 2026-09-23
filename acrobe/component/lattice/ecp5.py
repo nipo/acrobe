@@ -180,7 +180,7 @@ async def _gowin_spi(tap):
 
     fw_path = Path(__file__).parent / "fw" / f"{tap.idcode:#010x}_jtag_spi.bin.gz"
     if not fw_path.exists():
-        raise _NoMatch("spi firmware", f"0x{idcode_masked:08x}")
+        raise _NoMatch("spi firmware", f"{tap.idcode:#010x}")
     leaf = FileNode(fw_path.name, str(fw_path))
     await leaf.start()
     view = await leaf.child_summon("bitstream")
