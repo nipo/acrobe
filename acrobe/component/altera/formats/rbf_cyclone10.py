@@ -3,12 +3,16 @@
 Continuous bitstream framed by the 0x6af7f7f7 sync word. Either
 canonical or bit-reversed byte order; the parser picks whichever
 appears in the head of the file. The view exposes canonical bytes.
+The file may be gzip-wrapped.
 """
+
+import gzip
 
 from ....db import NoMatch
 from ....node import Node, Readable
 from ....util.endian import bitswap8
 from ....vfs import FormatNode, register_format
+from .sof import _BytesReadable
 
 
 RBF_SYNC = bytes([0x6a, 0xf7, 0xf7, 0xf7])
@@ -44,7 +48,7 @@ class RbfBitstream(Node, Readable):
 
 
 @register_format("altera_rbf",
-                 exts=["rbf"],
+                 exts=["rbf", "rbf.gz"],
                  mimes=["application/x-altera-rbf"])
 class Rbf(FormatNode):
     """RBF format. Adds a single `bitstream` child exposing the
@@ -80,12 +84,17 @@ class Rbf(FormatNode):
                     f"got {value!r}")
 
     async def start(self):
+        backing = self._source
+        if await backing.read(0, 2) == b"\x1f\x8b":
+            raw = await backing.read(0, backing.size)
+            backing = _BytesReadable(gzip.decompress(raw))
+            self.metadata["gzipped"] = True
+
         if self.__swap_override is not None:
             swapped = self.__swap_override
             family = "user-specified"
         else:
-            head = await self._source.read(
-                0, min(self._source.size, 4096))
+            head = await backing.read(0, min(backing.size, 4096))
             best = None
             for sync, sw in self.__RBF_SYNCS:
                 pos = head.find(sync)
@@ -98,7 +107,7 @@ class Rbf(FormatNode):
             swapped = best[1]
             family = best[2].hex()
         self.metadata["sync_family"] = family
-        view = RbfBitstream("bitstream", self._source, swapped)
+        view = RbfBitstream("bitstream", backing, swapped)
         self.child_add(view)
 
 # Note: RBF magic detection is unreliable from raw bytes alone —
