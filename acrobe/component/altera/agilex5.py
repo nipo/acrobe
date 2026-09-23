@@ -58,8 +58,6 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
     SDM_RSP = Instruction(0x202, "SDM_IO")
     SDM_WAKEUP = Instruction(0x281, None)
 
-    CONF_DONE_BIT = 13
-
     # Bitstream streaming constants
     STREAM_HEADER = BitString(0xA17E2A00_FFFFFFFF, 64)
     STREAM_INITIAL_CHUNK = 32768
@@ -189,8 +187,11 @@ class Agilex5(Tap, JtagSramFpga, SdmJtagMixin):
         pass
 
     async def is_configured(self) -> bool:
-        status = await self.CHECK_STATUS()
-        return bool(int(status) & (1 << self.CONF_DONE_BIT))
+        # The CONF_DONE pin is wherever the design's USE_CONF_DONE put
+        # it among the SDM pins, so its bit in the boundary sample
+        # moves between boards.  The SDM's own status does not.
+        sdm = await self.child_summon("sdm")
+        return bool((await sdm.config_status()).conf_done)
 
     # ------------------------------------------------------------------
     # Bitstream streaming (CONFIG DR path)
