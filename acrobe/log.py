@@ -8,13 +8,18 @@ Custom levels (in addition to standard WARNING=30, INFO=20, DEBUG=10):
     TRACE    = 15  Detailed tracing (register reads, state changes)
     PROTOCOL = 5   Raw protocol-level data (bit patterns, wire traffic)
 
-Verbosity stepping for CLI (-v increases verbosity):
-    default  WARNING   only warnings and errors
-    -v       NOTE      important operational messages
-    -vv      INFO      general information
-    -vvv     TRACE     detailed tracing
-    -vvvv    DEBUG     debug info
-    -vvvvv   PROTOCOL  raw protocol data
+TRACE sits above DEBUG on purpose: register-level narration without
+the implementation chatter. `LEVELS` below holds the stepping order.
+
+Verbosity stepping for CLI (-v increases verbosity, -q decreases).
+The CLI starts at ERROR (see acrobe/cli/base.py):
+    default  ERROR     only failures
+    -v       WARNING   recoverable issues
+    -vv      NOTE      important operational messages
+    -vvv     INFO      general information
+    -vvvv    TRACE     detailed tracing
+    -vvvvv   DEBUG     debug info
+    -vvvvvv  PROTOCOL  raw protocol data
 """
 
 import logging
