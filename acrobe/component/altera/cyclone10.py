@@ -125,6 +125,28 @@ class Cyclone10(Tap, JtagSramFpga):
         return bool(int(status) & (1 << self.CONF_DONE_BIT))
 
 
+@Cyclone10.application_db.register("spi")
+async def _spi(tap):
+    from pathlib import Path
+    from ...db import NoMatch as _NoMatch
+    from ...vfs.fs import FileNode
+    from ..jtag_spi_bridge import jtag_spi_bridge
+    from . import formats  # noqa: F401  ensure .rbf.gz parser registered
+
+    idcode_masked = tap.idcode & 0x0FFFFFFF
+    fw_path = Path(__file__).parent / "fw" / f"0x{idcode_masked:08x}_jtag_spi.rbf.gz"
+    if not fw_path.exists():
+        raise _NoMatch("spi firmware", f"0x{idcode_masked:08x}")
+    leaf = FileNode(fw_path.name, str(fw_path))
+    await leaf.start()
+    view = await leaf.child_summon("bitstream")
+    await tap.load(view)
+    # NOTE: leaf is intentionally not stopped — view holds a
+    # reference to leaf's source for future reads (none here, but
+    # consistent with the lifetime model). Process exit closes it.
+    return jtag_spi_bridge(tap, base_freq=65e6)
+
+
 _PARTS = {
     0x020f30dd: "10CL025Y",
     0x020f20dd: "10CL016Y",
