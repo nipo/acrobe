@@ -188,4 +188,6 @@ async def _gowin_spi(tap):
     # NOTE: leaf is intentionally not stopped — view holds a
     # reference to leaf's source for future reads (none here, but
     # consistent with the lifetime model). Process exit closes it.
-    return JtagSpiBridge(tap, base_freq=30e6)
+    # MCLK from OSCG at DIV 5 is 62 MHz, +-20%. SCK divisors are
+    # computed against the fastest case.
+    return JtagSpiBridge(tap, base_freq=74.4e6)

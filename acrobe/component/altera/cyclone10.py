@@ -144,7 +144,11 @@ async def _spi(tap):
     # NOTE: leaf is intentionally not stopped — view holds a
     # reference to leaf's source for future reads (none here, but
     # consistent with the lifetime model). Process exit closes it.
-    return JtagSpiBridge(tap, base_freq=65e6)
+    # The oscillator is only specified through the AS DCLK it
+    # clocks, 20 to 40 MHz (C10LP51002 table 37), and runs at about
+    # twice DCLK typical; assume twice the DCLK ceiling. SCK divisors
+    # are computed against the fastest case.
+    return JtagSpiBridge(tap, base_freq=80e6)
 
 
 _PARTS = {

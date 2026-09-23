@@ -115,4 +115,7 @@ async def _spi(tap):
     # NOTE: leaf is intentionally not stopped — view holds a
     # reference to leaf's source for future reads (none here, but
     # consistent with the lifetime model). Process exit closes it.
-    return JtagSpiBridge(tap, base_freq=30e6)
+    # CFGMCLK is about 50 MHz (UG380), from the oscillator whose
+    # tolerance DS162 gives as +-50% (FMCCKTOL). SCK divisors are
+    # computed against the fastest case.
+    return JtagSpiBridge(tap, base_freq=75e6)
