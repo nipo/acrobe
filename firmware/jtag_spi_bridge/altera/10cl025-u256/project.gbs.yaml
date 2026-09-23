@@ -1,0 +1,36 @@
+name: jtag_spi_bridge-0x020f30dd
+description: jtag_spi_bridge for Cyclone 10 LP 10CL025, U256 package
+
+root:
+  name: top
+  sources:
+    - file_type: vhdl
+      files:
+        - ../boundary.vhd
+    - file_type: quartus-pin-assignment
+      files:
+        - pins.tcl
+    - file_type: quartus-sdc
+      files:
+        - clocks.sdc
+  deps:
+    - nsl_io.io
+    - nsl_hwdep.reset
+    - nsl_hwdep.clock
+    - jtag_spi.bridge
+
+output:
+  - name: synthesis
+    topcell: boundary
+    target:
+      part: 10CL025YU256C8G
+    backend_config:
+      gbs.builtin.quartus:
+        tool: quartus-prime
+    outputs:
+      - type: synthesis-report
+        path: synthesis-report.html
+      - type: pnr-report
+        path: pnr-report.html
+      - type: quartus-rbf+gzip
+        path: ../../../../acrobe/component/altera/fw/0x020f30dd_jtag_spi.rbf.gz

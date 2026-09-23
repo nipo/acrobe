@@ -42,3 +42,7 @@ projects:
   - name: xilinx_xc7a35t
     path: xilinx/xc7a35t
     tags: [xilinx, vivado]
+
+  - name: altera_10cl025-u256
+    path: altera/10cl025-u256
+    tags: [altera, quartus]
