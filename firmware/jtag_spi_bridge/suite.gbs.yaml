@@ -10,10 +10,6 @@ projects:
   - name: gowin_gw1n-9c
     path: gowin/gw1n-9c
     tags: [gowin]
-    # Does not work, recent gowin eda do not define GW_JTAG for gw1n
-    # (older versions do, though)
-    skip: true
-
   - name: gowin_gw5at-15a
     path: gowin/gw5at-15a
     tags: [gowin]
