@@ -165,6 +165,46 @@ class TestIsConfigured:
 
 class TestLoad:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status, needs_recovery", [(0, False), (1 << 3, True)])
+    async def test_gw5a_checksum_and_timeout_recovery(self, status, needs_recovery):
+        class RecordingInterface(StatusOnlyMock):
+            def __init__(self):
+                super().__init__(status=status)
+                self.ops = []
+
+            async def flush_ops(self, batch):
+                self.ops.extend(op for op, _ in batch)
+                await super().flush_ops(batch)
+
+        iface = RecordingInterface()
+        tap = _attach_tap(iface, Gw5a, idcode=0x0001481b)
+        await tap.load(make_bitstream(b"\xa5" * 32, CheckSum="0x2B48",
+                                      JTAGAsRegularIO="ON"))
+        shifts = [op for op in iface.ops if isinstance(op, Shift)]
+        assert any(len(op.tdi) == 32 and int(op.tdi) == 0x2b48
+                   for op in shifts)
+        assert any(len(op.tdi) == 8 and int(op.tdi) == 0x3f
+                   for op in shifts) == needs_recovery
+
+    @pytest.mark.asyncio
+    async def test_gw5a_missing_checksum_stops_before_erase(self):
+        class RecordingInterface(StatusOnlyMock):
+            def __init__(self):
+                super().__init__()
+                self.ops = []
+
+            async def flush_ops(self, batch):
+                self.ops.extend(op for op, _ in batch)
+                await super().flush_ops(batch)
+
+        iface = RecordingInterface()
+        tap = _attach_tap(iface, Gw5a, idcode=0x0001481b)
+        with pytest.raises(ValueError, match="missing CheckSum"):
+            await tap.load(make_bitstream(b"\xa5" * 32))
+        assert not any(isinstance(op, Shift) and len(op.tdi) == 8
+                       and int(op.tdi) == 0x15 for op in iface.ops)
+
+    @pytest.mark.asyncio
     async def test_usercode_match_skips(self):
         """When usercode matches and Done is set, load() skips reprogramming."""
         status_val = 1 << DONE_BIT

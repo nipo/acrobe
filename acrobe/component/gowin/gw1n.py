@@ -79,6 +79,7 @@ def _part_ids(*prefixes):
 class GowinFpga(Tap, JtagSramFpga):
     irlen = 8
     max_freq = 25e6
+    sram_checksum_ir = None
 
     USER_IR = [0x42, 0x43]
 
@@ -164,7 +165,10 @@ class GowinFpga(Tap, JtagSramFpga):
                 return
         raise RuntimeError(f"FPGA not done after configure, {st}")
 
-    async def sram_configure(self, data):
+    async def sram_configure(self, data, *, checksum=None,
+                             status_available=True):
+        if self.sram_checksum_ir is not None and checksum is None:
+            raise ValueError("GW5A SRAM configuration requires a bitstream checksum")
         self.logger.trace("Loading %d bytes to SRAM", len(data))
         data = bitswap8(data)
         data = b'\xff' * 60 + data + b'\xff' * 60
@@ -172,10 +176,17 @@ class GowinFpga(Tap, JtagSramFpga):
         await self.ISC_ENABLE(read_tdo=False, pre_dr_run = 100)
         await self.ISC_ADDRESS_INIT(read_tdo=False, pre_dr_run = 100)
         await self.ISC_TRANSFER_CONFIG(BitString(data), read_tdo=False, pre_dr_run = 100, post_dr_run = 1000)
+        if self.sram_checksum_ir is not None:
+            await self.ir(self.sram_checksum_ir, dr_length=32)(
+                BitString(checksum, 32), read_tdo=False)
         await self.ISC_PROGRAM_DONE(read_tdo=False, pre_dr_run = 100)
         await self.ISC_DISABLE(read_tdo=False, pre_dr_run = 100)
         await self.ISC_NOOP(read_tdo=False, pre_dr_run = 100)
-        await self._assert_done()
+        if status_available:
+            await self._assert_done()
+        else:
+            await self.run(1000)
+            self.logger.note("Bitstream assigns JTAG pins to regular IO; status read unavailable")
 
     async def load(self, source):
         usercode = int(await self.USERCODE())
@@ -186,9 +197,19 @@ class GowinFpga(Tap, JtagSramFpga):
         if self.is_done(status) and usercode and usercode == exp:
             self.logger.note("Usercode already matches")
             return
+        checksum = None
+        if self.sram_checksum_ir is not None:
+            if "CheckSum" not in meta:
+                raise ValueError("GW5A bitstream is missing CheckSum metadata")
+            checksum = int(meta["CheckSum"], 16)
+        jtag_mode = meta.get("JTAGAsRegularIO", "OFF")
+        if jtag_mode not in ("ON", "OFF"):
+            raise ValueError(f"Unknown JTAGAsRegularIO value: {jtag_mode!r}")
         await self.sram_erase()
         data = await source.read(0, source.size)
-        await self.sram_configure(bytes(data))
+        await self.sram_configure(
+            bytes(data), checksum=checksum,
+            status_available=jtag_mode != "ON")
 
     async def erase(self):
         await self.sram_erase()
@@ -236,3 +257,18 @@ class Gw2a(GowinFpga):
 class Gw5a(GowinFpga):
     max_freq = 30e6
     _status_type = Gw5aStatus
+    sram_checksum_ir = 0x0a
+
+    async def sram_erase(self):
+        status = await self.status_read()
+        if status.Timeout or status.GoeErr or status.BadCommand:
+            # GW5A recovery sequence for a failed autoboot/timeout. Its
+            # 0x3f command is chip-specific; other Gowin families must not
+            # enter this mode. See openFPGALoader's Gowin::eraseSRAM.
+            await self.ISC_ENABLE(read_tdo=False, pre_dr_run=6)
+            await self.ir(0x3f)(read_tdo=False, pre_dr_run=6)
+            await self.ISC_DISABLE(read_tdo=False, pre_dr_run=6)
+            await self.ISC_NOOP(read_tdo=False, pre_dr_run=6)
+            await self.IDCODE(read_tdo=False, pre_dr_run=6)
+            await self.ISC_NOOP(read_tdo=False, pre_dr_run=1000)
+        await super().sram_erase()
