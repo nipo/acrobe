@@ -31,7 +31,7 @@ class FileNode(Node, Readable):
         self.__size = 0
 
     @property
-    def path(self) -> str:
+    def file_path(self) -> str:
         return self.__path
 
     @property

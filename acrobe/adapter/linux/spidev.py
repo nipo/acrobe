@@ -199,7 +199,7 @@ class SpidevInterface(spi.Interface, BackgroundLowering):
         self.__bufsiz = self.DEFAULT_BUFSIZ
 
     @property
-    def path(self) -> str:
+    def device_path(self) -> str:
         return self.__dev.path
 
     def option_set(self, key, value):
@@ -237,11 +237,11 @@ class SpidevInterface(spi.Interface, BackgroundLowering):
 
         self.__bufsiz = self.read_bufsiz()
 
-        self.metadata.update(path=self.path, bufsiz=self.__bufsiz,
+        self.metadata.update(path=self.device_path, bufsiz=self.__bufsiz,
                              max_speed_hz=speed.value,
                              base_mode=self.__base_mode)
         self.logger.note("%s: max %d Hz, bufsiz %d B, mode bits 0x%02x",
-                         self.path, speed.value, self.__bufsiz,
+                         self.device_path, speed.value, self.__bufsiz,
                          self.__base_mode)
         # An fmax= path option was recorded before the fd existed.
         self.freq_reapply()
@@ -250,7 +250,7 @@ class SpidevInterface(spi.Interface, BackgroundLowering):
         if self.__cs_held:
             self.logger.warning(
                 "%s: stopping with chip select asserted; a Cs() group "
-                "was left open", self.path)
+                "was left open", self.device_path)
         await self.__dev.close()
 
     @staticmethod
@@ -314,7 +314,7 @@ class SpidevInterface(spi.Interface, BackgroundLowering):
                     self.__group_mode = None
                 elif op.value != 0:
                     raise ValueError(
-                        f"{self.path} exposes chip select 0 only, "
+                        f"{self.device_path} exposes chip select 0 only, "
                         f"got Cs({op.value})")
                 else:
                     self.__group_mode = (self.__base_mode
@@ -345,7 +345,7 @@ class SpidevInterface(spi.Interface, BackgroundLowering):
     def __mosi_bytes(self, op) -> bytes:
         if len(op.mosi) % 8:
             raise ValueError(
-                f"{self.path} shifts whole bytes; got {len(op.mosi)} bits")
+                f"{self.device_path} shifts whole bytes; got {len(op.mosi)} bits")
         return bytes(op.mosi)
 
     def __plan(self, runs):
@@ -359,7 +359,7 @@ class SpidevInterface(spi.Interface, BackgroundLowering):
                     self.logger.warning(
                         "%s: chip-select assertion carrying no data is "
                         "not expressible through spidev; ignored",
-                        self.path)
+                        self.device_path)
                 continue
             if run.mode != mode:
                 steps.append(SetMode(run.mode))
@@ -423,7 +423,7 @@ class SpidevInterface(spi.Interface, BackgroundLowering):
             self.__no_cs = False
             self.logger.note(
                 "%s: controller rejects SPI_NO_CS; shifts posted "
-                "without Cs() will toggle chip select", self.path)
+                "without Cs() will toggle chip select", self.device_path)
             mode &= ~SPI_NO_CS
             if mode == self.__wire_mode:
                 return
@@ -437,12 +437,12 @@ class SpidevInterface(spi.Interface, BackgroundLowering):
             if exc.errno == errno.EMSGSIZE:
                 raise OSError(
                     exc.errno,
-                    f"{self.path}: {message.total} bytes in "
+                    f"{self.device_path}: {message.total} bytes in "
                     f"{len(message)} transfers exceeds spidev bufsiz "
                     f"{self.__bufsiz}") from exc
             raise OSError(
                 exc.errno,
-                f"{self.path}: SPI_IOC_MESSAGE({len(message)}): "
+                f"{self.device_path}: SPI_IOC_MESSAGE({len(message)}): "
                 f"{exc.strerror}") from exc
         self.__cs_held = message.holds_cs
 

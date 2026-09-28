@@ -141,7 +141,7 @@ class I2cdevInterface(i2c.Interface, BackgroundLowering):
         self.__stopping = False
 
     @property
-    def path(self) -> str:
+    def device_path(self) -> str:
         return self.__dev.path
 
     def option_set(self, key, value):
@@ -165,7 +165,7 @@ class I2cdevInterface(i2c.Interface, BackgroundLowering):
         self.__funcs = funcs.value
         if not self.__funcs & I2C_FUNC_I2C:
             raise RuntimeError(
-                f"{self.path}: adapter reports no I2C_FUNC_I2C "
+                f"{self.device_path}: adapter reports no I2C_FUNC_I2C "
                 f"(funcs 0x{self.__funcs:08x}); it is an SMBus-only "
                 f"controller and I2C_RDWR is unavailable")
 
@@ -177,10 +177,10 @@ class I2cdevInterface(i2c.Interface, BackgroundLowering):
 
         self.__clock_hz = self.__info.clock_hz
         bus_name = self.__info.name
-        self.metadata.update(path=self.path, name=bus_name,
+        self.metadata.update(path=self.device_path, name=bus_name,
                              funcs=self.__funcs, clock_hz=self.__clock_hz)
         self.logger.note(
-            "%s: %s, funcs 0x%08x, clock %s", self.path,
+            "%s: %s, funcs 0x%08x, clock %s", self.device_path,
             bus_name or "unnamed",  self.__funcs,
             metric(self.__clock_hz, "Hz") if self.__clock_hz else "unknown")
         self.freq_reapply()
@@ -198,7 +198,7 @@ class I2cdevInterface(i2c.Interface, BackgroundLowering):
                 and freq < self.__clock_hz):
             self.logger.warning(
                 "%s: bus clock is fixed at %s by the kernel driver; "
-                "cap of %s ignored", self.path,
+                "cap of %s ignored", self.device_path,
                 metric(self.__clock_hz, "Hz"), metric(freq, "Hz"))
         return self.__clock_hz
 
@@ -251,7 +251,7 @@ class I2cdevInterface(i2c.Interface, BackgroundLowering):
     def __transfer(self, transfer):
         if len(transfer.data_w) > MAX_MSG_LEN or transfer.size_r > MAX_MSG_LEN:
             raise ValueError(
-                f"{self.path}: i2c_msg length is 16-bit; "
+                f"{self.device_path}: i2c_msg length is 16-bit; "
                 f"{transfer!r} does not fit")
         msgs = []
         read_buffer = None
@@ -294,7 +294,7 @@ class I2cdevInterface(i2c.Interface, BackgroundLowering):
         if exc.errno == errno.EREMOTEIO:
             return i2c.DataNack(addr)
         return OSError(exc.errno,
-                       f"{self.path}: I2C_RDWR at 0x{addr:02x}: "
+                       f"{self.device_path}: I2C_RDWR at 0x{addr:02x}: "
                        f"{exc.strerror}")
 
     # --- Ack polling ---
@@ -311,7 +311,7 @@ class I2cdevInterface(i2c.Interface, BackgroundLowering):
                 raise i2c.WaitAckTimeout(wait.addr, wait.timeout_s)
             if self.__stopping:
                 raise RuntimeError(
-                    f"{self.path}: closed while waiting for "
+                    f"{self.device_path}: closed while waiting for "
                     f"0x{wait.addr:02x} to acknowledge")
             time.sleep(min(interval, remaining))
 
@@ -335,7 +335,7 @@ class I2cdevInterface(i2c.Interface, BackgroundLowering):
                 self.__probe_kind = "read"
                 self.logger.note(
                     "%s: controller rejects zero-length writes; "
-                    "probing with a 1-byte read instead", self.path)
+                    "probing with a 1-byte read instead", self.device_path)
 
     def __probe_msgs(self):
         if self.__probe_kind == "zlen":

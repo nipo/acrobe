@@ -328,6 +328,6 @@ async def test_adapter_spawns_datagram():
     assert adapter.child_hints() == ["datagram"]
     child = await adapter.child_spawn("datagram")
     assert isinstance(child, StreamEndpointDatagram)
-    assert child.path == "/dev/module0"
+    assert child.device_path == "/dev/module0"
     with pytest.raises(NoMatch):
         await adapter.child_spawn("jtag")

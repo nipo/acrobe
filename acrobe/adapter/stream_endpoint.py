@@ -147,7 +147,7 @@ class StreamEndpointDatagram(Datagram):
         self.__tx_task: asyncio.Task | None = None
 
     @property
-    def path(self) -> str:
+    def device_path(self) -> str:
         return self.__path
 
     @property
@@ -160,7 +160,7 @@ class StreamEndpointDatagram(Datagram):
     @property
     def info(self) -> StreamEndpointInfo:
         if self.__info is None:
-            raise RuntimeError(f"{self.path} not started")
+            raise RuntimeError(f"{self.device_path} not started")
         return self.__info
 
     async def start(self):
