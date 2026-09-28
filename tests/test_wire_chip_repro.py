@@ -1,7 +1,8 @@
-"""Reproduce the chip-flow failure against a remote Agilex5E-like Tap.
+"""Chip flow against a remote JTAG interface.
 
 Server hosts a fake JtagInterface that implements the minimum
-needed for Chain.discover to find a single Agilex-class IDCODE.
+needed for Chain.discover to find a single IDCODE, claimed by a
+minimal test-local SRAM FPGA Tap.
 Client walks `wire/srv/fakeadapter/jtag/chain/0` through the
 cutoff machinery, then runs the same flow as
 `acrobe chip` (start_tree + Field.discover + lookup Target).
@@ -15,6 +16,7 @@ from aiohttp.test_utils import TestServer
 
 from acrobe.adapter.model import HwRoot
 from acrobe.bitstring import BitString
+from acrobe.component.fpga import JtagSramFpga, SramFpga
 from acrobe.configuration import Configuration
 from acrobe.engine import Batcher
 from acrobe.node import Node
@@ -26,34 +28,43 @@ from acrobe.protocol.jtag import (
     Run,
     Shift,
 )
-from acrobe.target import Target, TargetDiscovery
+from acrobe.part_id import PartId
+from acrobe.protocol.jtag import Tap
+from acrobe.target import Target
 from acrobe.wire import WireEnumerator
 from acrobe.wire.server import make_app
 
-# Importing this triggers Agilex5E registration in Tap.db.
-from acrobe.component.altera.agilex5 import Agilex5E  # noqa: F401
-from acrobe.protocol.jtag import Tap
+
+FPGA_IDCODE = 0x1badf00f  # claimed by no real part
 
 
-AGILEX_IDCODE = 0x0362c0dd  # known Agilex5E IDCODE → "A5EA013BB23B"
+class _FakeFpga(Tap, JtagSramFpga):
+    """Minimal JTAG SRAM FPGA. Reports itself unconfigured, so
+    starting it does not need anything the simulator can't answer."""
+
+    def __init__(self, idcode, **kw):
+        super().__init__(idcode=idcode, name="fakefpga", **kw)
+
+    async def is_configured(self):
+        return False
 
 
 @pytest.fixture(autouse=True)
-def _ensure_agilex_registration():
-    """test_jtag.py clears Tap.db.registry in some teardowns. Re-register
-    Agilex5E so Chain.tap_add finds it regardless of test order."""
-    if not any(Agilex5E in handlers
+def _ensure_fake_fpga_registration():
+    """test_jtag.py clears Tap.db.registry in some teardowns. Register
+    _FakeFpga here so Chain.tap_add finds it regardless of test order."""
+    if not any(_FakeFpga in handlers
                for handlers in Tap.db.registry.values()):
-        Tap.db.register(AGILEX_IDCODE)(Agilex5E)
+        Tap.db.register(PartId.from_idcode(FPGA_IDCODE))(_FakeFpga)
     yield
 
 
-class _SingleAgilexInterface(JtagInterface):
+class _SingleFpgaInterface(JtagInterface):
     """Mock JtagInterface backed by the same shift-register simulator
-    as test_jtag.py's ChainSimulator. Pre-configured with one Agilex5
+    as test_jtag.py's ChainSimulator. Pre-configured with one FPGA
     device so Chain.discover() succeeds against it."""
 
-    def __init__(self, devices=((AGILEX_IDCODE, 10),)):
+    def __init__(self, devices=((FPGA_IDCODE, 10),)):
         super().__init__(name="jtag")
         self.devices = devices
         self._reg_val = 0
@@ -111,7 +122,7 @@ class _SingleAgilexInterface(JtagInterface):
 
 
 def _build_remote_tree():
-    iface = _SingleAgilexInterface()
+    iface = _SingleFpgaInterface()
     adapter = Node("fakeadapter")
     adapter.child_add(iface)
     root = Node("HwRoot")
@@ -135,20 +146,16 @@ async def _make_local_root(server_url, tmp_path):
 
 @pytest.mark.asyncio
 async def test_remote_tap_class_identity(tmp_path):
-    """Walking to chain/0 on the remote side should land on an
-    Agilex5E instance — same as the local case would."""
+    """Walking to chain/0 on the remote side lands on the Tap class
+    registered for the IDCODE, same as the local case would."""
     app = make_app(_build_remote_tree())
     async with TestServer(app) as server:
         local = await _make_local_root(str(server.make_url("/")), tmp_path)
         try:
             leaf = await local.child_summon(
                 "wire", "srv", "fakeadapter", "jtag", "chain", "0")
-            print(f"leaf: {leaf!r}")
-            print(f"type(leaf).__mro__: {[c.__name__ for c in type(leaf).__mro__]}")
-
-            # The leaf should be a SramFpga (which is what FpgaTarget
-            # explorer is registered for).
-            from acrobe.component.fpga import SramFpga
+            assert isinstance(leaf, _FakeFpga)
+            # SramFpga is what the FPGA Target explorer is registered for.
             assert isinstance(leaf, SramFpga), (
                 f"expected leaf to be SramFpga, got "
                 f"{type(leaf).__name__} with MRO {[c.__name__ for c in type(leaf).__mro__]}")
@@ -158,7 +165,7 @@ async def test_remote_tap_class_identity(tmp_path):
 
 @pytest.mark.asyncio
 async def test_chip_flow_discovers_target(tmp_path):
-    """The exact flow `acrobe chip` runs, against a remote Agilex5E."""
+    """The flow `acrobe chip` runs, against a remote FPGA."""
     app = make_app(_build_remote_tree())
     async with TestServer(app) as server:
         local = await _make_local_root(str(server.make_url("/")), tmp_path)
@@ -170,8 +177,6 @@ async def test_chip_flow_discovers_target(tmp_path):
             await local.discover_targets()
 
             targets = local.children_of_class(Target)
-            print(f"explorers: {[(e.func.__name__, [t.__name__ for t in e.component_types]) for e in Target.explorers]}")
-            print(f"targets found: {[(t.name, type(t).__name__) for t in targets]}")
 
             assert targets, (
                 f"No targets found. Leaf: {type(leaf).__name__}")
