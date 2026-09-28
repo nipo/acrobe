@@ -187,3 +187,29 @@ async def test_enumerated_spi_proxy_drives_a_local_target(tmp_path):
             await local.stop_tree()
 
     assert [type(op).__name__ for op in iface.ops] == ["Cs", "Shift", "Cs"]
+
+
+@pytest.mark.asyncio
+async def test_enumerated_spi_proxy_mirrors_remote_targets(tmp_path):
+    """Chip-select Targets attached on the server appear under the
+    proxy with the same name, chip select and mode, so a path can
+    walk through them."""
+    iface = _LoopbackSpi(name="spi")
+    iface.child_add(spi.Target(iface, cs=3, mode=2, name="flash"))
+    remote = Node("HwRoot")
+    remote.child_add(iface)
+    app = make_app(remote)
+
+    async with TestServer(app) as server:
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
+        try:
+            target = await local.child_summon("wire", "srv", "spi", "flash")
+            assert isinstance(target, spi.Target)
+            assert (target.cs, target.mode) == (3, 2)
+            miso, = await target.transaction(spi.Shift(b"\x9f"))
+            assert int(miso) == _inverse(0x9f, 8)
+        finally:
+            await local.stop_tree()
+
+    assert [type(op).__name__ for op in iface.ops] == ["Cs", "Shift", "Cs"]
+    assert (iface.ops[0].value, iface.ops[0].mode) == (3, 2)

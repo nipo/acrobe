@@ -25,10 +25,10 @@ class RegistryError(Exception):
     """Raised at decoration time when a class can't be registered."""
 
 
-def default_init(name: str, metadata: dict) -> dict:
+def default_init(info: dict) -> dict:
     """Constructor kwargs for a node proxy whose `__init__` only takes
     a name."""
-    return {"name": name}
+    return {"name": info["name"]}
 
 
 class RegistryEntry:
@@ -36,7 +36,7 @@ class RegistryEntry:
 
     Holds the canonical UUID, the kind (`op`/`error`/`node`), the
     codec, and (for nodes) the `uses` set of referenced UUIDs plus
-    the `init` hook turning a remote node's name and metadata into
+    the `init` hook turning a remote node's REST enumeration into
     constructor kwargs for the client-side proxy.
     """
 
@@ -44,7 +44,7 @@ class RegistryEntry:
 
     def __init__(self, cls: type, type_uuid: uuid_lib.UUID, kind: str,
                  codec: _Codec | None, uses: tuple = (),
-                 init: Callable[[str, dict], dict] | None = None):
+                 init: Callable[[dict], dict] | None = None):
         self.cls = cls
         self.type_uuid = type_uuid
         self.kind = kind
@@ -70,7 +70,7 @@ class Registry:
 
     def register(self, cls: type, kind: str, type_uuid_str: str,
                  uses: Iterable[type] = (),
-                 init: Callable[[str, dict], dict] | None = None
+                 init: Callable[[dict], dict] | None = None
                  ) -> RegistryEntry:
         try:
             type_uuid = uuid_lib.UUID(type_uuid_str)
@@ -202,11 +202,12 @@ def node(type_uuid: str, *, uses=(), init=None):
     the wire. Mixed list — no semantic split between commands and
     errors at the node level.
 
-    `init` is called as `init(name, metadata)` when the enumerator
-    builds a client-side proxy of this class, and returns the kwargs
-    for `cls.__init__`. `metadata` is the remote node's metadata as
-    reported by REST enumeration. Classes whose constructor needs
-    more than a name declare it here. Defaults to `{"name": name}`.
+    `init` is called as `init(info)` when the enumerator builds a
+    client-side proxy of this class, and returns the kwargs for
+    `cls.__init__`. `info` is the remote node's REST enumeration
+    body: name, metadata and the children attached at that time.
+    Classes whose constructor needs more than a name declare it
+    here. Defaults to `{"name": info["name"]}`.
     """
     def decorator(cls):
         from ..node import Node

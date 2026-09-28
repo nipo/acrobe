@@ -109,13 +109,21 @@ class Transaction:
 # --- SPI Interface ---
 
 
-def _interface_proxy_init(name: str, metadata: dict) -> dict:
+def _interface_proxy_init(info: dict) -> dict:
     """Constructor kwargs for a client-side :class:`Interface` proxy.
 
     The proxy routes batches over the wire instead of lowering them,
     so the adapter the local constructor demands is never reached.
+    Concrete interfaces attach their chip-select Targets in their own
+    constructors, which the proxy never runs; the remote Targets are
+    recreated from the `cs` and `mode` they publish in metadata.
     """
-    return {"adapter": None, "name": name}
+    targets = []
+    for child in info.get("children", []):
+        metadata = child.get("metadata", {})
+        if "cs" in metadata and "mode" in metadata:
+            targets.append((child["name"], metadata["cs"], metadata["mode"]))
+    return {"adapter": None, "name": info["name"], "targets": targets}
 
 
 @wire.node("af0dd095-8bc4-4b67-808b-e5ce7c31092b",
@@ -141,11 +149,13 @@ class Interface(Batcher, FreqCapper, Node):
     never drops mid-transaction.
     """
 
-    def __init__(self, adapter, name="spi"):
+    def __init__(self, adapter, name="spi", targets=()):
         Batcher.__init__(self)
         FreqCapper.__init__(self)
         Node.__init__(self, name)
         self.__adapter = adapter
+        for target_name, cs, mode in targets:
+            self.child_add(Target(self, cs=cs, mode=mode, name=target_name))
 
     async def flush_ops(self, batch):
         futures = []
@@ -177,6 +187,7 @@ class Target(Batcher, Node):
         self.__interface = interface
         self.cs = cs
         self.mode = mode
+        self.metadata.update(cs=cs, mode=mode)
 
     def transaction(self, *shifts):
         """Atomic CS-held transaction.

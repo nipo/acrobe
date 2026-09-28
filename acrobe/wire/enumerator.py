@@ -91,15 +91,14 @@ class _Cutoff:
     segments depth+1.. are walked locally on the proxy.
 
     `entry` is the local registry entry matching the remote node's
-    `wire_uuid`; `metadata` is what the remote reported for it, and
-    feeds `entry.init` when the proxy is constructed.
+    `wire_uuid`; `info` is the REST body the remote reported for it,
+    and feeds `entry.init` when the proxy is constructed.
     """
     depth: int
     entry: RegistryEntry
     remote_path: str
     connect_url: str
-    name: str
-    metadata: dict
+    info: dict
 
 
 class RemoteServerRoot(Node):
@@ -207,8 +206,7 @@ class RemoteServerRoot(Node):
                 entry=entry,
                 remote_path=info["path"],
                 connect_url=connect_url,
-                name=info["name"],
-                metadata=dict(info.get("metadata", {})))
+                info=info)
         return deepest
 
     async def __open_proxy(self, cutoff: _Cutoff):
@@ -217,9 +215,9 @@ class RemoteServerRoot(Node):
         from . import default_registry
         from .client import WireClient, make_remote_proxy
 
+        init_kwargs = cutoff.entry.init(cutoff.info)
         wire_client = await WireClient.connect(
             cutoff.connect_url, default_registry())
-        init_kwargs = cutoff.entry.init(cutoff.name, cutoff.metadata)
         return make_remote_proxy(
             cutoff.entry.cls, wire_client, **init_kwargs)
 

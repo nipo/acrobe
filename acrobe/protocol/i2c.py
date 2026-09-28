@@ -158,13 +158,13 @@ class Transaction:
 
 # ---- Interface ----
 
-def _remote_init(name, metadata):
+def _remote_init(info):
     """Constructor kwargs for a client-side proxy of :class:`Interface`.
 
     The proxy replaces :meth:`Interface.flush_ops` with wire
     forwarding, so the adapter the local constructor would post to is
     never reached."""
-    return {"adapter": None, "name": name}
+    return {"adapter": None, "name": info["name"]}
 
 
 @wire.node("79d73dce-cdb9-424e-ae19-a6a6f1fcd93f",

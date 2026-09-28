@@ -78,8 +78,8 @@ class _WindowRead:
 
 @wire.node("70000000-0000-4000-8000-0000000000fe",
            uses=[_WindowRead],
-           init=lambda name, metadata: {"base": metadata["base"],
-                                        "name": name})
+           init=lambda info: {"base": info["metadata"]["base"],
+                              "name": info["name"]})
 class _TestWindow(Node, Batcher):
     """@wire.node whose constructor needs a value only the remote knows.
 
