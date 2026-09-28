@@ -7,14 +7,14 @@ walker decides per request whether each remote segment can be
 served by REST enumeration alone or whether it crosses a
 @wire.node boundary that needs WS transport.
 
-Cutoff rule: walk REST through the requested path; the deepest
+Cutoff rule: walk REST along the requested path; the deepest
 segment whose remote `wire_uuid` matches a locally-registered
 @wire.node is the wire cutoff. WS opens there; subsequent
 segments are walked locally on the proxy (which IS-A the
 registered class — child_spawn / db / subclass methods all
-work). Today only JtagInterface is @wire.node, so JTAG is the
-only cutoff option; when Chain/Tap join, the deepest wins
-automatically — no API change.
+work). The walk stops at the first @wire.node not declared with
+`nests`: nothing deeper can be a cutoff, and walking it over REST
+would make the server probe hardware the proxy probes again.
 
 Configuration shape (in `~/.config/acrobe.conf`):
 
@@ -176,8 +176,9 @@ class RemoteServerRoot(Node):
 
     async def __find_cutoff(self, parts) -> Optional[_Cutoff]:
         """REST-walk `parts`, return the deepest @wire.node along the
-        way or None. Stops walking as soon as a step's REST GET
-        fails — leaves fallback handling to the caller."""
+        way or None. Stops walking at a @wire.node that does not
+        nest, or as soon as a step's REST GET fails — leaves fallback
+        handling to the caller."""
         from . import default_registry
         registry = default_registry()
         deepest: Optional[_Cutoff] = None
@@ -207,6 +208,8 @@ class RemoteServerRoot(Node):
                 remote_path=info["path"],
                 connect_url=connect_url,
                 info=info)
+            if not entry.nests:
+                break
         return deepest
 
     async def __open_proxy(self, cutoff: _Cutoff):

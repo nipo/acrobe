@@ -37,20 +37,24 @@ class RegistryEntry:
     Holds the canonical UUID, the kind (`op`/`error`/`node`), the
     codec, and (for nodes) the `uses` set of referenced UUIDs plus
     the `init` hook turning a remote node's REST enumeration into
-    constructor kwargs for the client-side proxy.
+    constructor kwargs for the client-side proxy, and whether other
+    nodes may be nested below it (`nests`).
     """
 
-    __slots__ = ("cls", "type_uuid", "kind", "codec", "uses", "init")
+    __slots__ = ("cls", "type_uuid", "kind", "codec", "uses", "init",
+                 "nests")
 
     def __init__(self, cls: type, type_uuid: uuid_lib.UUID, kind: str,
                  codec: _Codec | None, uses: tuple = (),
-                 init: Callable[[dict], dict] | None = None):
+                 init: Callable[[dict], dict] | None = None,
+                 nests: bool = False):
         self.cls = cls
         self.type_uuid = type_uuid
         self.kind = kind
         self.codec = codec
         self.uses = uses
         self.init = init
+        self.nests = nests
 
     def __repr__(self):
         return (f"<RegistryEntry {self.kind} {self.cls.__name__} "
@@ -70,8 +74,8 @@ class Registry:
 
     def register(self, cls: type, kind: str, type_uuid_str: str,
                  uses: Iterable[type] = (),
-                 init: Callable[[dict], dict] | None = None
-                 ) -> RegistryEntry:
+                 init: Callable[[dict], dict] | None = None,
+                 nests: bool = False) -> RegistryEntry:
         try:
             type_uuid = uuid_lib.UUID(type_uuid_str)
         except (ValueError, AttributeError, TypeError) as exc:
@@ -101,13 +105,17 @@ class Registry:
             if init is not None:
                 raise RegistryError(
                     f"{cls.__name__}: 'init' is only valid on @wire.node")
+            if nests:
+                raise RegistryError(
+                    f"{cls.__name__}: 'nests' is only valid on @wire.node")
             codec = build_codec(cls, self)
             uses_tuple = ()
             init_fn = None
         else:
             raise RegistryError(f"unknown kind {kind!r}")
 
-        entry = RegistryEntry(cls, type_uuid, kind, codec, uses_tuple, init_fn)
+        entry = RegistryEntry(cls, type_uuid, kind, codec, uses_tuple, init_fn,
+                              nests)
         self.__by_uuid[type_uuid] = entry
         self.__by_class[cls] = entry
         # Annotate the class with the registry mapping when the
@@ -195,7 +203,7 @@ def value(type_uuid: str):
     return decorator
 
 
-def node(type_uuid: str, *, uses=(), init=None):
+def node(type_uuid: str, *, uses=(), init=None, nests=False):
     """Register a Node+Batcher class as a Transportable node.
 
     `uses` lists the op and error classes this node may exchange over
@@ -208,6 +216,12 @@ def node(type_uuid: str, *, uses=(), init=None):
     body: name, metadata and the children attached at that time.
     Classes whose constructor needs more than a name declare it
     here. Defaults to `{"name": info["name"]}`.
+
+    `nests` declares that other @wire.node classes may sit below this
+    one. The enumerator then keeps walking the remote tree past it
+    looking for a deeper cutoff. Otherwise the walk stops here and
+    the remaining path is resolved locally on the proxy, so the
+    server never probes it.
     """
     def decorator(cls):
         from ..node import Node
@@ -220,6 +234,6 @@ def node(type_uuid: str, *, uses=(), init=None):
                 f"{cls.__name__}: @wire.node target must subclass Batcher "
                 f"(only Batchers are transportable in v1)")
         _default_registry.register(cls, "node", type_uuid, uses=uses,
-                                   init=init)
+                                   init=init, nests=nests)
         return cls
     return decorator

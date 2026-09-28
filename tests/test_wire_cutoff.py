@@ -4,6 +4,7 @@ IS-A the registered class.
 
 The synthetic shape mirrors the JTAG layout in spirit:
     server root → adapter (plain) → iface (@wire.node) → child (local)
+    server root → outer (nesting @wire.node) → inner (@wire.node)
 
 `iface` is the @wire.node — `child_spawn` is defined locally on
 the class. When the user summons `wire/server/adapter/iface/named-child`,
@@ -56,6 +57,7 @@ class _TestIface(Node, Batcher):
         Node.__init__(self, name)
         Batcher.__init__(self)
         self.posted = []
+        self.spawned = []
 
     async def flush_ops(self, batch):
         for op, fut in batch:
@@ -64,10 +66,26 @@ class _TestIface(Node, Batcher):
                 fut.set_result(op.nonce + 1 if isinstance(op, _CutoffPing) else None)
 
     async def child_spawn(self, name):
+        self.spawned.append(name)
         if name == "named-child":
             return _LocalChild("named-child", iface_name=self.name)
         from acrobe.db import NoMatch
         raise NoMatch("test iface child", name)
+
+
+@wire.node("70000000-0000-4000-8000-0000000000fd",
+           uses=[_CutoffPing], nests=True)
+class _NestingIface(Node, Batcher):
+    """A @wire.node that declares other @wire.nodes may sit below it."""
+
+    def __init__(self, name="outer"):
+        Node.__init__(self, name)
+        Batcher.__init__(self)
+
+    async def flush_ops(self, batch):
+        for _, fut in batch:
+            if not fut.done():
+                fut.set_result(None)
 
 
 @wire.op("70000000-0000-4000-8000-000000000002")
@@ -107,6 +125,9 @@ def _build_remote_tree():
     root = Node("HwRoot")
     root.child_add(adapter)
     root.child_add(_TestWindow(base=0x4000_0000, name="window"))
+    outer = _NestingIface(name="outer")
+    outer.child_add(_TestIface(name="inner"))
+    root.child_add(outer)
     return root
 
 
@@ -176,6 +197,38 @@ async def test_below_cutoff_walks_locally_via_target_child_spawn(tmp_path):
             assert child.iface_name == "iface"
             # The parent IS-A _TestIface (the proxy).
             assert isinstance(child.parent, _TestIface)
+        finally:
+            await local.stop_tree()
+
+
+@pytest.mark.asyncio
+async def test_below_cutoff_is_not_resolved_on_the_server(tmp_path):
+    """Segments past a non-nesting cutoff are never walked over REST,
+    so the server does not spawn (probe) them itself."""
+    remote = _build_remote_tree()
+    server_iface = remote.children[0].children[0]
+    app = make_app(remote)
+    async with TestServer(app) as server:
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
+        try:
+            await local.child_summon(
+                "wire", "srv", "adapter", "iface", "named-child")
+        finally:
+            await local.stop_tree()
+    assert server_iface.spawned == []
+
+
+@pytest.mark.asyncio
+async def test_nesting_wire_node_lets_a_deeper_cutoff_win(tmp_path):
+    """The walk continues past a @wire.node declared with `nests`, and
+    the deeper @wire.node becomes the cutoff."""
+    app = make_app(_build_remote_tree())
+    async with TestServer(app) as server:
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
+        try:
+            inner = await local.child_summon("wire", "srv", "outer", "inner")
+            assert isinstance(inner, _TestIface)
+            assert not isinstance(inner, _NestingIface)
         finally:
             await local.stop_tree()
 
