@@ -239,3 +239,26 @@ async def test_enumeration_client_round_trip():
 
             with pytest.raises(NodeNotFound):
                 await client.enumerate("nope")
+
+
+class _FailsToStart(_Plain):
+    """Node whose start() always fails, like hardware that does not
+    answer."""
+
+    async def start(self):
+        raise RuntimeError("no answer")
+
+
+@pytest.mark.asyncio
+async def test_failing_descendant_does_not_hide_its_parent():
+    """A child that fails to start is reported as not found, and its
+    parent stays reachable before and after."""
+    remote = _RemoteCapable("remote", children=[_FailsToStart("broken")])
+    root = _Plain("root", children=[remote])
+    reg = _make_registry_and_register(type(remote))
+    app = make_app(root, registry=reg)
+
+    async with TestClient(TestServer(app)) as cli:
+        assert (await cli.get("/v1/node/remote")).status == 200
+        assert (await cli.get("/v1/node/remote/broken")).status == 404
+        assert (await cli.get("/v1/node/remote")).status == 200

@@ -63,17 +63,17 @@ class EnumerationServer:
         self.__probe_lock = asyncio.Lock()
 
     async def resolve_node(self, parts: list[str]) -> Node:
-        """Walk hw_root → ... → leaf, starting nodes as needed.
+        """Walk hw_root → ... → leaf, starting the nodes along the path.
+
+        Descendants of the leaf are left alone: one that fails to
+        start must not make its ancestors unreachable.
 
         Held under the probe lock so concurrent callers don't race
         on hardware-touching start() side effects.
         """
         async with self.__probe_lock:
             await self.hw_root.ensure_started()
-            node = await self.hw_root.child_summon(*parts)
-            if isinstance(node, Node):
-                await node.start_tree()
-            return node
+            return await self.hw_root.child_summon(*parts)
 
     def canonical_path(self, node: Node) -> str:
         """Path of `node` relative to hw_root, matching the URL space.
