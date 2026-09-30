@@ -180,10 +180,16 @@ class TestAsyncLifecycle:
         child = Tracked("child")
         root.child_add(child)
 
+        other = Tracked("other")
+        root.child_add(other)
+        grandchild = Tracked("grandchild")
+        child.child_add(grandchild)
+
         await root.start_tree()
         await root.stop_tree()
-        # Top-down: root first, then child
-        assert order == ["root", "child"]
+        # Bottom-up, last attached first: what rides on a node stops
+        # before it does
+        assert order == ["other", "grandchild", "child", "root"]
         assert not root.started
         assert not child.started
 
@@ -263,4 +269,4 @@ class TestAsyncLifecycle:
         assert not child.started
         assert not grandchild.started
         assert child.parent is None
-        assert order == ["child", "grandchild"]
+        assert order == ["grandchild", "child"]

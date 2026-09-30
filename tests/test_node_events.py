@@ -279,16 +279,16 @@ class TestAutoStartStopEmits:
         assert events[1].properties["success"] is True
 
     @pytest.mark.asyncio
-    async def test_stop_emits_top_down(self):
+    async def test_stop_emits_bottom_up(self):
         root, a, b = make_tree()
         await root.start_tree()
         events: list[Event] = []
         get_bus().subscribe(lambda e: events.append(e),
                             action="stop", phase=Phase.POST)
         await root.stop_tree()
-        # Parent's POST fires before its children's events.
+        # Children's POST fire before their parent's.
         sources = [e.source for e in events]
-        assert sources == ["root", "root/a", "root/a/b"]
+        assert sources == ["root/a/b", "root/a", "root"]
 
 
 class TestAutoAttachDetachEmits:

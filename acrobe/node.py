@@ -368,8 +368,10 @@ class Node:
       its discovered children are reparented onto the host Node).
     - start_tree() walks top-down: calls start() on self, marks
       started, then recurses into existing children.
-    - stop_tree() walks top-down: calls stop() on self, clears
-      started, then recurses into children.
+    - stop_tree() walks bottom-up: recurses into children, last
+      attached first, then calls stop() on self and clears started.
+      A node's stop() therefore runs once nothing riding on it runs
+      anymore.
 
     Path resolution:
     - child_lookup(name) finds an existing pre-populated child by
@@ -875,12 +877,15 @@ class Node:
             await child.start_tree()
 
     async def stop_tree(self):
-        """Top-down stop. Emits `(stop, pre/post)` around `stop()`
-        on this Node only if it was actually started — symmetric
-        with `ensure_started`, which emits `start` only when
-        `start()` runs. Cancels subscriptions held against this
-        Node (`subscribe()` scoped to this Node's lifetime), then
-        recurses into children."""
+        """Bottom-up stop: children's subtrees first, last attached
+        first, so that a node stops once nothing riding on it runs.
+        Emits `(stop, pre/post)` around `stop()` on this Node only
+        if it was actually started — symmetric with
+        `ensure_started`, which emits `start` only when `start()`
+        runs. Then cancels subscriptions held against this Node
+        (`subscribe()` scoped to this Node's lifetime)."""
+        for child in reversed(list(self.__children)):
+            await child.stop_tree()
         if self.__started:
             async with self.event_emitter("stop"):
                 await self.stop()
@@ -888,8 +893,6 @@ class Node:
         for sub in self.__subscriptions:
             sub.cancel()
         self.__subscriptions.clear()
-        for child in self.__children:
-            await child.stop_tree()
 
     # ----- Event-bus integration -----
 
