@@ -270,3 +270,91 @@ class TestAsyncLifecycle:
         assert not grandchild.started
         assert child.parent is None
         assert order == ["grandchild", "child"]
+
+    @pytest.mark.asyncio
+    async def test_stop_tree_joins_pending_child_start(self):
+        """A child start scheduled by child_add completes before the
+        parent stops, so the child is stopped rather than left
+        starting after its parent went down."""
+        order = []
+        gate = asyncio.Event()
+
+        class Slow(Node):
+            async def start(self):
+                order.append("start " + self.name)
+                await gate.wait()
+                order.append("started " + self.name)
+
+            async def stop(self):
+                order.append("stop " + self.name)
+
+        root = Slow("root")
+        gate.set()
+        await root.start_tree()
+        gate.clear()
+        child = Slow("child")
+        root.child_add(child)
+        await asyncio.sleep(0)
+        stopping = asyncio.ensure_future(root.stop_tree())
+        await asyncio.sleep(0)
+        assert not stopping.done()
+        gate.set()
+        await stopping
+        assert order == ["start root", "started root",
+                         "start child", "started child",
+                         "stop child", "stop root"]
+        assert not child.started
+
+    @pytest.mark.asyncio
+    async def test_child_add_while_stopping_does_not_start(self):
+        added = Node("late")
+
+        class Adder(Node):
+            async def stop(self):
+                self.parent.child_add(added)
+
+        root = Node("root")
+        root.child_add(Adder("adder"))
+        await root.start_tree()
+        await root.stop_tree()
+        await asyncio.sleep(0)
+        assert added.parent is root
+        assert not added.started
+
+    @pytest.mark.asyncio
+    async def test_child_remove_joins_pending_start(self):
+        gate = asyncio.Event()
+        order = []
+
+        class Slow(Node):
+            async def start(self):
+                await gate.wait()
+                order.append("start")
+
+            async def stop(self):
+                order.append("stop")
+
+        root = Node("root")
+        await root.start_tree()
+        child = Slow("child")
+        root.child_add(child)
+        await asyncio.sleep(0)
+        removing = asyncio.ensure_future(root.child_remove(child))
+        await asyncio.sleep(0)
+        gate.set()
+        await removing
+        assert order == ["start", "stop"]
+        assert child.parent is None
+
+    @pytest.mark.asyncio
+    async def test_failed_child_start_is_logged(self, caplog):
+        class Broken(Node):
+            async def start(self):
+                raise RuntimeError("boom")
+
+        root = Node("root")
+        await root.start_tree()
+        root.child_add(Broken("broken"))
+        await root.stop_tree()
+        assert any("boom" in r.getMessage() for r in caplog.records)
+        assert not root.started

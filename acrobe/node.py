@@ -357,9 +357,10 @@ class Node:
 
     Children lifecycle:
     - child_add(child) attaches a child. If the parent is already
-      started, the child's start_tree() is scheduled automatically
-      via ensure_future. Safe to call from __init__ (parent won't
-      be started yet).
+      started, the child's start_tree() is scheduled as a task the
+      parent tracks; stop_tree() joins it before stopping anything.
+      A child added while the parent is stopping is not started.
+      Safe to call from __init__ (parent won't be started yet).
     - child_remove(child) is async: it stops the child's entire
       subtree (stop_tree), then detaches it.
     - child_transplant_to(new_parent) moves every child of this
@@ -417,6 +418,11 @@ class Node:
         # attach happened in sync setup or in a live tree.
         # Tuple `(parent_path,)` or None.
         self.__pending_attach: tuple | None = None
+        # Children start_tree() tasks scheduled by child_add on a
+        # started parent. stop_tree joins them so a child never
+        # starts after its parent stopped.
+        self.__child_starts: dict["Node", asyncio.Task] = {}
+        self.__stopping = False
 
     def __str__(self):
         return self.__name
@@ -536,10 +542,35 @@ class Node:
     def child_add(self, child: "Node"):
         """Public eager-attach. Auto-starts the child if this parent
         is already started; otherwise the start happens when this
-        parent's start_tree() recurses."""
+        parent's start_tree() recurses. A parent that is stopping
+        attaches the child without starting it."""
         self.__child_attach(child)
-        if self.__started:
-            asyncio.ensure_future(child.start_tree())
+        if self.__started and not self.__stopping:
+            task = asyncio.ensure_future(child.start_tree())
+            self.__child_starts[child] = task
+            task.add_done_callback(
+                functools.partial(self.__child_start_done, child))
+
+    def __child_start_done(self, child, task):
+        if self.__child_starts.get(child) is task:
+            del self.__child_starts[child]
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            child.logger.warning("start failed: %s", error,
+                                 exc_info=error)
+
+    async def __child_start_join(self, child=None):
+        """Wait for the child starts `child_add` scheduled — only
+        `child`'s when given. Failures were logged by the task's
+        done callback."""
+        while True:
+            tasks = [t for c, t in self.__child_starts.items()
+                     if not t.done() and (child is None or c is child)]
+            if not tasks:
+                return
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def child_remove(self, child: "Node"):
         """Stop the child's subtree, then detach.
@@ -555,6 +586,7 @@ class Node:
         """
         from .event import Event, Phase, get_bus
         assert child.__parent is self, f"{child.fqdn} is not a child of {self.fqdn}"
+        await self.__child_start_join(child)
         await child.__drain_pending_attach()
         child_path = child.path
         parent_path = self.path
@@ -883,16 +915,25 @@ class Node:
         if it was actually started — symmetric with
         `ensure_started`, which emits `start` only when `start()`
         runs. Then cancels subscriptions held against this Node
-        (`subscribe()` scoped to this Node's lifetime)."""
-        for child in reversed(list(self.__children)):
-            await child.stop_tree()
-        if self.__started:
-            async with self.event_emitter("stop"):
-                await self.stop()
-                self.__started = False
-        for sub in self.__subscriptions:
-            sub.cancel()
-        self.__subscriptions.clear()
+        (`subscribe()` scoped to this Node's lifetime).
+
+        Child starts scheduled by `child_add` are awaited first
+        rather than cancelled: a start interrupted half-way would
+        leave a device open with no `stop()` to close it."""
+        self.__stopping = True
+        try:
+            await self.__child_start_join()
+            for child in reversed(list(self.__children)):
+                await child.stop_tree()
+            if self.__started:
+                async with self.event_emitter("stop"):
+                    await self.stop()
+                    self.__started = False
+            for sub in self.__subscriptions:
+                sub.cancel()
+            self.__subscriptions.clear()
+        finally:
+            self.__stopping = False
 
     # ----- Event-bus integration -----
 
