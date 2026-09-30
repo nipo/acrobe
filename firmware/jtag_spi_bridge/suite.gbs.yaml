@@ -10,6 +10,9 @@ projects:
   - name: gowin_gw1n-9c
     path: gowin/gw1n-9c
     tags: [gowin]
+  - name: gowin_gw1nsr-4c
+    path: gowin/gw1nsr-4c
+    tags: [gowin]
   - name: gowin_gw5at-15a
     path: gowin/gw5at-15a
     tags: [gowin]
