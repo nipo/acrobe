@@ -6,7 +6,8 @@ import pytest
 import acrobe.adapter  # noqa: F401 — fires adapter registrations
 from acrobe.adapter.ftdi.generic import GenericFtdiAdapter
 from acrobe.adapter.model import (
-    Adapter, Enumerator, HwRoot, get_hw_root, reset_hw_root_for_tests,
+    Adapter, Enumerator, HwRoot, built_hw_root, get_hw_root,
+    reset_hw_root_for_tests,
 )
 
 
@@ -23,8 +24,13 @@ class _FakeAdapter(Adapter):
 
 
 class _FakeListingEnumerator(Enumerator):
-    def __init__(self, devices):
+    def __init__(self, devices, log=None):
         self.__devices = devices
+        self.log = log
+
+    async def close(self):
+        if self.log is not None:
+            self.log.append("close enumerator")
 
     async def populate(self, hw_root):
         for name, hints in self.__devices:
@@ -77,10 +83,40 @@ async def test_adapter_ident_default_empty():
     assert GenericFtdiAdapter("ftdi-test").ident == ""
 
 
+async def test_stop_closes_enumerators_after_adapters():
+    log = []
+
+    class Tracked(_FakeAdapter):
+        async def stop(self):
+            log.append("stop " + self.name)
+
+    class Enum(_FakeListingEnumerator):
+        async def populate(self, hw_root):
+            if not hw_root.has_child("probe-a"):
+                hw_root.child_add(Tracked("probe-a", []))
+
+    root = HwRoot()
+    root.add_enumerator(Enum([], log))
+    await root.ensure_started()
+    await root.stop_tree()
+    assert log == ["stop probe-a", "close enumerator"]
+    assert not root.started
+
+
+async def test_stop_cancels_pending_discovery():
+    root = HwRoot()
+    await root.ensure_started()
+    task = root.request_discovery()
+    await root.stop_tree()
+    assert task.cancelled()
+
+
 def test_get_hw_root_singleton():
     reset_hw_root_for_tests()
     try:
+        assert built_hw_root() is None
         first = get_hw_root()
+        assert built_hw_root() is first
         assert get_hw_root() is first
         reset_hw_root_for_tests()
         assert get_hw_root() is not first

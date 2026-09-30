@@ -120,11 +120,17 @@ class Enumerator:
 
     `populate` is idempotent — it is the rescan path too, so it must
     skip children already present (matched by name).
+
+    `close` releases what the enumerator holds for the medium itself
+    (a bus context, a watcher). `HwRoot.stop` calls it once every
+    attached child has stopped; a later `populate` reopens lazily.
     """
 
     async def populate(self, hw_root):
         raise NotImplementedError
 
+    async def close(self):
+        pass
 
 
 class UsbEnumerator(Enumerator):
@@ -146,17 +152,24 @@ class UsbEnumerator(Enumerator):
         if self.__ctx is None:
             import ausb
             self.__ctx = ausb.Context(enable_hotplug=False)
-            # Hook the context's close into the lifecycle so it
-            # doesn't leak when the process exits without a tree-level
-            # teardown. The context persists for the process lifetime
-            # otherwise.
+            # Catch-all for a process that exits without stopping
+            # the tree.
             from ..lifecycle import on_shutdown
-            on_shutdown(self.__close_ctx)
+            on_shutdown(self.close)
 
     async def __close_ctx(self):
         if self.__ctx is not None:
             self.__ctx.close()
             self.__ctx = None
+
+    async def close(self):
+        """Stop the hotplug watch and release the USB context. Device
+        handles opened from it must be closed first, which the
+        bottom-up `HwRoot.stop_tree` guarantees."""
+        from ..lifecycle import cancel_shutdown
+        cancel_shutdown(self.close)
+        await self.stop_watch()
+        await self.__close_ctx()
 
     def __iter_matches(self):
         """Yield (AdapterInfo, adapter_cls, descriptor) for static descriptor matches."""
@@ -303,9 +316,10 @@ class UsbEnumerator(Enumerator):
         if self.__ctx is not None:
             await self.__close_ctx()
         import ausb
-        from ..lifecycle import on_shutdown
+        from ..lifecycle import cancel_shutdown, on_shutdown
         self.__ctx = ausb.Context(enable_hotplug=True)
-        on_shutdown(self.__close_ctx)
+        cancel_shutdown(self.close)
+        on_shutdown(self.close)
         self.__known_by_addr = {}
         await self.__seed_known_devices()
         self.__hotplug_iter = self.__ctx.hotplug_events()
@@ -383,6 +397,25 @@ class HwRoot(Node):
             if isinstance(result, BaseException):
                 self.logger.warning(
                     "adapter %s failed to start: %s", child.name, result)
+
+    async def stop(self):
+        """Runs after every child stopped: cancel a pending discovery
+        sweep, then close the enumerators, last registered first."""
+        task, self.__discovery_task = self.__discovery_task, None
+        self.__discovery_needs_run = False
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        for enum in reversed(self.enumerators):
+            try:
+                await enum.close()
+            except Exception:
+                self.logger.warning(
+                    "enumerator %s failed to close",
+                    type(enum).__name__, exc_info=True)
 
     def request_discovery(self):
         """Schedule a `TargetDiscovery` sweep over this tree.
@@ -472,6 +505,12 @@ def get_hw_root():
     global __hw_root
     if __hw_root is None:
         __hw_root = make_hw_root()
+    return __hw_root
+
+
+def built_hw_root():
+    """The singleton HwRoot if `get_hw_root()` built it, else None.
+    For teardown paths that must not build a root just to stop it."""
     return __hw_root
 
 
