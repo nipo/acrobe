@@ -81,7 +81,9 @@ class FtdiJtagAdapter(Adapter):
         cancel_shutdown(self.stop)
         self.__engine = None
         if self.__transport is not None:
-            await self.__transport.close()
+            # Board GPIOs on this port may drive resets: keep them as
+            # last set rather than let them float until the next open.
+            await self.__transport.close(reset_bitmode=False)
             self.__transport = None
         if self.__device is not None:
             self.__device.handle.close()

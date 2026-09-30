@@ -433,8 +433,14 @@ class FtdiTransport:
             self.read(byte_count))
         return rsp
 
-    async def close(self):
+    async def close(self, *, reset_bitmode=True):
         """Reset FTDI bitmode and release device.
+
+        Resetting the bitmode hands the pins back to the channel's
+        default function, which lets go of a bus shared with other
+        masters. Without it, the pins keep the levels and directions
+        last set, for a board where one of them must not glitch
+        between sessions.
 
         When created via from_device() (ctx=None), only releases the
         interface — the caller owns the device lifetime.
@@ -450,9 +456,10 @@ class FtdiTransport:
         if x := self.__writer:
             await x
         cancel_shutdown(self.close)
-        idx = self.__interface_index + 1
-        await self.__device.vendor_control(
-            SIO_SET_BITMODE, BITMODE_RESET << 8, idx, b'')
+        if reset_bitmode:
+            idx = self.__interface_index + 1
+            await self.__device.vendor_control(
+                SIO_SET_BITMODE, BITMODE_RESET << 8, idx, b'')
         self.__device.handle.releaseInterface(self.__interface_index)
         if self.__ctx is not None:
             self.__device.handle.close()
