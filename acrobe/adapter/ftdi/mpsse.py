@@ -218,7 +218,7 @@ class ClockBytes(Operation):
     def __init__(self, count: int):
         assert 1 <= count <= 65536
         self.count = count
-        self.cycle_count = count
+        self.cycle_count = count * 8
 
     def encode(self, buf):
         c = self.count - 1
@@ -334,12 +334,19 @@ class ShiftBytes(Operation):
         self.cycle_count = byte_count * 8
 
     def encode(self, buf):
-        c = self.byte_count - 1
+        self.encode_range(buf, 0, self.byte_count)
+
+    def encode_range(self, buf, start: int, count: int):
+        """Append a command shifting bytes ``[start, start + count)``
+        of this op. Consecutive ranges covering the op shift the same
+        bits and return the same response bytes, in order, as the
+        whole op."""
+        c = count - 1
         buf.append(self.__cmd_byte)
         buf.append(c & 0xff)
         buf.append(c >> 8)
         if self.__data_out:
-            buf += self.__data_out
+            buf += self.__data_out[start:start + count]
 
     def rsp_handle(self, data: bytes):
         if self.read:
@@ -418,12 +425,38 @@ class ShiftTms(Operation):
 # --- Engine ---
 
 class MpsseEngine(Batcher):
+    """Lowers a batch of MPSSE ops into one command stream and one
+    response read.
+
+    The transport fails a read that makes no progress for its
+    deadline, but an MPSSE command stream only answers once the
+    commands before it have been executed. A batch shifting for longer
+    than the deadline with nothing to answer in the meantime would
+    time out while perfectly healthy. So every
+    :data:`KEEPALIVE_INTERVAL` of estimated clocking, the engine
+    inserts a ``GET_BITS_LOW`` + ``SEND_IMMEDIATE`` pair, splitting a
+    long ``ShiftBytes`` if needed; the byte it returns is dropped from
+    the response before ops see it.
+
+    Clocking time is estimated from the ``ClockDiv5`` /
+    ``ClockDivisor`` ops the engine lowers. Until it has seen one, it
+    assumes the slowest clock the chip can run.
+    """
+
+    KEEPALIVE_INTERVAL = 0.1
+
+    __BASE_DIV5 = 12e6
+    __BASE = 60e6
+    __DIVISOR_MAX = 65536
+
     def __init__(self, transport: Transport, logger):
         super().__init__()
         self.__transport = transport
         self.logger = logger
         self.__bracket_pre = b""
         self.__bracket_post = b""
+        self.__div5 = True
+        self.__divisor = self.__DIVISOR_MAX
 
     def set_bracket(self, pre: bytes, post: bytes):
         """Raw MPSSE bytes prepended/appended to each batch's command stream.
@@ -434,6 +467,11 @@ class MpsseEngine(Batcher):
         self.__bracket_pre = pre
         self.__bracket_post = post
 
+    def __keepalive_cycles(self):
+        base = self.__BASE_DIV5 if self.__div5 else self.__BASE
+        return max(8, int(self.KEEPALIVE_INTERVAL * base
+                          / (2 * self.__divisor)))
+
     async def flush_ops(self, batch):
         """Serialize the whole batch into one growing bytearray, then
         hand it to the transport. Each op writes its command bytes
@@ -443,23 +481,60 @@ class MpsseEngine(Batcher):
         if self.__bracket_pre:
             buf += self.__bracket_pre
 
-        total_rsp = 0
+        # Offsets, in the response stream, of the bytes inserted by the
+        # engine rather than asked for by an op.
+        filler = []
+        rsp_len = 0
+        budget = self.__keepalive_cycles()
+        clocked = 0
+
+        def keepalive():
+            nonlocal rsp_len, clocked
+            buf.append(mpsse_cmd.GET_BITS_LOW)
+            buf.append(mpsse_cmd.SEND_IMMEDIATE)
+            filler.append(rsp_len)
+            rsp_len += 1
+            clocked = 0
+
         for op, _future in batch:
-            op.encode(buf)
-            total_rsp += op.rsp_size
+            if isinstance(op, ClockDiv5):
+                self.__div5 = op.enable
+                budget = self.__keepalive_cycles()
+            elif isinstance(op, ClockDivisor):
+                self.__divisor = op.divisor
+                budget = self.__keepalive_cycles()
+
+            cycles = op.cycle_count
+            if clocked and clocked + cycles > budget:
+                keepalive()
+            if isinstance(op, ShiftBytes) and cycles > budget:
+                step = budget // 8
+                for start in range(0, op.byte_count, step):
+                    if clocked:
+                        keepalive()
+                    count = min(step, op.byte_count - start)
+                    op.encode_range(buf, start, count)
+                    clocked = count * 8
+                    if op.read:
+                        rsp_len += count
+            else:
+                op.encode(buf)
+                clocked += cycles
+                rsp_len += op.rsp_size
 
         if self.__bracket_post:
             buf += self.__bracket_post
 
-        if total_rsp == 0:
+        if rsp_len == len(filler):
             # Need at least 1 response byte to synchronize.
             buf.append(mpsse_cmd.GET_BITS_LOW)
-            total_rsp = 1
+            filler.append(rsp_len)
+            rsp_len += 1
         buf.append(mpsse_cmd.SEND_IMMEDIATE)
 
         if self.logger.isEnabledFor(PROTOCOL):
             self.logger.protocol(
-                "USB >> %d bytes, expect %d back", len(buf), total_rsp)
+                "USB >> %d bytes, expect %d back", len(buf), rsp_len)
         self.__transport.write(bytes(buf))
 
         def read_done(rsp):
@@ -477,6 +552,9 @@ class MpsseEngine(Batcher):
             if self.logger.isEnabledFor(PROTOCOL):
                 self.logger.protocol("USB << %d bytes", len(data))
 
+            if filler:
+                data = self.__strip(data, filler)
+
             offset = 0
             for op, future in batch:
                 rsp_size = op.rsp_size
@@ -486,4 +564,15 @@ class MpsseEngine(Batcher):
                 if future is not None:
                     future.set_result(op)
 
-        self.__transport.read(total_rsp).add_done_callback(read_done)
+        self.__transport.read(rsp_len).add_done_callback(read_done)
+
+    @staticmethod
+    def __strip(data, offsets):
+        """`data` without the bytes at `offsets`, which are ascending."""
+        kept = []
+        start = 0
+        for offset in offsets:
+            kept.append(data[start:offset])
+            start = offset + 1
+        kept.append(data[start:])
+        return b"".join(kept)

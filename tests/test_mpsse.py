@@ -91,7 +91,7 @@ class TestConfigOps:
         c = 99  # count-1
         assert cmd[1] == c & 0xff
         assert cmd[2] == c >> 8
-        assert cycles == 100
+        assert cycles == 800
 
 
 class TestShiftBits:
@@ -301,3 +301,136 @@ class TestMpsseEngine:
         f = engine.post(GetBitsLow())
         with pytest.raises(IOError, match="USB error"):
             await f
+
+
+class MpsseSimulator:
+    """Transport executing the MPSSE command stream it is written.
+
+    Byte shifts loop the written data back as read data, GET_BITS_LOW
+    answers `PINS`. Records, for each response byte, the clock cycles
+    run since the previous one, to check a batch never runs longer
+    than the keepalive interval without answering."""
+
+    PINS = 0xa5
+    ONE_BYTE = {
+        mpsse_cmd.SEND_IMMEDIATE, mpsse_cmd.CLK_DIV5_DISABLE,
+        mpsse_cmd.CLK_DIV5_ENABLE, mpsse_cmd.THREE_PHASE_ENABLE,
+        mpsse_cmd.THREE_PHASE_DISABLE, mpsse_cmd.ADAPTIVE_ENABLE,
+        mpsse_cmd.ADAPTIVE_DISABLE, mpsse_cmd.LOOPBACK_ENABLE,
+        mpsse_cmd.LOOPBACK_DISABLE,
+    }
+
+    def __init__(self):
+        self.pending = bytearray()
+        self.shifted = bytearray()
+        self.gaps = []
+
+    def __run(self, stream):
+        pos = 0
+        cycles = 0
+        while pos < len(stream):
+            cmd = stream[pos]
+            if cmd in (mpsse_cmd.GET_BITS_LOW, mpsse_cmd.GET_BITS_HIGH):
+                self.pending.append(self.PINS)
+                self.gaps.append(cycles)
+                cycles = 0
+                pos += 1
+            elif cmd in (mpsse_cmd.SET_BITS_LOW, mpsse_cmd.SET_BITS_HIGH,
+                         mpsse_cmd.CLK_DIV):
+                pos += 3
+            elif cmd in self.ONE_BYTE:
+                pos += 1
+            elif cmd & mpsse_cmd.MANAGEMENT == 0 and not cmd & mpsse_cmd.BITS:
+                count = stream[pos + 1] + (stream[pos + 2] << 8) + 1
+                pos += 3
+                data = bytes(count)
+                if cmd & mpsse_cmd.WRITE:
+                    data = stream[pos:pos + count]
+                    pos += count
+                self.shifted += data
+                cycles += count * 8
+                if cmd & mpsse_cmd.READ:
+                    self.pending += data
+                    self.gaps.extend([cycles] + [0] * (count - 1))
+                    cycles = 0
+            else:
+                raise AssertionError(f"unsimulated command {cmd:#04x}")
+
+    @staticmethod
+    def _resolved(value):
+        f = asyncio.get_running_loop().create_future()
+        f.set_result(value)
+        return f
+
+    def write(self, data):
+        self.__run(data)
+        return self._resolved(None)
+
+    def read(self, byte_count):
+        assert len(self.pending) == byte_count
+        data, self.pending = bytes(self.pending), bytearray()
+        return self._resolved(data)
+
+
+class TestMpsseKeepalive:
+    # 15 MHz: 60 MHz / (2 * 2)
+    FREQ = 15e6
+
+    @staticmethod
+    def engine(sim):
+        engine = MpsseEngine(sim, _test_logger)
+        engine.post(ClockDiv5(False))
+        engine.post(ClockDivisor(2))
+        return engine
+
+    def budget(self):
+        return MpsseEngine.KEEPALIVE_INTERVAL * self.FREQ
+
+    @pytest.mark.asyncio
+    async def test_long_write_answers_within_interval(self):
+        sim = MpsseSimulator()
+        engine = self.engine(sim)
+        blob = bytes(i * 7 & 0xff for i in range(4 << 20))
+        ops = [ShiftBytes(blob[o:o + 65536])
+               for o in range(0, len(blob), 65536)]
+        await asyncio.gather(*(engine.post(op) for op in ops))
+
+        assert bytes(sim.shifted) == blob
+        assert max(sim.gaps) <= self.budget()
+        # 4 MiB at 15 MHz is ~2.2 s of shifting.
+        assert len(sim.gaps) >= 2.2 / MpsseEngine.KEEPALIVE_INTERVAL
+
+    @pytest.mark.asyncio
+    async def test_split_read_keeps_responses_aligned(self):
+        sim = MpsseSimulator()
+        engine = self.engine(sim)
+        blob = bytes(i * 13 & 0xff for i in range(3 * 65536))
+        first = GetBitsLow()
+        reads = [ShiftBytes(blob[o:o + 65536], read=True)
+                 for o in range(0, len(blob), 65536)]
+        last = GetBitsHigh()
+        await asyncio.gather(engine.post(first),
+                             *(engine.post(op) for op in reads),
+                             engine.post(last))
+
+        assert b"".join(op.data for op in reads) == blob
+        assert first.value == last.value == MpsseSimulator.PINS
+        assert max(sim.gaps) <= self.budget()
+
+    @pytest.mark.asyncio
+    async def test_short_batch_has_no_keepalive(self):
+        sim = MpsseSimulator()
+        engine = self.engine(sim)
+        op = ShiftBytes(bytes(64), read=True)
+        await engine.post(op)
+        assert sim.gaps[0] == 64 * 8
+        assert len(sim.gaps) == 64
+
+    @pytest.mark.asyncio
+    async def test_unknown_clock_assumes_slowest(self):
+        sim = MpsseSimulator()
+        engine = MpsseEngine(sim, _test_logger)
+        await engine.post(ShiftBytes(bytes(4)))
+        # 12 MHz / (2 * 65536) runs ~9 cycles per interval: every
+        # byte gets its own keepalive.
+        assert sim.gaps == [8, 8, 8, 8]
