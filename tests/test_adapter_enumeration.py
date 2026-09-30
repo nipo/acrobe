@@ -196,3 +196,21 @@ def test_get_hw_root_singleton():
         assert get_hw_root() is not first
     finally:
         reset_hw_root_for_tests()
+
+
+async def test_root_shutdown_stops_the_singleton():
+    from acrobe import root as root_mod
+    reset_hw_root_for_tests()
+    try:
+        await root_mod.shutdown()
+        assert built_hw_root() is None
+
+        hw_root = get_hw_root()
+        adapter = _SessionAdapter("probe")
+        hw_root.child_add(adapter)
+        await adapter.ensure_started()
+        await adapter.child_summon("jtag")
+        await root_mod.shutdown()
+        assert adapter.releases == 1
+    finally:
+        reset_hw_root_for_tests()

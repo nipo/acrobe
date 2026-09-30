@@ -8,17 +8,17 @@ which subsystems were exercised.
 
 For things that already have a Node.stop() — most of acrobe — the
 node tree's `stop_tree()` cascades naturally; the lifecycle is
-the catch-all when stop_tree wasn't called (the CLI's case before
-this module existed) or for resources that don't live in the tree.
+the catch-all when stop_tree wasn't called or for resources that
+don't live in the tree.
 
 Resources that have their own deterministic cleanup path
 (stop_tree, close, __aexit__) should `register` on creation and
 `cancel` when their normal cleanup runs — `shutdown()` then becomes
 a true no-op for code that already cleaned up properly.
 
-CLI integration: `acrobe.cli.base.cli`'s result_callback runs
-`shutdown()` after every command, so subcommands don't have to
-remember.
+CLI integration: every command ends with `acrobe.root.shutdown()`,
+which stops the shared tree and then drains this lifecycle, so
+subcommands don't have to remember.
 """
 
 import logging

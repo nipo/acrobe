@@ -16,7 +16,8 @@ and awaits ``main()``. Usage::
         # … interact with tap …
 """
 
-from .adapter.model import get_hw_root
+from . import lifecycle
+from .adapter.model import built_hw_root, get_hw_root
 from .node import Node
 from .plugin import load_plugins
 
@@ -52,3 +53,15 @@ async def root(path):
     Shorthand for ``(await roots(path))[0]``.
     """
     return (await roots(path))[0]
+
+
+async def shutdown():
+    """Stop the shared tree, then drain the lifecycle.
+
+    The tree stops bottom-up, so each layer is torn down once nothing
+    riding on it runs, and the USB context goes last. The lifecycle
+    drain then only catches resources living outside the tree."""
+    hw_root = built_hw_root()
+    if hw_root is not None:
+        await hw_root.stop_tree()
+    await lifecycle.shutdown()

@@ -27,7 +27,8 @@ import sys
 import asyncclick as click
 
 from . import base
-from .. import lifecycle, plugin
+from .. import plugin
+from ..root import shutdown
 
 
 PARALLEL = "&"
@@ -124,7 +125,7 @@ class ChainDispatcher:
                         *[self.__run_segment(globals_argv, seg)
                           for seg in group])
         finally:
-            await lifecycle.shutdown()
+            await shutdown()
 
 
 def main():

@@ -132,8 +132,8 @@ async def cli(ctx, verbose, quiet, timestamp, no_color,
     if ctx.obj is None:
         ctx.obj = CliContext()
 
-    # Drain anything registered with acrobe.lifecycle after the CLI
-    # command finishes. Registered via ctx.call_on_close (not
+    # Stop the tree and drain acrobe.lifecycle after the CLI command
+    # finishes. Registered via ctx.call_on_close (not
     # cli.result_callback) so it runs on exception paths too — without
     # this, USB contexts leak past interpreter shutdown and ausb's
     # daemon event thread can be torn down mid-libusb-call, triggering
@@ -147,8 +147,8 @@ async def cli(ctx, verbose, quiet, timestamp, no_color,
     async def _drain_lifecycle():
         if getattr(cli_ctx_obj, "chained", False):
             return
-        from .. import lifecycle
-        await lifecycle.shutdown()
+        from ..root import shutdown
+        await shutdown()
     ctx.call_on_close(_drain_lifecycle)
 
     base_index = log.LEVELS.index(logging.ERROR)
