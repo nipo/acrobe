@@ -11,3 +11,4 @@ from . import repl  # noqa: F401
 from . import run  # noqa: F401
 from . import wire  # noqa: F401
 from . import pico  # noqa: F401
+from . import test  # noqa: F401
