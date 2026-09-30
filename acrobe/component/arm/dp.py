@@ -222,6 +222,7 @@ class Dp(Batcher, Node):
 
     PWRUP_ACK_MASK = CDBGPWRUPACK | CSYSPWRUPACK
     PWRUP_REQ_MASK = CDBGPWRUPREQ | CSYSPWRUPREQ
+    STICKY_MASK = STICKYORUN | STICKYCMP | STICKYERR
 
     # ABORT register bits.
     DAPABORT     = 1 << 0  # cancel current AP transaction
@@ -294,11 +295,20 @@ class Dp(Batcher, Node):
                 "TARGETID: not available (DPv%d, requires DPv2+)",
                 self.dp_version)
 
+        stat = await self.post(DpRead(self.CTRL_STAT))
+        if stat & self.STICKY_MASK:
+            self.logger.warning(
+                "Sticky flags set at start (CTRL/STAT 0x%08x), clearing",
+                stat)
         # ABORT register layout (NOT the CTRL/STAT layout):
         #   bit 0: DAPABORT, 1: STKCMPCLR, 2: STKERRCLR,
         #   3: WDERRCLR,    4: ORUNERRCLR.
+        # The clear bits only exist on SW-DP. JTAG-DP clears sticky
+        # flags by writing them as 1 in CTRL/STAT, where SW-DP ignores
+        # them as read-only.
         await self.post(Abort(self.ABORT_ALL))
-        await self.post(DpWrite(self.CTRL_STAT, self.PWRUP_REQ_MASK))
+        await self.post(DpWrite(self.CTRL_STAT,
+                                self.PWRUP_REQ_MASK | self.STICKY_MASK))
 
         for _ in range(50):
             stat = await self.post(DpRead(self.CTRL_STAT))

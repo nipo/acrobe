@@ -295,3 +295,43 @@ class TestSystemMemap:
             ("apb", 0x04770002, 0x80000000),
         ])
         assert d.system_memap().name == "apb"
+
+
+class _ScriptedDp(Dp):
+    """DPv1 answering DP register reads from a table, recording writes.
+    Enumerates no AP."""
+
+    def __init__(self, ctrl_stat):
+        super().__init__("dp", dpidr=0x2ba01477)
+        self.ctrl_stat = ctrl_stat
+        self.writes = []
+
+    async def flush_ops(self, batch):
+        for op, future in batch:
+            result = None
+            if isinstance(op, DpRead) and op.addr == Dp.CTRL_STAT:
+                result = self.ctrl_stat
+            elif isinstance(op, DpWrite):
+                self.writes.append((op.addr, op.data))
+                if op.addr == Dp.CTRL_STAT:
+                    self.ctrl_stat = (Dp.PWRUP_ACK_MASK
+                                      | (self.ctrl_stat
+                                         & ~(op.data & Dp.STICKY_MASK)))
+            elif isinstance(op, Abort):
+                self.writes.append(("abort", op.what))
+            if future is not None:
+                future.set_result(result)
+
+    async def _enumerate_aps(self):
+        pass
+
+
+class TestStickyClear:
+    @pytest.mark.asyncio
+    async def test_start_clears_sticky_through_ctrl_stat(self, caplog):
+        dp = _ScriptedDp(0xf0000020)
+        await dp.ensure_started()
+        assert (Dp.CTRL_STAT, Dp.PWRUP_REQ_MASK | Dp.STICKY_MASK) \
+            in dp.writes
+        assert not dp.ctrl_stat & Dp.STICKY_MASK
+        assert any("Sticky" in r.getMessage() for r in caplog.records)
