@@ -146,6 +146,38 @@ async def test_udp_datagram_roundtrip_via_hw_root():
         transport.close()
 
 
+async def test_udp_stop_fails_pending_receives():
+    """A receive still waiting when the node stops fails, and so does
+    one posted after: none is left waiting on a closed socket."""
+    transport, port = await _start_udp_echo()
+    try:
+        root = await _net_root()
+        node = await root.child_summon("udp", f"127.0.0.1:{port}")
+        waiting = [node.recv(), node.recv()]
+        await asyncio.sleep(0.01)
+        await asyncio.wait_for(node.stop(), timeout=1.0)
+        for receive in waiting + [node.recv()]:
+            with pytest.raises(ConnectionError):
+                await asyncio.wait_for(receive, timeout=1.0)
+    finally:
+        transport.close()
+
+
+async def test_udp_receive_given_up_takes_no_packet():
+    transport, port = await _start_udp_echo()
+    try:
+        root = await _net_root()
+        node = await root.child_summon("udp", f"127.0.0.1:{port}")
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(node.recv(), timeout=0.05)
+        await node.send(b"ping")
+        data, _ = await asyncio.wait_for(node.recv(), timeout=1.0)
+        assert data == b"ping"
+        await node.stop()
+    finally:
+        transport.close()
+
+
 async def test_udp_broker_rejects_bad_endpoint():
     root = await _net_root()
     broker = await root.child_summon("udp")

@@ -84,6 +84,8 @@ class UdpDatagram(Datagram):
         self.__port = port
         self.__transport: asyncio.DatagramTransport | None = None
         self.__rx_queue: asyncio.Queue = asyncio.Queue()
+        # One task per pending Recv, waiting on the queue.
+        self.__receives: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -94,7 +96,12 @@ class UdpDatagram(Datagram):
         on_shutdown(self.stop)
 
     async def stop(self) -> None:
+        """Fails the receives still waiting, then closes the socket."""
         cancel_shutdown(self.stop)
+        receives, self.__receives = self.__receives, set()
+        for task in receives:
+            task.cancel()
+        await asyncio.gather(*receives, return_exceptions=True)
         transport = self.__transport
         self.__transport = None
         if transport is not None:
@@ -117,7 +124,20 @@ class UdpDatagram(Datagram):
                 if future is not None and not future.done():
                     future.set_result(None)
             elif isinstance(op, Recv):
-                asyncio.create_task(self.__recv_task(future))
+                if self.__transport is None:
+                    if future is not None and not future.done():
+                        future.set_exception(
+                            ConnectionError("UdpDatagram not started"))
+                    continue
+                task = asyncio.create_task(self.__recv_task(future))
+                self.__receives.add(task)
+                task.add_done_callback(self.__receives.discard)
+                if future is not None:
+                    # A receive given up on takes no packet: the next
+                    # one is still there for the next receive.
+                    future.add_done_callback(
+                        lambda f, t=task: t.cancel() if f.cancelled()
+                        else None)
             else:
                 if future is not None and not future.done():
                     future.set_exception(TypeError(
@@ -127,6 +147,11 @@ class UdpDatagram(Datagram):
     async def __recv_task(self, future):
         try:
             item = await self.__rx_queue.get()
+        except asyncio.CancelledError:
+            if future is not None and not future.done():
+                future.set_exception(
+                    ConnectionError(f"{self.name} stopped"))
+            raise
         except Exception as exc:
             if future is not None and not future.done():
                 future.set_exception(exc)
