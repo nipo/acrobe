@@ -54,6 +54,9 @@ class IcePiZero(Node):
     def __jtag_oe_mask(self):
         return (1 << self.TCK) | (1 << self.TMS) | (1 << self.TDI)
 
+    async def stop(self):
+        await self.__close_transport()
+
     async def __close_transport(self):
         if self.__transport is not None:
             await self.__transport.close()

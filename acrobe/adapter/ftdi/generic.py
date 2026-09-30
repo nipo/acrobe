@@ -1,4 +1,5 @@
 from ...db import Db
+from ...lifecycle import cancel_shutdown, on_shutdown
 from ..model import Adapter, AdapterInfo, adapter_db
 
 
@@ -26,6 +27,7 @@ class GenericFtdiAdapter(Adapter):
         it. Boards call this before touching `self.device`."""
         if self.__device is None:
             self.__device = self.descriptor.open()
+            on_shutdown(self.stop)
         return self.__device
 
     @property
@@ -36,7 +38,8 @@ class GenericFtdiAdapter(Adapter):
     async def child_spawn(self, name):
         return await self.board_db.acall(name, self)
 
-    async def close(self):
+    async def stop(self):
+        cancel_shutdown(self.stop)
         if self.__device is not None:
             self.__device.handle.close()
             self.__device = None

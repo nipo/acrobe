@@ -628,9 +628,9 @@ class TestIceStickChannels:
             await adapter.child_spawn("uart")
 
     @pytest.mark.asyncio
-    async def test_close_releases_everything(self, adapter):
+    async def test_stop_releases_everything(self, adapter):
         await (await adapter.child_spawn("spi")).start()
         await adapter.child_spawn("jtag-io")
-        await adapter.close()
+        await adapter.stop()
 
         assert all(t.closed for t in adapter.transports)

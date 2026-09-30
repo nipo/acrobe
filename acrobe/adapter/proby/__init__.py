@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 from ...db import NoMatch
+from ...lifecycle import cancel_shutdown, on_shutdown
 from ..model import Adapter, AdapterInfo, adapter_db
 from ..ftdi.transport import FtdiTransport
 from ..ftdi.mpsse import MpsseEngine
@@ -77,6 +78,7 @@ class ProbyAdapter(Adapter):
         self.__transport = transport
         self.__engine = engine
         self.__jtag = jtag
+        on_shutdown(self.stop)
 
     async def __reprogram(self, mode):
         if self.__loaded_mode == mode:
@@ -95,14 +97,15 @@ class ProbyAdapter(Adapter):
 
     async def __channel_a_close(self):
         """Tear down whatever currently owns channel A."""
-        if self.__active_a_interface is not None:
+        active = self.__active_a_interface
+        if active is not None and active.parent is self:
             try:
-                await self.child_remove(self.__active_a_interface)
+                await self.child_evict(active)
             except Exception:
                 self.logger.warning(
                     "Failed to remove active channel-A interface",
                     exc_info=True)
-            self.__active_a_interface = None
+        self.__active_a_interface = None
         if self.__transport_a is not None:
             await self.__transport_a.close()
             self.__transport_a = None
@@ -179,9 +182,18 @@ class ProbyAdapter(Adapter):
 
         raise NoMatch("interface", name)
 
-    async def close(self):
+    async def stop(self):
+        cancel_shutdown(self.stop)
         if self.__jtag is None:
             return
         await self.__channel_a_close()
+        # The internal chain is only in the tree once jtag-int was
+        # summoned; the bitstream loads walk it regardless.
+        await self.__jtag.stop_tree()
         await self.__transport.close()
         self.__device.handle.close()
+        self.__device = None
+        self.__transport = None
+        self.__engine = None
+        self.__jtag = None
+        self.__loaded_mode = None

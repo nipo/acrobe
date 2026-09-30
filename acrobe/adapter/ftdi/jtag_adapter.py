@@ -1,6 +1,7 @@
 import logging
 
 from ...db import NoMatch
+from ...lifecycle import cancel_shutdown, on_shutdown
 from ..model import Adapter
 from .transport import FtdiTransport
 from .mpsse import MpsseEngine
@@ -57,6 +58,7 @@ class FtdiJtagAdapter(Adapter):
         self.__device = device
         self.__transport = transport
         self.__engine = engine
+        on_shutdown(self.stop)
 
     async def _ensure_engine(self):
         """Open the USB handle + MPSSE engine if needed and return it.
@@ -75,7 +77,9 @@ class FtdiJtagAdapter(Adapter):
         jtag.freq_cap("hardware", 30e6)
         return jtag
 
-    async def close(self):
+    async def stop(self):
+        cancel_shutdown(self.stop)
+        self.__engine = None
         if self.__transport is not None:
             await self.__transport.close()
             self.__transport = None

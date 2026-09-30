@@ -71,6 +71,13 @@ class Adapter(Node):
 
     Subclasses keep the `(name, info, descriptor)` constructor shape
     so `UsbEnumerator` can build them generically.
+
+    A subclass holding the session releases it in `stop()`, which is
+    idempotent and also registered with `on_shutdown` while the
+    session is open. `stop()` runs when the tree stops, and when the
+    last interface child is removed: nothing uses the session any
+    more. Interface children are detached once the adapter stopped,
+    and a later summon reopens the session.
     """
 
     def __init__(self, name, info=None, descriptor=None):
@@ -103,9 +110,24 @@ class Adapter(Node):
             return f"{d.vendor_id:04x}:{d.product_id:04x}"
         return ""
 
-    async def close(self):
-        """Release resources. Override in subclass."""
-        pass
+    async def stop_tree(self):
+        """Stop, then detach the interface children: they ride on the
+        session `stop()` just closed, so a later summon must build
+        fresh ones."""
+        await super().stop_tree()
+        for child in reversed(list(self.children)):
+            await super().child_remove(child)
+
+    async def child_remove(self, child):
+        await super().child_remove(child)
+        if not self.children:
+            await self.stop_tree()
+
+    async def child_evict(self, child):
+        """Remove `child` to make room for a mutually exclusive one
+        being spawned: the session stays open for the newcomer even
+        when `child` was the last one."""
+        await super().child_remove(child)
 
 
 class Enumerator:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 
 from ...db import NoMatch
+from ...lifecycle import cancel_shutdown, on_shutdown
 from ..model import Adapter, AdapterInfo, adapter_db
 from . import protocol
 from .transport import XDS110Transport
@@ -115,6 +116,7 @@ class XDS110Adapter(Adapter):
 
         self.__device = device
         self.__transport = transport
+        on_shutdown(self.stop)
         self.version = version
         self.__delay_count = delay_count
 
@@ -163,17 +165,20 @@ class XDS110Adapter(Adapter):
                 initial_delay_count=self.__delay_count, name="jtag")
         raise NoMatch("interface", name)
 
-    async def close(self):
-        if self.__transport is None:
+    async def stop(self):
+        cancel_shutdown(self.stop)
+        transport, self.__transport = self.__transport, None
+        if transport is None:
             return
         try:
-            await self.__transport.command(
+            await transport.command(
                 bytes([protocol.Opcode.XDS_DISCONNECT]),
                 response_payload_size=protocol.ERROR_CODE_LEN)
         except Exception as exc:
             self.logger.debug("XDS_DISCONNECT failed (ignored): %s", exc)
-        await self.__transport.close()
-        self.__device.handle.close()
+        await transport.close()
+        device, self.__device = self.__device, None
+        device.handle.close()
 
 
 for _info in _INFOS:

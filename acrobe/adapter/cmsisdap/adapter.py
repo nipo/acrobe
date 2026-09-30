@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 
 from ...db import NoMatch
+from ...lifecycle import cancel_shutdown, on_shutdown
 from ..model import Adapter, AdapterInfo, adapter_db
 from . import protocol
 from .transport import CmsisDapTransport
@@ -92,6 +93,7 @@ class CmsisDapAdapter(Adapter):
                     packet_size, packet_count)
 
         self.__transport = transport
+        on_shutdown(self.stop)
         self.vendor_name = vendor_name
         self.product_name = product_name
         self.fw_version = fw_version
@@ -149,10 +151,12 @@ class CmsisDapAdapter(Adapter):
             raise NoMatch("interface", name)
         raise NoMatch("interface", name)
 
-    async def close(self):
-        if self.__transport is None:
+    async def stop(self):
+        cancel_shutdown(self.stop)
+        transport, self.__transport = self.__transport, None
+        if transport is None:
             return
-        await self.__transport.close()
+        await transport.close()
 
 
 for _info in _CMSIS_DAP_INFOS:

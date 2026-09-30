@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 
 from ...db import NoMatch
+from ...lifecycle import cancel_shutdown, on_shutdown
 from ..model import Adapter, AdapterInfo, adapter_db
 from .transport import StLinkTransport
 from . import protocol
@@ -74,6 +75,7 @@ class StLinkAdapter(Adapter):
 
         self.__device = device
         self.__transport = transport
+        on_shutdown(self.stop)
         self.version = version
 
     async def child_spawn(self, name):
@@ -86,11 +88,14 @@ class StLinkAdapter(Adapter):
             return StLinkSwDp(self.__transport)
         raise NoMatch("interface", name)
 
-    async def close(self):
-        if self.__transport is None:
+    async def stop(self):
+        cancel_shutdown(self.stop)
+        transport, self.__transport = self.__transport, None
+        if transport is None:
             return
-        await self.__transport.close()
-        self.__device.handle.close()
+        await transport.close()
+        device, self.__device = self.__device, None
+        device.handle.close()
 
 
 for _info in _STLINK_INFOS:

@@ -97,11 +97,11 @@ class IceStickAdapter(Adapter):
             return await self.__spawn_io_spi()
         raise NoMatch("interface", name)
 
-    async def close(self):
+    async def stop(self):
+        cancel_shutdown(self.stop)
         for channel in list(self.__channels):
             await self.__channel_release(channel)
         if self.__device is not None:
-            cancel_shutdown(self.close)
             self.__device.handle.close()
             self.__device = None
 
@@ -156,7 +156,7 @@ class IceStickAdapter(Adapter):
     async def __ensure_device(self):
         if self.__device is None:
             self.__device = self.descriptor.open()
-            on_shutdown(self.close)
+            on_shutdown(self.stop)
         return self.__device
 
     async def __mpsse_engine(self, channel):
@@ -184,7 +184,7 @@ class IceStickAdapter(Adapter):
         if node is not None:
             self.logger.note("Releasing %s to free channel %d", name, channel)
             if node.parent is self:
-                await self.child_remove(node)
+                await self.child_evict(node)
             else:
                 await node.stop_tree()
         if closeable is not None:

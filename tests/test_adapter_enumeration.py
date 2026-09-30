@@ -5,6 +5,8 @@ import pytest
 
 import acrobe.adapter  # noqa: F401 — fires adapter registrations
 from acrobe.adapter.ftdi.generic import GenericFtdiAdapter
+from acrobe.db import NoMatch
+from acrobe.node import Node
 from acrobe.adapter.model import (
     Adapter, Enumerator, HwRoot, built_hw_root, get_hw_root,
     reset_hw_root_for_tests,
@@ -109,6 +111,78 @@ async def test_stop_cancels_pending_discovery():
     task = root.request_discovery()
     await root.stop_tree()
     assert task.cancelled()
+
+
+class _SessionAdapter(Adapter):
+    """Opens a session on first spawn, releases it in stop()."""
+
+    def __init__(self, name):
+        super().__init__(name)
+        self.opens = 0
+        self.releases = 0
+        self.session = None
+
+    async def child_spawn(self, name):
+        if name not in ("jtag", "swd"):
+            raise NoMatch("interface", name)
+        if self.session is None:
+            self.opens += 1
+            self.session = object()
+        return Node(name)
+
+    async def stop(self):
+        if self.session is not None:
+            self.releases += 1
+            self.session = None
+
+
+async def _session_root():
+    root = HwRoot()
+    adapter = _SessionAdapter("probe")
+    root.child_add(adapter)
+    await root.ensure_started()
+    return root, adapter
+
+
+async def test_removing_last_child_releases_session():
+    root, adapter = await _session_root()
+    jtag = await root.child_summon("probe", "jtag")
+    await adapter.child_remove(jtag)
+    assert adapter.releases == 1
+    assert not adapter.started
+    assert adapter.parent is root
+
+    await root.child_summon("probe", "jtag")
+    assert adapter.opens == 2
+    assert adapter.started
+
+
+async def test_removing_one_of_two_children_keeps_session():
+    root, adapter = await _session_root()
+    jtag = await root.child_summon("probe", "jtag")
+    await root.child_summon("probe", "swd")
+    await adapter.child_remove(jtag)
+    assert adapter.releases == 0
+    assert adapter.started
+
+
+async def test_evicting_last_child_keeps_session():
+    root, adapter = await _session_root()
+    jtag = await root.child_summon("probe", "jtag")
+    await adapter.child_evict(jtag)
+    assert adapter.releases == 0
+    assert adapter.started
+    assert adapter.children == []
+
+
+async def test_stopped_adapter_detaches_children():
+    root, adapter = await _session_root()
+    jtag = await root.child_summon("probe", "jtag")
+    await root.stop_tree()
+    assert adapter.releases == 1
+    assert not jtag.started
+    assert jtag.parent is None
+    assert adapter.parent is root
 
 
 def test_get_hw_root_singleton():

@@ -533,9 +533,6 @@ class TtyAdapter(Adapter):
             return port
         raise NoMatch("interface", name)
 
-    async def close(self):
-        pass
-
 
 def _list_tty_paths() -> list[tuple[str, str]]:
     """Return list of (component_name, device_path)."""

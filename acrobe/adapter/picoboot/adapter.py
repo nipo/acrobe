@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 
 from ...db import NoMatch
+from ...lifecycle import cancel_shutdown, on_shutdown
 from ...component.raspberry.picoboot_transport import (
     PicobootUsbTransport, USB_VID_RPI, USB_PID_RP2040_BOOTSEL,
 )
@@ -55,6 +56,7 @@ class PicobootAdapter(Adapter):
         self.__transport = await PicobootUsbTransport.from_device(
             device, logger=logger)
         self.__device = device
+        on_shutdown(self.stop)
 
     async def child_spawn(self, name):
         await self.__ensure_open()
@@ -63,11 +65,14 @@ class PicobootAdapter(Adapter):
             return Picoboot(self.__transport, name="picoboot")
         raise NoMatch("interface", name)
 
-    async def close(self):
-        if self.__transport is None:
+    async def stop(self):
+        cancel_shutdown(self.stop)
+        transport, self.__transport = self.__transport, None
+        if transport is None:
             return
-        await self.__transport.close()
-        self.__device.handle.close()
+        await transport.close()
+        device, self.__device = self.__device, None
+        device.handle.close()
 
 
 for _info in _INFOS:

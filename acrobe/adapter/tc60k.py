@@ -217,7 +217,7 @@ class UsbAdapter(Adapter):
         self.device = device
         self.__interface = interface
         self.datagram = datagram
-        on_shutdown(self.close)
+        on_shutdown(self.stop)
 
     @staticmethod
     def __release_kernel(device, interface):
@@ -264,10 +264,10 @@ class UsbAdapter(Adapter):
             return None
         return out_address, in_address, mps
 
-    async def close(self):
+    async def stop(self):
+        cancel_shutdown(self.stop)
         if self.datagram is None:
             return
-        cancel_shutdown(self.close)
         await self.datagram.stop()
         try:
             self.device.handle.releaseInterface(self.__interface)

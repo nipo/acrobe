@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from ...db import NoMatch
+from ...lifecycle import cancel_shutdown, on_shutdown
 from ..model import Adapter, AdapterInfo, adapter_db
 from . import protocol
 from .transport import JLinkTransport
@@ -149,6 +150,7 @@ class JLinkAdapter(Adapter):
 
         self.__device = device
         self.__transport = transport
+        on_shutdown(self.stop)
         self.firmware_version = firmware_version
         self.hardware_version = hardware_version
         self.caps = caps
@@ -166,20 +168,23 @@ class JLinkAdapter(Adapter):
             return JLinkSwdInterface(self.__transport, name="swd")
         raise NoMatch("interface", name)
 
-    async def close(self):
-        if self.__transport is None:
+    async def stop(self):
+        cancel_shutdown(self.stop)
+        transport, self.__transport = self.__transport, None
+        if transport is None:
             return
         if self.__register_handle is not None:
             try:
-                await self.__transport.register(False, self.__register_handle)
+                await transport.register(False, self.__register_handle)
             except Exception:
                 # Best-effort: a failed unregister shouldn't prevent
                 # USB cleanup. The firmware times out stale handles
                 # on its own.
                 pass
             self.__register_handle = None
-        await self.__transport.close()
-        self.__device.handle.close()
+        await transport.close()
+        device, self.__device = self.__device, None
+        device.handle.close()
 
 
 for _info in _JLINK_INFOS:
