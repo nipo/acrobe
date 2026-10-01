@@ -140,62 +140,120 @@ class JtagDpLowerer:
 
     Keeps track of select and pending reads where data is attached to
     subsequent DPACC or ACACC shifts.
+
+    A JTAG-DP acknowledges a faulted AP access as OK: the fault only
+    sets CTRL/STAT.STICKYERR, after which the DP ignores AP accesses.
+    So once the control bits of CTRL/STAT are known (the DP wrote it),
+    every batch ends, in the same scan, with a CTRL/STAT read and a
+    CTRL/STAT write clearing the sticky flags. Op results are held
+    until that read is back, and the whole batch fails if STICKYERR
+    was set.
     """
-    
+
     # Idle TCKs between consecutive APACC DR shifts.
     INTER_AP_RUN = 8
 
-    def __init__(self, version: int, tap: JtagDpTap):
+    # Stands for an upper future in the slots of the batch's own
+    # CTRL/STAT check.
+    CHECK = object()
+
+    def __init__(self, version: int, tap: JtagDpTap,
+                 ctrl_stat: int | None = None):
         self.version = version
         self.tap = tap
+        # CTRL/STAT control bits to write back when clearing the
+        # sticky flags, None until the DP wrote CTRL/STAT.
+        self.ctrl_stat = ctrl_stat
 
         self.last_select = None
 
         self.pending = None
 
+        # One [upper, result, error] slot per lower completion, in
+        # lowering order; upper is CHECK for the batch's own check.
+        self.__slots = []
+        self.__unsettled = 0
+        self.__lowering = True
+        self.__check = None
+
     # Future handling
-        
-    def chain_completion(self, upper: asyncio.Future, lower: asyncio.Future):
-        """
-        Hook `lower` future done callback to resolve `upper`
-        """
-        lower.add_done_callback(functools.partial(self.__completion_from_lower, upper))
 
-    def chain_data(self, upper: asyncio.Future, lower: asyncio.Future):
-        """Hook `lower` future done callback to resolve `upper` with
-        response data.
-        """
-        lower.add_done_callback(functools.partial(self.__data_from_lower, upper))
+    def __slot(self, upper):
+        slot = [upper, None, None]
+        self.__slots.append(slot)
+        self.__unsettled += 1
+        return slot
 
-    def __completion_from_lower(self, upper: asyncio.Future, lower: asyncio.Future):
+    def __settled(self):
+        self.__unsettled -= 1
+        if not self.__unsettled and not self.__lowering:
+            self.__finalize()
+
+    def chain_completion(self, upper, lower: asyncio.Future):
+        """
+        Hook `lower` future done callback to settle `upper`
+        """
+        lower.add_done_callback(functools.partial(
+            self.__completion_from_lower, self.__slot(upper)))
+
+    def chain_data(self, upper, lower: asyncio.Future):
+        """Hook `lower` future done callback to settle `upper` with
+        response data. Returns the slot settled.
+        """
+        slot = self.__slot(upper)
+        lower.add_done_callback(functools.partial(
+            self.__data_from_lower, slot))
+        return slot
+
+    def __completion_from_lower(self, slot, lower: asyncio.Future):
         """
         Actual implementation for chain_completion()
         """
         try:
-            upper.set_result(lower.result())
+            slot[1] = lower.result()
         except Exception as e:
-            upper.set_exception(e)
+            slot[2] = e
+        self.__settled()
 
-    def __data_from_lower(self, upper: asyncio.Future, lower: asyncio.Future):
+    def __data_from_lower(self, slot, lower: asyncio.Future):
         """
         Actual implementation for chain_data()
         """
         try:
             tdo = lower.result()
         except Exception as e:
-            upper.set_exception(e)
-            return
-        ack, data = _Wire.unpack(tdo)
-        if ack == _Wire.ACK_WAIT:
-            upper.set_exception(dpmod.DpAccessFailure("wait"))
-        elif (self.version == 0 and ack == _Wire.ACK_OK_FAULT) \
-             or ack == _Wire.ACK_V1_OK:
-            upper.set_result(data)
+            slot[2] = e
         else:
-            upper.set_exception(dpmod.DpAccessFailure("fault"))
+            ack, data = _Wire.unpack(tdo)
+            if ack == _Wire.ACK_WAIT:
+                slot[2] = dpmod.DpAccessFailure("wait")
+            elif (self.version == 0 and ack == _Wire.ACK_OK_FAULT) \
+                 or ack == _Wire.ACK_V1_OK:
+                slot[1] = data
+            else:
+                slot[2] = dpmod.DpAccessFailure("fault")
+        self.__settled()
+
+    def __finalize(self):
+        error = None
+        if self.__check is not None:
+            stat, clear = self.__check
+            error = stat[2] or clear[2]
+            if error is None and stat[1] & dpmod.Dp.STICKYERR:
+                error = dpmod.DpAccessFailure(
+                    f"sticky error (CTRL/STAT 0x{stat[1]:08x})")
+        for upper, result, exc in self.__slots:
+            if upper is None or upper is self.CHECK or upper.done():
+                continue
+            if error is not None:
+                upper.set_exception(error)
+            elif exc is not None:
+                upper.set_exception(exc)
+            else:
+                upper.set_result(result)
 
     # Low-level shifts
-            
+
     def dp_access(self, read: bool, address: int, data: int):
         """
         Low-level DPACC shift, no upper address update.
@@ -203,9 +261,11 @@ class JtagDpLowerer:
 
         acc = self.tap.DPACC(_Wire.pack(read, address, data),
                              read_tdo = self.pending is not None)
-        if self.pending:
-            self.chain_data(self.pending, acc)
+        if self.pending is not None:
+            slot = self.chain_data(self.pending, acc)
             self.pending = None
+            return slot
+        return None
 
     def ap_access(self, read: bool, address: int, data: int):
         """
@@ -220,7 +280,7 @@ class JtagDpLowerer:
         lower = self.tap.APACC(_Wire.pack(read, address, data),
                                read_tdo = self.pending is not None,
                                post_dr_run = self.INTER_AP_RUN)
-        if self.pending:
+        if self.pending is not None:
             self.chain_data(self.pending, lower)
             self.pending = None
 
@@ -263,30 +323,37 @@ class JtagDpLowerer:
         """
         In pending AP and DP reads, get one
         """
-        if self.pending:
+        if self.pending is not None:
             self.dp_access(True, dpmod.Dp.RDBUFF, 0)
 
     # Operations
-            
-    def run(self, op: dpmod.Run, pending: asyncio.Future):
+
+    def run(self, op: dpmod.Run, pending):
         """
         Lowers one Run operation and chains completion to pending
         """
-        self.chain_completion(pending, self.tap.run(op.cycles))
-            
-    def abort(self, op: dpmod.Abort, pending: asyncio.Future):
+        lower = self.tap.run(op.cycles)
+        if pending is not None:
+            self.chain_completion(pending, lower)
+
+    def abort(self, op: dpmod.Abort, pending):
         """
         Lowers one Abort operation and chains completion to pending
         """
         # ABORT IR + 35-bit DR shift; data left-shifted by 3
         # into the data field (RnW + addr bits are ignored).
-        self.chain_completion(pending, self.tap.ABORT_IR(op.what << 3, read_tdo=False))
+        lower = self.tap.ABORT_IR(op.what << 3, read_tdo=False)
+        if pending is not None:
+            self.chain_completion(pending, lower)
         self.tap.run(self.INTER_AP_RUN)
 
     def dp_read_write(self, op, pending):
         address = op.addr
         read = isinstance(op, dpmod.DpRead)
         data = 0 if read else op.data
+
+        if not read and address == dpmod.Dp.CTRL_STAT:
+            self.ctrl_stat = data & ~dpmod.Dp.STICKY_MASK
 
         self.dp_select(address, read)
         self.dp_access(read, address, data)
@@ -300,7 +367,22 @@ class JtagDpLowerer:
         self.ap_select(address)
         self.ap_access(read, address, data)
         self.pending = pending
-        
+
+    def sticky_check(self):
+        """
+        Read CTRL/STAT, then clear its sticky flags, keeping the
+        control bits last written.
+        """
+        ctrl_stat = dpmod.Dp.CTRL_STAT
+        self.dp_select(ctrl_stat, True)
+        self.dp_access(True, ctrl_stat, 0)
+        self.pending = self.CHECK
+        stat = self.dp_access(False, ctrl_stat,
+                              self.ctrl_stat | dpmod.Dp.STICKY_MASK)
+        self.pending = self.CHECK
+        clear = self.dp_access(True, dpmod.Dp.RDBUFF, 0)
+        self.__check = (stat, clear)
+
     def process(self, batch):
         """
         Perform the lowering for one batch
@@ -322,9 +404,16 @@ class JtagDpLowerer:
                 self.dp_read_write(op, result)
                 continue
 
-            result.set_exception(
-                TypeError(f"Unhandled DP op: {type(op).__name__}"))
-        self.flush()
+            slot = [result, None,
+                    TypeError(f"Unhandled DP op: {type(op).__name__}")]
+            self.__slots.append(slot)
+        if self.ctrl_stat is not None:
+            self.sticky_check()
+        else:
+            self.flush()
+        self.__lowering = False
+        if not self.__unsettled:
+            self.__finalize()
 
 # --- DP overlay ----------------------------------------------------
 
@@ -340,12 +429,16 @@ class JtagDp(dpmod.Dp):
                 f"JTAG-DP protocol version must be 0 or 1, "
                 f"got {jtag_protocol_version!r}")
         self.__jtag_protocol_version = jtag_protocol_version
-        
+        self.__ctrl_stat: int | None = None
+
     async def flush_ops(self, batch):
         """Lower a DP/AP batch to JTAG-DP wire shifts."""
 
         try:
-            JtagDpLowerer(self.__jtag_protocol_version, self.parent).process(batch)
+            lowerer = JtagDpLowerer(self.__jtag_protocol_version,
+                                    self.parent, self.__ctrl_stat)
+            lowerer.process(batch)
+            self.__ctrl_stat = lowerer.ctrl_stat
         except Exception as e:
             import traceback
             traceback.print_exc()

@@ -391,6 +391,8 @@ class _DpSim(JtagInterface):
         self._ctrl_stat = 0  # power-up bits set on CDBGPWRUPREQ/CSYSPWRUPREQ
         # AP register file: ap_regs[(base, register_offset)] -> value.
         self._ap_regs: dict[tuple[int, int], int] = {}
+        # AP addresses whose access faults, setting STICKYERR.
+        self.faulting: set[int] = set()
 
     def install_ap(self, base: int, registers: dict[int, int]):
         """Place an AP at ``base`` with ``registers`` (offset -> value)."""
@@ -474,6 +476,13 @@ class _DpSim(JtagInterface):
             data = (dr >> 3) & 0xffffffff
             # ADIv6 view: full system address = SELECT[31:4]<<0 | wire<<2.
             full_addr = (self._select & 0xFFFFFFF0) | (wire_addr << 2)
+            # A faulted access, and any AP access while STICKYERR is
+            # set, still acknowledges OK_FAULT, with no data.
+            if full_addr in self.faulting:
+                self._ctrl_stat |= Dp.STICKYERR
+            if self._ctrl_stat & Dp.STICKYERR:
+                self._last_response = (_Wire.ACK_OK_FAULT, 0)
+                return
             # Locate the owning AP by base (lowest base <= full_addr that
             # has any installed register; APs occupy a 4 KB region).
             ap_base = self._ap_base_for(full_addr)
@@ -519,8 +528,10 @@ class _DpSim(JtagInterface):
         if wire_offset == 0x08:
             self._select = data
         elif wire_offset == 0x04 and bank == 0:
-            # Write to CTRL/STAT — set ACKs for any REQs immediately.
-            self._ctrl_stat = data
+            # Write to CTRL/STAT — sticky flags are write-1-to-clear;
+            # set ACKs for any REQs immediately.
+            sticky = self._ctrl_stat & Dp.STICKY_MASK & ~data
+            self._ctrl_stat = (data & ~Dp.STICKY_MASK) | sticky
             if data & Dp.CDBGPWRUPREQ:
                 self._ctrl_stat |= Dp.CDBGPWRUPACK
             if data & Dp.CSYSPWRUPREQ:
@@ -698,3 +709,130 @@ class TestEndToEnd:
 
         v = await ap.reg_read(0x10)
         assert v == 0xcafebabe
+
+
+class TestStickyCheck:
+    """Once CTRL/STAT was written, every batch ends with a CTRL/STAT
+    read and a sticky clear, in the same scan, and fails as a whole
+    when STICKYERR was set."""
+
+    CONTROL = Dp.PWRUP_REQ_MASK
+
+    async def _armed(self):
+        """A DP that wrote CTRL/STAT, with its check passed."""
+        tap, dp = _make_dp()
+        ok = _Wire.ACK_OK_FAULT
+        # Write ack, CTRL/STAT, clear ack.
+        tap.queue_response(ok, 0)
+        tap.queue_response(ok, self.CONTROL)
+        tap.queue_response(ok, 0)
+        await dp.post(DpWrite(Dp.CTRL_STAT, self.CONTROL))
+        return tap, dp
+
+    @staticmethod
+    def _decode(shift):
+        return shift["tdi"] & 1, (shift["tdi"] >> 1) & 0x3, shift["tdi"] >> 3
+
+    @pytest.mark.asyncio
+    async def test_no_check_before_ctrl_stat_written(self):
+        tap, dp = _make_dp()
+        tap.queue_response(_Wire.ACK_OK_FAULT, 0x2ba01477)
+        await dp.post(DpRead(Dp.DPIDR))
+        # SELECT, DPIDR read, RDBUFF.
+        assert len(tap.shifts) == 3
+
+    @pytest.mark.asyncio
+    async def test_batch_ends_with_check(self):
+        tap, dp = await self._armed()
+        tail = tap.shifts[-3:]
+        assert all(sh["ir"] == JtagDpTap.DPACC.ir for sh in tail)
+        # CTRL/STAT read, CTRL/STAT write of control | sticky, RDBUFF.
+        assert self._decode(tail[0]) == (1, Dp.CTRL_STAT >> 2, 0)
+        assert self._decode(tail[1]) == (
+            0, Dp.CTRL_STAT >> 2, self.CONTROL | Dp.STICKY_MASK)
+        assert self._decode(tail[2])[:2] == (1, Dp.RDBUFF >> 2)
+
+    @pytest.mark.asyncio
+    async def test_check_rides_in_the_same_tap_batch(self):
+        tap, dp = await self._armed()
+        flushes = []
+        record = tap.flush_ops
+
+        async def counting(batch):
+            flushes.append(len(batch))
+            await record(batch)
+
+        tap.flush_ops = counting
+        for value in (0, 0, self.CONTROL, 0):
+            tap.queue_response(_Wire.ACK_OK_FAULT, value)
+        await asyncio.gather(dp.post(ApRead(0x0c)), dp.post(ApRead(0x0c)))
+        assert len(flushes) == 1
+
+    @pytest.mark.asyncio
+    async def test_sticky_error_fails_whole_batch(self):
+        tap, dp = await self._armed()
+        tap.shifts.clear()
+        # SELECT write (no TDO), AP read, AP read, then the check:
+        # the second AP read's shift carries the first read's data,
+        # the CTRL/STAT read carries the second's, the clear carries
+        # CTRL/STAT, RDBUFF carries the clear's ack.
+        ok = _Wire.ACK_OK_FAULT
+        tap.queue_response(ok, 0x11)
+        tap.queue_response(ok, 0x22)
+        tap.queue_response(ok, self.CONTROL | Dp.STICKYERR)
+        tap.queue_response(ok, 0)
+        first = dp.post(ApRead(0x0c))
+        second = dp.post(ApRead(0x0c))
+        results = await asyncio.gather(first, second, return_exceptions=True)
+        assert all(isinstance(r, DpAccessFailure) for r in results)
+        assert "sticky" in str(results[0])
+
+    @pytest.mark.asyncio
+    async def test_clean_check_passes_results(self):
+        tap, dp = await self._armed()
+        ok = _Wire.ACK_OK_FAULT
+        tap.queue_response(ok, 0x11)
+        tap.queue_response(ok, 0x22)
+        tap.queue_response(ok, self.CONTROL)
+        tap.queue_response(ok, 0)
+        results = await asyncio.gather(dp.post(ApRead(0x0c)),
+                                       dp.post(ApRead(0x0c)))
+        assert results == [0x11, 0x22]
+
+
+class TestStickyEndToEnd:
+    @staticmethod
+    async def _started_dp(sim):
+        chain = Chain()
+        sim.child_add(chain)
+        await chain.discover()
+        tap = chain.children[0]
+        await tap.start_tree()
+        return [c for c in tap.children if isinstance(c, JtagDp)][0]
+
+    @pytest.mark.asyncio
+    async def test_faulted_ap_read_raises_then_recovers(self):
+        from acrobe.component.arm.ap import Ap
+
+        sim = _DpSim(idcode=0x4BA00477, dpidr=0x4BA02477)
+        sim.install_ap(base=0x01000000, registers={
+            Ap.IDR: 0x04770002, 0x10: 0xcafebabe})
+        sim.faulting.add(0x01000020)
+        dp = await self._started_dp(sim)
+        ap = [c for c in dp.children if isinstance(c, Ap)][0]
+
+        with pytest.raises(DpAccessFailure, match="sticky"):
+            await ap.reg_read(0x20)
+        assert not sim._ctrl_stat & Dp.STICKYERR
+        assert await ap.reg_read(0x10) == 0xcafebabe
+
+    @pytest.mark.asyncio
+    async def test_start_recovers_from_sticky_dp(self):
+        from acrobe.component.arm.ap import Ap
+
+        sim = _DpSim(idcode=0x4BA00477, dpidr=0x4BA02477)
+        sim.install_ap(base=0x01000000, registers={Ap.IDR: 0x04770002})
+        sim._ctrl_stat = Dp.STICKYERR
+        dp = await self._started_dp(sim)
+        assert [c.base for c in dp.children if isinstance(c, Ap)] \
+            == [0x01000000]
