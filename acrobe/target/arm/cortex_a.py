@@ -109,6 +109,23 @@ class CortexACore(ArmCore):
         await self.debug.execute(A32.dsb())
         await self.debug.execute(A32.isb())
 
+    async def dcache_clean_invalidate(self):
+        """Clean and invalidate the level 1 data cache by set/way."""
+        await self.halt()
+        await self.debug.set_execute(A32.mcr(15, 2, 0, 0, 0, 0), 0)  # CSSELR
+        await self.debug.execute(A32.isb())
+        ccsidr = await self.debug.execute_get(A32.mrc(15, 1, 0, 0, 0, 0))
+        line_shift = (ccsidr & 7) + 4
+        ways = ((ccsidr >> 3) & 0x3ff) + 1
+        sets = ((ccsidr >> 13) & 0x7fff) + 1
+        way_shift = 32 - (ways - 1).bit_length()
+        for way in range(ways):
+            for index in range(sets):
+                await self.debug.set_execute(
+                    A32.mcr(15, 0, 0, 7, 14, 2),                  # DCCISW
+                    way << way_shift | index << line_shift)
+        await self.debug.execute(A32.dsb())
+
     async def resume(self, *, allow_interrupts=True):
         """A breakpoint on the resume address would hit again before
         the instruction executes, step over it first."""
@@ -141,7 +158,7 @@ class CortexACore(ArmCore):
         self.__stepping = True
         try:
             await super().resume()
-            if not await self.__wait_halted(self.STEP_TIMEOUT):
+            if not await self.wait_halted(self.STEP_TIMEOUT):
                 await self.debug_halt()
             await self.halted_context()
         finally:
@@ -151,7 +168,7 @@ class CortexACore(ArmCore):
             for index in masked:
                 await self.__breakpoint_program(index)
 
-    async def __wait_halted(self, timeout: float) -> bool:
+    async def wait_halted(self, timeout: float) -> bool:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while not await self.debug_halted():

@@ -246,3 +246,23 @@ async def test_resume_steps_over_breakpoint_at_pc():
     await core.resume()
     assert debug.pc == 0x2004 and not debug.halted
     assert list(debug.breakpoints) == [0]
+
+
+async def test_dcache_clean_invalidate_walks_sets_and_ways():
+    debug = FakeV7Debug()
+    core = CortexACore("cpu", debug)
+    issued = []
+    execute = debug.execute
+
+    async def record(instr):
+        if instr == A32.mcr(15, 0, 0, 7, 14, 2):
+            issued.append(debug.regs[0])
+        elif instr == A32.mrc(15, 1, 0, 0, 0, 0):
+            # 4 ways, 2 sets, 32-byte lines
+            debug.regs[0] = 1 << 13 | 3 << 3 | 1
+            return
+        await execute(instr)
+    debug.execute = record
+    await core.dcache_clean_invalidate()
+    assert sorted(issued) == sorted(
+        way << 30 | index << 5 for way in range(4) for index in range(2))
