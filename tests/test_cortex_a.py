@@ -20,6 +20,7 @@ class FakeV7Debug:
         self.memory = {}
         self.executed = []
         self.abort_at = None
+        self.sctlr = 0x00c5187d
 
     async def dscr(self):
         return Dscr(halted=self.halted, moe=MethodOfEntry.HALT_REQUEST)
@@ -49,6 +50,10 @@ class FakeV7Debug:
             self.regs[0] = self.pc + (4 if Psr(self.cpsr).thumb else 8)
         elif instr == A32.mov(A32.PC, 0):
             self.pc = self.regs[0] & ~1
+        elif instr == A32.mrc(15, 0, 0, 1, 0, 0):
+            self.regs[0] = self.sctlr
+        elif instr == A32.mcr(15, 0, 0, 1, 0, 0):
+            self.sctlr = self.regs[0]
         elif instr == A32.add_imm(0, 0, 32):
             self.regs[0] += 32
 
@@ -123,3 +128,11 @@ async def test_abort_restores_mode():
     with pytest.raises(CortexAMemoryAbort):
         await core.mem_read(0x4000, 4)
     assert Psr(debug.cpsr).mode == Mode.SYS
+
+
+async def test_caches_disable():
+    debug = FakeV7Debug()
+    core = CortexACore("cpu", debug)
+    await core.caches_disable()
+    assert debug.sctlr == 0x00c50078
+    assert A32.mcr(15, 0, 0, 8, 7, 0) in debug.executed

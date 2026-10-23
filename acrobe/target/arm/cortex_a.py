@@ -24,6 +24,11 @@ class CortexACore(ArmCore):
 
     CACHE_LINE = 32
 
+    SCTLR_M = 1 << 0
+    SCTLR_C = 1 << 2
+    SCTLR_Z = 1 << 11
+    SCTLR_I = 1 << 12
+
     __HALT_CAUSES = {
         MethodOfEntry.HALT_REQUEST: HaltCause.DEBUGGER,
         MethodOfEntry.EXTERNAL: HaltCause.DEBUGGER,
@@ -70,6 +75,20 @@ class CortexACore(ArmCore):
         await self.debug.set_execute(A32.mov(A32.PC, 0), pc)
         for r in range(15):
             await self.debug.reg_set(r, context[r])
+
+    async def caches_disable(self):
+        """Turn the MMU, caches and branch prediction off, then drop
+        stale instruction-side state. Dirty data lines are left in
+        the disabled cache."""
+        await self.halt()
+        sctlr = await self.debug.execute_get(A32.mrc(15, 0, 0, 1, 0, 0))
+        sctlr &= ~(self.SCTLR_M | self.SCTLR_C | self.SCTLR_Z | self.SCTLR_I)
+        await self.debug.set_execute(A32.mcr(15, 0, 0, 1, 0, 0), sctlr)
+        await self.debug.execute(A32.mcr(15, 0, 0, 7, 5, 0))   # ICIALLU
+        await self.debug.execute(A32.mcr(15, 0, 0, 7, 5, 6))   # BPIALL
+        await self.debug.execute(A32.mcr(15, 0, 0, 8, 7, 0))   # TLBIALL
+        await self.debug.execute(A32.dsb())
+        await self.debug.execute(A32.isb())
 
     async def step(self):
         raise NotImplementedError("Single step")
