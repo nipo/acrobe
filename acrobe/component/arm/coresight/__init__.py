@@ -29,3 +29,4 @@ from . import stm             # noqa: F401
 from . import tmc             # noqa: F401
 from . import tpiu            # noqa: F401
 from . import tsgen           # noqa: F401
+from . import v7_debug        # noqa: F401

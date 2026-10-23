@@ -1,0 +1,254 @@
+"""ARMv7-A/R memory-mapped processor debug (v7 Debug).
+
+Halting debug through DBGDRCR, instruction execution through
+DBGITR and data exchange through the DCC registers DBGDTRRX /
+DBGDTRTX. Core registers and memory are reached by executing
+instructions in Debug state; this component only provides those
+primitives, they all clobber core registers."""
+
+from __future__ import annotations
+
+import asyncio
+import enum
+
+from ....bitfield import Bitfield, BooleanField, EnumField, Field
+from ....part_id import PartId
+from ..a32 import A32
+from .dbg import Dbg
+from .model import MemoryMappedComponent
+
+
+class MethodOfEntry(enum.IntEnum):
+    HALT_REQUEST = 0x0
+    BREAKPOINT = 0x1
+    ASYNC_WATCHPOINT = 0x2
+    BKPT = 0x3
+    EXTERNAL = 0x4
+    VECTOR_CATCH = 0x5
+    OS_UNLOCK = 0x8
+    SYNC_WATCHPOINT = 0xa
+
+
+class ExtDccMode(enum.IntEnum):
+    NON_BLOCKING = 0
+    STALL = 1
+    FAST = 2
+
+
+class Dscr(Bitfield):
+    halted = BooleanField(0)
+    restarted = BooleanField(1)
+    moe = EnumField(2, 4, MethodOfEntry)
+    sdabort_l = BooleanField(6)
+    adabort_l = BooleanField(7)
+    und_l = BooleanField(8)
+    dbgack = BooleanField(10)
+    intdis = BooleanField(11)
+    udccdis = BooleanField(12)
+    itren = BooleanField(13)
+    hdbgen = BooleanField(14)
+    mdbgen = BooleanField(15)
+    spiddis = BooleanField(16)
+    spniddis = BooleanField(17)
+    ns = BooleanField(18)
+    adadiscard = BooleanField(19)
+    extdccmode = EnumField(20, 2, ExtDccMode)
+    instrcompl_l = BooleanField(24)
+    pipeadv = BooleanField(25)
+    txfull_l = BooleanField(26)
+    rxfull_l = BooleanField(27)
+    txfull = BooleanField(29)
+    rxfull = BooleanField(30)
+    all = Field(0, 32)
+
+
+class Drcr(Bitfield):
+    halt = BooleanField(0)
+    restart = BooleanField(1)
+    clear_sticky_exceptions = BooleanField(2)
+    clear_sticky_pipeline_advance = BooleanField(3)
+    cancel_bus_requests = BooleanField(4)
+
+
+class Didr(Bitfield):
+    revision = Field(0, 4)
+    variant = Field(4, 4)
+    version = Field(16, 4)
+    ctx_cmps = Field(20, 4)
+    brps = Field(24, 4)
+    wrps = Field(28, 4)
+
+
+class Prsr(Bitfield):
+    powered_up = BooleanField(0)
+    sticky_powerdown = BooleanField(1)
+    reset = BooleanField(2)
+    sticky_reset = BooleanField(3)
+
+
+class V7DebugAbort(IOError):
+    pass
+
+
+@MemoryMappedComponent.db.register(PartId.from_idcode(0xC09477))
+class V7Debug(Dbg):
+    FRIENDLY_NAME = "Cortex-A9 Debug"
+
+    DIDR = 0x000
+    WFAR = 0x018
+    VCR = 0x01c
+    DTRRX = 0x080
+    ITR = 0x084
+    DSCR = 0x088
+    DTRTX = 0x08c
+    DRCR = 0x090
+    BVR = 0x100
+    BCR = 0x140
+    WVR = 0x180
+    WCR = 0x1c0
+    OSLAR = 0x300
+    PRSR = 0x314
+    LAR = 0xfb0
+
+    LAR_KEY = 0xc5acce55
+
+    TIMEOUT = 0.5
+
+    # DCC transfers between a core register and DBGDTRRX/DBGDTRTX.
+    @staticmethod
+    def dtr_to_reg(rt: int) -> int:
+        return A32.mrc(14, 0, rt, 0, 5, 0)
+
+    @staticmethod
+    def reg_to_dtr(rt: int) -> int:
+        return A32.mcr(14, 0, rt, 0, 5, 0)
+
+    async def dscr(self) -> Dscr:
+        return Dscr(await self.reg_read(self.DSCR))
+
+    async def didr(self) -> Didr:
+        return Didr(await self.reg_read(self.DIDR))
+
+    async def prsr(self) -> Prsr:
+        return Prsr(await self.reg_read(self.PRSR))
+
+    async def dscr_update(self, **fields):
+        dscr = await self.dscr()
+        for k, v in fields.items():
+            setattr(dscr, k, v)
+        await self.reg_write(self.DSCR, int(dscr))
+
+    async def drcr(self, **fields):
+        await self.reg_write(self.DRCR, int(Drcr(**fields)))
+
+    async def wait_dscr(self, predicate, timeout: float | None = None) -> Dscr:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (self.TIMEOUT if timeout is None else timeout)
+        while True:
+            dscr = await self.dscr()
+            if predicate(dscr):
+                return dscr
+            if loop.time() > deadline:
+                raise TimeoutError(f"{self.name}: DSCR stuck at {dscr}")
+
+    async def unlock(self):
+        await self.reg_write(self.LAR, self.LAR_KEY)
+        await self.reg_write(self.OSLAR, 0)
+
+    # Run control
+
+    async def halt(self) -> Dscr:
+        await self.drcr(halt=True)
+        return await self.wait_dscr(lambda d: d.halted)
+
+    async def restart(self) -> Dscr:
+        await self.dscr_update(itren=False)
+        await self.drcr(clear_sticky_exceptions=True, restart=True)
+        return await self.wait_dscr(lambda d: d.restarted)
+
+    async def enter(self) -> Dscr:
+        """Prepare a halted core for instruction execution: enable
+        the ITR, and select non-blocking DCC mode with imprecise
+        aborts discarded so an abort can't wedge the core."""
+        await self.dscr_update(itren=True, adadiscard=True,
+                               extdccmode=ExtDccMode.NON_BLOCKING)
+        return await self.dscr()
+
+    # Instruction execution
+
+    async def execute(self, instr: int) -> Dscr:
+        await self.reg_write(self.ITR, instr)
+        dscr = await self.wait_dscr(lambda d: d.instrcompl_l)
+        if dscr.sdabort_l or dscr.und_l:
+            await self.drcr(clear_sticky_exceptions=True)
+            raise V7DebugAbort(
+                f"{self.name}: {instr:#010x} raised "
+                f"{'abort' if dscr.sdabort_l else 'undefined'}")
+        return dscr
+
+    async def dtr_write(self, value: int):
+        await self.reg_write(self.DTRRX, value & 0xffffffff)
+
+    async def dtr_read(self) -> int:
+        await self.wait_dscr(lambda d: d.txfull_l or d.txfull)
+        return await self.reg_read(self.DTRTX)
+
+    async def reg_get(self, rt: int) -> int:
+        """Read core register r0-r14 of the current mode."""
+        await self.execute(self.reg_to_dtr(rt))
+        return await self.dtr_read()
+
+    async def reg_set(self, rt: int, value: int):
+        """Write core register r0-r14 of the current mode."""
+        await self.dtr_write(value)
+        await self.execute(self.dtr_to_reg(rt))
+
+    async def execute_get(self, instr: int, rt: int = 0) -> int:
+        """Execute `instr`, then read `rt`."""
+        await self.execute(instr)
+        return await self.reg_get(rt)
+
+    async def set_execute(self, instr: int, value: int, rt: int = 0):
+        """Load `value` in `rt`, then execute `instr`."""
+        await self.reg_set(rt, value)
+        await self.execute(instr)
+
+    # Memory, through r0 as the address register
+
+    async def load_words(self, address: int, count: int) -> list[int]:
+        await self.reg_set(0, address)
+        values = []
+        for _ in range(count):
+            await self.execute(A32.ldc(14, 5, 0, 4, post_index=True))
+            values.append(await self.dtr_read())
+        return values
+
+    async def store_words(self, address: int, values):
+        await self.reg_set(0, address)
+        for v in values:
+            await self.dtr_write(v)
+            await self.execute(A32.stc(14, 5, 0, 4, post_index=True))
+
+    __LOADS = {1: A32.ldrb, 2: A32.ldrh}
+    __STORES = {1: A32.strb, 2: A32.strh}
+
+    async def load_units(self, address: int, width: int, count: int) -> list[int]:
+        """Load `width`-byte units through r1, one access each."""
+        if width == 4:
+            return await self.load_words(address, count)
+        await self.reg_set(0, address)
+        load = self.__LOADS[width]
+        values = []
+        for _ in range(count):
+            await self.execute(load(1, 0, width, post_index=True))
+            values.append(await self.reg_get(1))
+        return values
+
+    async def store_units(self, address: int, width: int, values):
+        if width == 4:
+            return await self.store_words(address, values)
+        await self.reg_set(0, address)
+        store = self.__STORES[width]
+        for v in values:
+            await self.reg_set(1, v)
+            await self.execute(store(1, 0, width, post_index=True))
