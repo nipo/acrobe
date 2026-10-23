@@ -104,9 +104,9 @@ class FakeArm9Debug:
 
 
 def test_access_plan():
-    assert Arm9Core.access_plan(0x1001, 9) == [(1, 1), (2, 1), (4, 1), (2, 1)]
-    assert Arm9Core.access_plan(0x1000, 4 * 15) == [(4, 14), (4, 1)]
-    assert Arm9Core.access_plan(0x1003, 1) == [(1, 1)]
+    assert Arm9Core.access_plan(0x1001, 9, 14) == [(1, 1), (2, 1), (4, 1), (2, 1)]
+    assert Arm9Core.access_plan(0x1000, 4 * 15, 14) == [(4, 14), (4, 1)]
+    assert Arm9Core.access_plan(0x1003, 1, 14) == [(1, 1)]
 
 
 async def test_halt_saves_corrected_context():
