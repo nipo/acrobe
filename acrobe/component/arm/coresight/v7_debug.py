@@ -223,8 +223,10 @@ class V7Debug(Dbg):
     async def enter(self) -> Dscr:
         """Prepare a halted core for instruction execution: enable
         the ITR, and select non-blocking DCC mode with imprecise
-        aborts discarded so an abort can't wedge the core."""
-        await self.dscr_update(itren=True, adadiscard=True,
+        aborts discarded so an abort can't wedge the core. Halting
+        debug mode is enabled too, breakpoints and watchpoints only
+        halt the core with it."""
+        await self.dscr_update(hdbgen=True, itren=True, adadiscard=True,
                                extdccmode=ExtDccMode.NON_BLOCKING)
         return await self.dscr()
 

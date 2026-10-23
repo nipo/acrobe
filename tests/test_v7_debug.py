@@ -18,7 +18,7 @@ class FakeA9:
     def __init__(self):
         self.regs = [0] * 15
         self.memory = {}
-        self.dscr = Dscr(halted=True, hdbgen=True, instrcompl_l=True)
+        self.dscr = Dscr(halted=True, instrcompl_l=True)
         self.rx = None
         self.tx = None
         self.executed = []
@@ -130,7 +130,7 @@ async def test_enter_enables_itr():
     bus = FakeA9()
     debug = make_debug(bus)
     await debug.enter()
-    assert bus.dscr.itren and bus.dscr.adadiscard
+    assert bus.dscr.hdbgen and bus.dscr.itren and bus.dscr.adadiscard
 
 
 async def test_breakpoint_disabled_while_reprogrammed():
