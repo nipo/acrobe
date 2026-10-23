@@ -23,6 +23,7 @@ import sys
 import asyncclick as click
 
 from . import base
+from ..component.cypress.boot_image import Fx3BootImage
 from ..node import Node, Readable, Addressable, Writable
 from ..vfs import FsRoot
 from ..memory_map import save_bin, save_hex
@@ -254,6 +255,19 @@ async def to_hex(resource, output, paged):
     if paged:
         m = m.paged(paged)
     save_hex(m, output)
+
+
+@loadable.command(name="to-fx3", help="Convert resource to an FX3 boot image")
+@click.argument("resource", type=base.RESOURCE)
+@click.argument("output", type=click.File("wb"))
+@click.option("--image-ctl", type=base.HEX, default=0x20,
+              help="bImageCTL byte: boot device size and speed")
+async def to_fx3(resource, output, image_ctl):
+    m = await resource.memory_map()
+    try:
+        output.write(Fx3BootImage.encode(m, image_ctl))
+    except ValueError as e:
+        raise click.ClickException(str(e))
 
 
 @loadable.command(name="to-c-blob", help="C blob file generator")
