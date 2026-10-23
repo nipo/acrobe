@@ -108,15 +108,14 @@ class JtagOpEncoder:
 
     def __emit_run(self, tms: BitString, tdi: BitString,
                    op: jtag.Run) -> None:
-        if self.__state == self.TLR:
-            # TLR -[0]-> RTI. The Run cycles count from RTI.
-            tms.append(0, 1)
-            tdi.append(0, 1)
+        # Each cycle is one TCK landing in RTI; from TLR or Update the
+        # first one is the edge entering it.
+        if self.__state == self.PAUSE:
+            # Pause -[1]-> Ex2 -[1]-> Update.
+            tms.append(0b11, 2)
+            tdi.append(0, 2)
             self.__state = self.RTI
-        elif self.__state == self.PAUSE:
-            # Pause -[1]-> Ex2 -[1]-> Update -[0]-> RTI.
-            tms.append(0b011, 3)
-            tdi.append(0, 3)
+        elif self.__state == self.TLR and op.cycles:
             self.__state = self.RTI
 
         if op.cycles:
@@ -224,11 +223,16 @@ class JtagOpEncoder:
             raise RuntimeError(
                 f"Shift op not preceded by Capture/Pause: state={self.__state}")
 
+        if op.post_run and isinstance(next_op, jtag.Shift):
+            raise ValueError("post_run on a Shift continued by another Shift")
+
         length = len(op.tdi)
         if length == 0:
             # Degenerate but legal: nothing to shift, just exit.
             self.__exit_shift(tms, tdi, next_op, last_tdi_bit=0,
                              skipped_payload=True)
+            if op.post_run:
+                self.__emit_run(tms, tdi, jtag.Run(op.post_run))
             return
 
         # Record the start offset before payload bits.
@@ -247,6 +251,8 @@ class JtagOpEncoder:
         last_tdi = int(op.tdi[length - 1])
         self.__exit_shift(tms, tdi, next_op, last_tdi_bit=last_tdi,
                          skipped_payload=False)
+        if op.post_run:
+            self.__emit_run(tms, tdi, jtag.Run(op.post_run))
 
     def __exit_shift(self, tms: BitString, tdi: BitString,
                      next_op, last_tdi_bit: int,
@@ -273,28 +279,15 @@ class JtagOpEncoder:
             self.__state = "_IN_SHIFT"
             return
 
-        if isinstance(next_op, (jtag.CaptureDr, jtag.CaptureIr, jtag.Run)):
-            # Shift -[1]-> Exit1 -[1]-> Update -[0]-> RTI (3 bits).
-            # First bit also carries the final TDI payload.
-            if skipped_payload:
-                # No payload bit fused; need a clean 3-bit exit. From
-                # Shift, TMS=1 takes us to Exit1.
-                tms.append(0b011, 3)
-                tdi.append(0, 3)
-            else:
-                tms.append(0b011, 3)
-                # First bit's TDI is the last payload bit; remaining
-                # two are don't-care.
-                tdi.append(last_tdi_bit | 0, 1)
-                tdi.append(0, 2)
-            self.__state = self.RTI
+        # Anything else rests in Pause: some TAPs (ARM9 scan chain 1)
+        # clock their core on each Run-Test/Idle TCK, so idle only
+        # happens through an explicit Run or ``post_run``.
+        # Shift -[1]-> Exit1 -[0]-> Pause.
+        if skipped_payload:
+            tms.append(0b01, 2)
+            tdi.append(0, 2)
         else:
-            # Default rest path: Shift -[1]-> Exit1 -[1]-> Pause.
-            if skipped_payload:
-                tms.append(0b01, 2)
-                tdi.append(0, 2)
-            else:
-                tms.append(0b01, 2)
-                tdi.append(last_tdi_bit, 1)
-                tdi.append(0, 1)
-            self.__state = self.PAUSE
+            tms.append(0b01, 2)
+            tdi.append(last_tdi_bit, 1)
+            tdi.append(0, 1)
+        self.__state = self.PAUSE
