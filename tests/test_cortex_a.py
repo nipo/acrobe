@@ -397,3 +397,13 @@ def test_register_catalog():
     assert core.gdb_empty_features == ("org.gnu.gdb.arm.neon",)
     with pytest.raises(ValueError):
         CortexACore("cpu", FakeV7Debug(), vfp_registers=16, neon=True)
+
+
+@pytest.mark.parametrize("sctlr,synced", [(0x00c5187d, True), (0x00c50078, False)])
+async def test_write_syncs_caches_only_when_enabled(sctlr, synced):
+    debug = FakeV7Debug()
+    debug.sctlr = sctlr
+    core = CortexACore("cpu", debug)
+    await core.halt()
+    await core.mem_write(0x2000, bytes(8))
+    assert (A32.mcr(15, 0, 0, 7, 5, 1) in debug.executed) == synced

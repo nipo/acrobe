@@ -539,7 +539,9 @@ class CortexACore(ArmCore):
             return []
 
         await self.__memory_access(address, len(data), transfer)
-        await self.__caches_sync(address, len(data))
+        sctlr = await self.debug.execute_get(A32.mrc(15, 0, 0, 1, 0, 0))
+        if sctlr & (self.SCTLR_C | self.SCTLR_I):
+            await self.__caches_sync(address, len(data))
 
     async def __caches_sync(self, address: int, size: int):
         """Make written data visible to instruction fetch: clean the
