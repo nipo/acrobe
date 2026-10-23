@@ -129,6 +129,11 @@ class Core(Node):
     async def watchpoint_list(self):
         return []
 
+    async def watchpoint_hit(self):
+        """The watchpoint the last halt is attributed to, as returned
+        by `watchpoint_add`, or None when unknown."""
+        return None
+
 
 class Debuggable(Node):
     """Run-control + memory access on a Target.

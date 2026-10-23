@@ -64,6 +64,9 @@ HALT_CAUSE_TAG = {
     HaltCause.UNKNOWN:     "T00",
 }
 
+# Z-packet watchpoint type to stop reply reason.
+WATCH_STOP_TAG = {2: "watch", 3: "rwatch", 4: "awatch"}
+
 # Stop reply for a user-initiated Ctrl-C / vCtrlC interrupt.
 # SIGINT (signal 02) is what GDB expects for that path — without it
 # GDB will not surface the stop to the user prompt. Bare S-form
@@ -137,7 +140,7 @@ class Responder:
         """Ctrl-C (0x03) byte received outside a packet."""
         await self.current_core.halt()
         # SIGINT, not SIGTRAP — see INTERRUPT_STOP_REPLY.
-        return INTERRUPT_STOP_REPLY
+        return self.__thread_stop(INTERRUPT_STOP_REPLY)
 
     # -- Handlers --------------------------------------------------
 
@@ -339,7 +342,7 @@ class Responder:
             # The wait ended because the user pressed Ctrl-C / sent
             # vCtrlC. SIGINT is the correct stop reply, regardless
             # of where execution happened to stop.
-            return INTERRUPT_STOP_REPLY
+            return self.__thread_stop(INTERRUPT_STOP_REPLY)
         return await self.__stop_reason()
 
     async def __poll_until_not_running(self):
@@ -538,7 +541,18 @@ class Responder:
 
     # -- Helpers ---------------------------------------------------
 
+    def __thread_stop(self, reply: bytes) -> bytes:
+        """Name the stopped thread when there are several, GDB
+        otherwise assumes the first one."""
+        if len(self.cores) < 2 or reply[:1] not in (b"S", b"T"):
+            return reply
+        tid = self.cores.index(self.current_core) + 1
+        return b"T" + reply[1:3] + f"thread:{tid:x};".encode("ascii") + reply[3:]
+
     async def __stop_reason(self) -> bytes:
+        return self.__thread_stop(await self.__stop_signal())
+
+    async def __stop_signal(self) -> bytes:
         try:
             state = await self.current_core.state()
         except NotImplementedError:
@@ -562,6 +576,11 @@ class Responder:
             cause = await self.current_core.halt_cause()
         except NotImplementedError:
             return b"T00"
+        if cause == HaltCause.WATCHPOINT:
+            hit = await self.current_core.watchpoint_hit()
+            if hit is not None:
+                kind, addr, _size = hit
+                return f"T05{WATCH_STOP_TAG[kind]}:{addr:x};".encode("ascii")
         tag = HALT_CAUSE_TAG.get(cause, STOP_REASON.get(state, "T00"))
         return tag.encode("ascii")
 

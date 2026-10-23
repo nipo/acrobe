@@ -207,6 +207,17 @@ class TestResponderQuery:
         assert resp == b"S05"
 
     @pytest.mark.asyncio
+    async def test_stop_reason_names_watchpoint(self, responder):
+        core = responder.current_core
+        core.halt_cause_value = HaltCause.WATCHPOINT
+        assert await responder.handle_packet(b"?") == b"T05watch:;"
+
+        async def hit():
+            return (3, 0x20000, 4)
+        core.watchpoint_hit = hit
+        assert await responder.handle_packet(b"?") == b"T05rwatch:20000;"
+
+    @pytest.mark.asyncio
     async def test_q_supported(self, responder):
         resp = await responder.handle_packet(b"qSupported:multiprocess+")
         assert b"PacketSize=" in resp
@@ -404,6 +415,17 @@ class TestResponderThreads:
         resp = await responder.handle_packet(b"Hg0")
         assert resp == b"OK"
         assert responder.current_core is c1
+
+    @pytest.mark.asyncio
+    async def test_stop_reply_names_thread(self):
+        c1 = FakeCore("c1")
+        c2 = FakeCore("c2")
+        c2.halt_cause_value = HaltCause.BREAKPOINT
+        responder = Responder(FakeDebuggable(cores=[c1, c2]))
+        assert await responder.handle_packet(b"?") == b"T05thread:1;"
+        await responder.handle_packet(b"Hg2")
+        assert await responder.handle_packet(b"?") == b"T05thread:2;hwbreak:;"
+        assert await responder.handle_interrupt() == b"T02thread:2;"
 
 
 class TestResponderMonitor:
