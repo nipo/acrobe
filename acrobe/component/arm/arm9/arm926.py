@@ -26,6 +26,18 @@ class Arm926DebugOverride(Bitfield):
     test_and_clean_all = BooleanField(19)
 
 
+class Arm926TcmRegion(Bitfield):
+    """CP15 c9 TCM region register. `size` reflects the macrocell
+    configuration and is read-only."""
+    enable = BooleanField(0)
+    size = Field(2, 4)
+    base = Field(12, 20)
+
+    @property
+    def size_bytes(self) -> int:
+        return 0 if self.size < 3 else 1 << (self.size + 9)
+
+
 class Arm926Cp15:
     """CP15 operations of an ARM926EJ-S, issued over scan chain 15
     so they need no instruction stuffing."""
@@ -78,3 +90,15 @@ class Arm926Cp15:
         control.dcache = False
         control.icache = False
         await self.control_set(control)
+
+    async def tcm_region(self, instruction: bool) -> Arm926TcmRegion:
+        return Arm926TcmRegion(
+            await self.debug.cp15_read(0, 9, 1, int(instruction)))
+
+    async def tcm_enable(self, instruction: bool, address: int):
+        region = await self.tcm_region(instruction)
+        if address & 0xfff:
+            raise ValueError(f"TCM base {address:#x} is not 4KiB aligned")
+        region.base = address >> 12
+        region.enable = True
+        await self.debug.cp15_write(0, 9, 1, int(instruction), int(region))

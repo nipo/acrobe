@@ -35,3 +35,16 @@ async def test_caches_disable_skips_clean_when_dcache_off():
     await Arm926Cp15(debug).caches_disable()
     assert ("r", 7, 14, 3) not in debug.log
     assert debug.cp15[(0, 1, 0, 0)] == 0x00050000
+
+
+async def test_tcm_enable_keeps_size():
+    debug = FakeCp15Debug(0)
+    debug.cp15[(0, 9, 1, 1)] = 0x14
+    cp15 = Arm926Cp15(debug)
+    await cp15.tcm_enable(True, 0)
+    assert debug.cp15[(0, 9, 1, 1)] == 0x15
+    debug.cp15[(0, 9, 1, 0)] = 0x10
+    await cp15.tcm_enable(False, 0x10000000)
+    assert debug.cp15[(0, 9, 1, 0)] == 0x10000011
+    region = await cp15.tcm_region(False)
+    assert region.size_bytes == 8192
