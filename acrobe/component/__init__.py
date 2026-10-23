@@ -19,4 +19,5 @@ from . import hdlc  # noqa: F401
 from .nsl import sld  # noqa: F401
 from .nsl import axi4_mm  # noqa: F401
 from .nsl import apb  # noqa: F401
+from .nsl import axi4lite_jtag  # noqa: F401
 from . import jtag_spi_bridge  # noqa: F401
