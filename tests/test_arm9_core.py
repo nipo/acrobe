@@ -81,30 +81,26 @@ class FakeArm9Debug:
         self.regs[0] += width
         return address
 
-    def __ok(self):
-        return done(DebugStatus(dbgack=True, syscomp=True))
+    async def load_words(self, count):
+        return await self.load_units(4, count)
 
-    def post_load_words(self, count):
-        return self.__ok(), self.post_load_units(4, count)[1]
+    async def store_words(self, values):
+        await self.store_units(4, values)
 
-    def post_store_words(self, values):
-        return self.post_store_units(4, values)[0]
-
-    def post_load_units(self, width, count):
+    async def load_units(self, width, count):
         out = []
         for _ in range(count):
             a = self.__access(width)
-            out.append(done(int.from_bytes(
+            out.append(int.from_bytes(
                 bytes(self.memory.get(a + i, 0) for i in range(width)),
-                "little")))
-        return [self.__ok() for _ in range(count)], out
+                "little"))
+        return out
 
-    def post_store_units(self, width, values):
+    async def store_units(self, width, values):
         for v in values:
             a = self.__access(width)
             for i, b in enumerate(v.to_bytes(width, "little")):
                 self.memory[a + i] = b
-        return [self.__ok() for _ in values]
 
 
 def test_access_plan():

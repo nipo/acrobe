@@ -154,10 +154,13 @@ class Arm9Lowerer:
                   upper, self.cp15_written)
 
     def debug_shift(self, op: DebugShift, upper):
+        # Each Run-Test/Idle TCK clocks the core once more, so chain 1
+        # shifts park in Pause-DR and only Update-DR advances the
+        # pipeline.
         self.select(ScanChain.DEBUG)
         lower = self.tap.INTEST_DEBUG(
             DebugChain.pack(op.instr, op.data, op.sysspeed),
-            read_tdo=op.read, post_dr_run=1)
+            read_tdo=op.read)
         chain_future(lower, upper,
                      DebugChain.data if op.read else lambda _: None)
 
@@ -287,6 +290,7 @@ class Arm9Debug(Batcher, Node):
         self.nop()
         self.nop(pc)
         self.nop()
+        self.nop()
         return self.nop()
 
     def post_psr_read(self, spsr: bool = False) -> asyncio.Future:
@@ -314,58 +318,53 @@ class Arm9Debug(Batcher, Node):
             self.nop()
         return self.nop()
 
-    def post_system_speed(self, instr: int) -> asyncio.Future:
+    SYSTEM_SPEED_TIMEOUT = 0.5
+
+    async def system_speed(self, instr: int) -> DebugStatus:
         """Execute `instr`, a memory access, at system speed. The
         core leaves debug state and re-enters it once the access
-        completes. Resolves to the debug status read right after the
-        restart: unless both `syscomp` and `dbgack` are set, the
-        access was still pending and the pipeline state is lost."""
+        completes; nothing may be shifted through the pipeline
+        before that, so this waits for it."""
         self.shift(instr)
         self.nop(sysspeed=True)
         self.post(Restart())
-        status = asyncio.get_running_loop().create_future()
-        chain_future(self.post(IceRead(IceRegister.DEBUG_STATUS)),
-                     status, DebugStatus)
-        return status
+        return await self.wait_status(lambda s: s.dbgack and s.syscomp,
+                                      timeout=self.SYSTEM_SPEED_TIMEOUT)
 
-    def post_load_words(self, count: int):
-        """Load `count` words (up to 14) from the address in r0 into
-        r1.., post-incrementing r0. Returns the system speed status
-        future and the loaded value futures."""
+    async def load_words(self, count: int) -> list[int]:
+        """Load `count` words (up to 14) from the address in r0,
+        post-incrementing r0, through r1.."""
         regs = self.__data_registers(count)
-        status = self.post_system_speed(A32.ldmia(0, regs, writeback=True))
-        return status, self.post_regs_read(regs)
+        await self.system_speed(A32.ldmia(0, regs, writeback=True))
+        return await asyncio.gather(*self.post_regs_read(regs))
 
-    def post_store_words(self, values):
-        """Store words (up to 14) to the address in r0 through r1..,
-        post-incrementing r0. Returns the system speed status
-        future."""
+    async def store_words(self, values):
+        """Store words (up to 14) to the address in r0,
+        post-incrementing r0, through r1.."""
         regs = self.__data_registers(len(values))
         self.post_regs_write(dict(zip(regs, values)))
-        return self.post_system_speed(A32.stmia(0, regs, writeback=True))
+        await self.system_speed(A32.stmia(0, regs, writeback=True))
 
     __LOADS = {1: A32.ldrb, 2: A32.ldrh, 4: A32.ldr}
     __STORES = {1: A32.strb, 2: A32.strh, 4: A32.str}
 
-    def post_load_units(self, width: int, count: int):
+    async def load_units(self, width: int, count: int) -> list[int]:
         """Load `count` (up to 14) `width`-byte units from the address
-        in r0, one access each, post-incrementing r0. Returns the
-        system speed status futures and the loaded value futures."""
+        in r0, one access each, post-incrementing r0."""
         regs = self.__data_registers(count)
         load = self.__LOADS[width]
-        statuses = [self.post_system_speed(load(r, 0, width, post_index=True))
-                    for r in regs]
-        return statuses, self.post_regs_read(regs)
+        for r in regs:
+            await self.system_speed(load(r, 0, width, post_index=True))
+        return await asyncio.gather(*self.post_regs_read(regs))
 
-    def post_store_units(self, width: int, values):
+    async def store_units(self, width: int, values):
         """Store `width`-byte units (up to 14) to the address in r0, one
-        access each, post-incrementing r0. Returns the system speed
-        status futures."""
+        access each, post-incrementing r0."""
         regs = self.__data_registers(len(values))
         store = self.__STORES[width]
         self.post_regs_write(dict(zip(regs, values)))
-        return [self.post_system_speed(store(r, 0, width, post_index=True))
-                for r in regs]
+        for r in regs:
+            await self.system_speed(store(r, 0, width, post_index=True))
 
     @staticmethod
     def __data_registers(count: int) -> list[int]:

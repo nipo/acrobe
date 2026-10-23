@@ -54,9 +54,6 @@ class Arm9Core(Core):
 
     HALT_TIMEOUT = 0.5
 
-    # Bytes moved per batch of posted system speed accesses.
-    MEMORY_WINDOW = 4096
-
     __HALT_CAUSES = {
         MethodOfEntry.WATCHPOINT0_BREAKPOINT: HaltCause.BREAKPOINT,
         MethodOfEntry.WATCHPOINT1_BREAKPOINT: HaltCause.BREAKPOINT,
@@ -189,47 +186,29 @@ class Arm9Core(Core):
 
     async def __memory_access(self, address: int, size: int, transfer):
         """Run `transfer(width, count, offset)` for each run of the
-        span with r0 pointing at it. `transfer` posts its sequence and
-        returns its status futures and value futures."""
+        span with r0 pointing at it, then check for an abort."""
         context = await self.__halted()
-        values = []
         self.debug.post_regs_write({0: address})
+        values = []
         offset = 0
-        posted = 0
-        pending = []
         for width, count in self.access_plan(address, size):
-            statuses, futures = transfer(width, count, offset)
-            pending.extend(statuses)
-            values.extend(futures)
+            values.extend(await transfer(width, count, offset))
             offset += width * count
-            posted += width * count
-            if posted >= self.MEMORY_WINDOW:
-                await self.__check(pending)
-                pending = []
-                posted = 0
-        await self.__check(pending)
         cpsr = await self.debug.post_psr_read()
         if Psr(cpsr).mode != Psr(context[self.CPSR]).mode:
             await self.debug.post_psr_write(context[self.CPSR])
             raise Arm9MemoryAbort(
                 f"Abort accessing {size} bytes at {address:#010x}")
-        return await asyncio.gather(*values)
-
-    @staticmethod
-    async def __check(statuses):
-        for status in await asyncio.gather(*statuses):
-            if not (status.syscomp and status.dbgack):
-                raise IOError(f"System speed access did not complete: {status}")
+        return values
 
     async def mem_read(self, address: int, size: int) -> bytes:
         widths = []
 
-        def transfer(width, count, offset):
+        async def transfer(width, count, offset):
             widths.extend([width] * count)
             if width == 4:
-                status, values = self.debug.post_load_words(count)
-                return [status], values
-            return self.debug.post_load_units(width, count)
+                return await self.debug.load_words(count)
+            return await self.debug.load_units(width, count)
 
         values = await self.__memory_access(address, size, transfer)
         return b"".join((v & ((1 << (8 * w)) - 1)).to_bytes(w, "little")
@@ -238,12 +217,14 @@ class Arm9Core(Core):
     async def mem_write(self, address: int, data):
         data = bytes(data)
 
-        def transfer(width, count, offset):
+        async def transfer(width, count, offset):
             values = [int.from_bytes(data[o:o + width], "little")
                       for o in range(offset, offset + width * count, width)]
             if width == 4:
-                return [self.debug.post_store_words(values)], []
-            return self.debug.post_store_units(width, values), []
+                await self.debug.store_words(values)
+            else:
+                await self.debug.store_units(width, values)
+            return []
 
         await self.__memory_access(address, len(data), transfer)
 

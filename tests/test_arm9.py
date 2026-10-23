@@ -167,10 +167,10 @@ async def test_psr_write_uses_no_register():
     assert tdis == [DebugChain.pack(i, 0, False) for i in instrs]
 
 
-async def test_system_speed_reads_status():
+async def test_system_speed_waits_completion():
     tap, debug = make_debug()
-    tap.tdo_queue = [0x9]
-    status = await debug.post_system_speed(
+    tap.tdo_queue = [0x1, 0x9]
+    status = await debug.system_speed(
         A32.ldmia(14, [0, 1], writeback=True))
     assert status.syscomp and status.dbgack
     assert [op[:3] for op in tap.ops[1:]] == [
@@ -182,15 +182,15 @@ async def test_system_speed_reads_status():
         ("shift", SCAN_N, ScanChain.EMBEDDED_ICE),
         ("shift", INTEST, IceChain.pack(False, 0x01)),
         ("shift", INTEST, IceChain.pack(False, 0x01)),
+        ("shift", INTEST, IceChain.pack(False, 0x01)),
+        ("shift", INTEST, IceChain.pack(False, 0x01)),
     ]
 
 
 async def test_load_words():
     tap, debug = make_debug()
     tap.tdo_queue = [0x9, 0x11, 0x22]
-    status, values = debug.post_load_words(2)
-    assert (await status).syscomp
-    assert await asyncio.gather(*values) == [0x11, 0x22]
+    assert await debug.load_words(2) == [0x11, 0x22]
     assert tap.ops[1][2] == DebugChain.pack(
         A32.ldmia(0, [1, 2], writeback=True), 0, False)
     assert tap.ops[8] == ("shift", SCAN_N, ScanChain.DEBUG, False)
@@ -199,8 +199,8 @@ async def test_load_words():
 
 async def test_store_halfwords():
     tap, debug = make_debug()
-    statuses = debug.post_store_units(2, [0x1234, 0x5678])
-    await asyncio.gather(*statuses)
+    tap.tdo_queue = [0x9, 0x9]
+    await debug.store_units(2, [0x1234, 0x5678])
     instrs = [op[2] >> DebugChain.INSTR_LSB for op in tap.ops
               if op[:2] == ("shift", INTEST) and op[2] & DebugChain.SYSSPEED]
     assert len(instrs) == 2
@@ -210,4 +210,4 @@ async def test_store_halfwords():
     assert DebugChain.pack(A32.strh(2, 0, 2, post_index=True), 0, False) \
         in shifted
     with pytest.raises(ValueError):
-        debug.post_store_units(1, [0] * 15)
+        await debug.store_units(1, [0] * 15)
