@@ -171,6 +171,16 @@ class Responder:
             return message.error(1)
         return message.ok()
 
+    async def handle_T(self, payload: bytes) -> bytes:
+        # T<tid> — is the thread alive. Every core always is.
+        try:
+            tid = int(payload[1:], 16)
+        except ValueError:
+            return message.error(1)
+        if 1 <= tid <= len(self.cores):
+            return message.ok()
+        return message.error(1)
+
     async def handle_g(self, payload: bytes) -> bytes:
         regs = await self.current_core.reg_read(self.current_core.registers)
         out = bytearray()
@@ -623,9 +633,13 @@ class Responder:
         from ..region import Flash, Ram
         regions = list(self.debuggable.memory_map) if self.debuggable.memory_map else []
         # Also pick up Loadable regions when present — most useful
-        # for vFlashErase/Write routing.
+        # for vFlashErase/Write routing. They take precedence over
+        # the debug regions they overlap, GDB rejects overlapping maps.
         if self.loadable is not None:
-            regions = regions + list(self.loadable.regions)
+            loadable = list(self.loadable.regions)
+            regions = [r for r in regions
+                       if not any(r.address < l.end and l.address < r.end
+                                  for l in loadable)] + loadable
         if not regions:
             return None
         mm = et.Element("memory-map")

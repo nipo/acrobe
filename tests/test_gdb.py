@@ -439,6 +439,28 @@ class TestResponderMemoryMap:
         assert b'type="flash"' in resp
         assert b'<property name="blocksize">0x100</property>' in resp
 
+    @pytest.mark.asyncio
+    async def test_memory_map_drops_debug_regions_under_loadable(self):
+        debug = FakeDebuggable(memory_map=[
+            Ram("flash-alias", 0x08000000, 0x1000),
+            Ram("sram", 0x20000000, 0x10000),
+        ])
+        responder = Responder(debug, FakeLoadable())
+        resp = await responder.handle_packet(
+            b"qXfer:memory-map:read::0,2000")
+        assert resp.count(b"<memory ") == 2
+        assert b'type="flash" start="0x8000000"' in resp
+
+
+class TestResponderThreadAlive:
+    @pytest.mark.asyncio
+    async def test_existing_thread_is_alive(self, responder):
+        assert await responder.handle_packet(b"T1") == b"OK"
+
+    @pytest.mark.asyncio
+    async def test_unknown_thread_is_dead(self, responder):
+        assert await responder.handle_packet(b"T2") == b"E01"
+
 
 class TestResponderFlash:
     @pytest.mark.asyncio
