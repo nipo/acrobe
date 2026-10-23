@@ -146,6 +146,14 @@ class V7Debug(Dbg):
 
     TIMEOUT = 0.5
 
+    # DSCR as of its last read. Its latched flags gate the next ITR
+    # and DTR accesses: in Non-blocking mode, an ITR write is ignored
+    # unless InstrCompl_l was set, a DTRRX write unless RXfull_l was
+    # clear, a DTRTX read unless TXfull_l was set. Accesses whose
+    # gate is known open are issued together with the DSCR read that
+    # checks their outcome.
+    __latched: Dscr | None = None
+
     # DCC transfers between a core register and DBGDTRRX/DBGDTRTX.
     @staticmethod
     def dtr_to_reg(rt: int) -> int:
@@ -156,7 +164,17 @@ class V7Debug(Dbg):
         return A32.mcr(14, 0, rt, 0, 5, 0)
 
     async def dscr(self) -> Dscr:
-        return Dscr(await self.reg_read(self.DSCR))
+        return self.__latch(await self.reg_read(self.DSCR))
+
+    def __latch(self, value: int) -> Dscr:
+        self.__latched = Dscr(value)
+        return Dscr(value)
+
+    async def __ready(self, *, rx_free: bool = False):
+        def ready(d):
+            return d.instrcompl_l and not (rx_free and d.rxfull_l)
+        if self.__latched is None or not ready(self.__latched):
+            await self.wait_dscr(ready)
 
     async def didr(self) -> Didr:
         return Didr(await self.reg_read(self.DIDR))
@@ -233,31 +251,53 @@ class V7Debug(Dbg):
     # Instruction execution
 
     async def execute(self, instr: int) -> Dscr:
-        await self.reg_write(self.ITR, instr)
-        dscr = await self.wait_dscr(lambda d: d.instrcompl_l)
+        dscr, _ = await self.__issue(instr)
+        return dscr
+
+    async def __issue(self, instr: int, *, read_dtr: bool = False):
+        """Execute `instr` and, with `read_dtr`, read DTRTX in the same
+        go. The value is None when the read came too early."""
+        await self.__ready()
+        write = self.reg_write(self.ITR, instr)
+        status = self.reg_read(self.DSCR)
+        dtr = self.reg_read(self.DTRTX) if read_dtr else None
+        await write
+        dscr = self.__latch(await status)
+        value = await dtr if dtr is not None else None
+        if not (dscr.instrcompl_l and dscr.txfull_l):
+            value = None
+        if not dscr.instrcompl_l:
+            dscr = await self.wait_dscr(lambda d: d.instrcompl_l)
         if dscr.sdabort_l or dscr.und_l:
             await self.drcr(clear_sticky_exceptions=True)
             raise V7DebugAbort(
                 f"{self.name}: {instr:#010x} raised "
                 f"{'abort' if dscr.sdabort_l else 'undefined'}")
-        return dscr
+        return dscr, value
 
     async def dtr_write(self, value: int):
+        await self.__ready(rx_free=True)
         await self.reg_write(self.DTRRX, value & 0xffffffff)
 
     async def dtr_read(self) -> int:
-        await self.wait_dscr(lambda d: d.txfull_l or d.txfull)
+        if self.__latched is None or not self.__latched.txfull_l:
+            await self.wait_dscr(lambda d: d.txfull_l)
+        self.__latched.txfull_l = False
         return await self.reg_read(self.DTRTX)
 
     async def reg_get(self, rt: int) -> int:
         """Read core register r0-r14 of the current mode."""
-        await self.execute(self.reg_to_dtr(rt))
-        return await self.dtr_read()
+        _, value = await self.__issue(self.reg_to_dtr(rt), read_dtr=True)
+        if value is None:
+            value = await self.dtr_read()
+        return value
 
     async def reg_set(self, rt: int, value: int):
         """Write core register r0-r14 of the current mode."""
-        await self.dtr_write(value)
-        await self.execute(self.dtr_to_reg(rt))
+        await self.__ready(rx_free=True)
+        write = self.reg_write(self.DTRRX, value & 0xffffffff)
+        await self.__issue(self.dtr_to_reg(rt))
+        await write
 
     async def execute_get(self, instr: int, rt: int = 0) -> int:
         """Execute `instr`, then read `rt`."""
@@ -271,19 +311,45 @@ class V7Debug(Dbg):
 
     # Memory, through r0 as the address register
 
+    # Word runs use Fast DCC mode: the latched instruction is reissued
+    # on every DTR access, which stalls on the APB side until the
+    # previous one completed, so the accesses are issued back to back
+    # without polling DSCR. An abort makes the following DTR accesses
+    # no-ops, it is reported once the run is over.
+
     async def load_words(self, address: int, count: int) -> list[int]:
+        ldc = A32.ldc(14, 5, 0, 4, post_index=True)
         await self.reg_set(0, address)
+        await self.execute(ldc)
         values = []
-        for _ in range(count):
-            await self.execute(A32.ldc(14, 5, 0, 4, post_index=True))
-            values.append(await self.dtr_read())
-        return values
+        if count > 1:
+            await self.dscr_update(extdccmode=ExtDccMode.FAST)
+            try:
+                await self.reg_write(self.ITR, ldc)
+                values = await asyncio.gather(
+                    *[self.reg_read(self.DTRTX) for _ in range(count - 1)])
+                await self.__fast_run_end()
+            finally:
+                await self.dscr_update(extdccmode=ExtDccMode.NON_BLOCKING)
+        return list(values) + [await self.dtr_read()]
 
     async def store_words(self, address: int, values):
+        values = list(values)
         await self.reg_set(0, address)
-        for v in values:
-            await self.dtr_write(v)
-            await self.execute(A32.stc(14, 5, 0, 4, post_index=True))
+        await self.dscr_update(extdccmode=ExtDccMode.FAST)
+        try:
+            await self.reg_write(self.ITR, A32.stc(14, 5, 0, 4, post_index=True))
+            await asyncio.gather(
+                *[self.reg_write(self.DTRRX, v & 0xffffffff) for v in values])
+            await self.__fast_run_end()
+        finally:
+            await self.dscr_update(extdccmode=ExtDccMode.NON_BLOCKING)
+
+    async def __fast_run_end(self):
+        dscr = await self.wait_dscr(lambda d: d.instrcompl_l)
+        if dscr.sdabort_l:
+            await self.drcr(clear_sticky_exceptions=True)
+            raise V7DebugAbort(f"{self.name}: abort in memory run")
 
     __LOADS = {1: A32.ldrb, 2: A32.ldrh}
     __STORES = {1: A32.strb, 2: A32.strh}
