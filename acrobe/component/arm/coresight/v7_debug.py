@@ -86,6 +86,38 @@ class Prsr(Bitfield):
     sticky_reset = BooleanField(3)
 
 
+class PrivilegeMatch(enum.IntEnum):
+    PRIVILEGED = 1
+    USER = 2
+    ANY = 3
+
+
+class BreakpointType(enum.IntEnum):
+    ADDRESS_MATCH = 0
+    ADDRESS_MISMATCH = 4
+
+
+class Bcr(Bitfield):
+    enable = BooleanField(0)
+    privilege = EnumField(1, 2, PrivilegeMatch)
+    byte_select = Field(5, 4)
+    type = EnumField(20, 3, BreakpointType)
+
+
+class WatchAccess(enum.IntEnum):
+    LOAD = 1
+    STORE = 2
+    ANY = 3
+
+
+class Wcr(Bitfield):
+    enable = BooleanField(0)
+    privilege = EnumField(1, 2, PrivilegeMatch)
+    access = EnumField(3, 2, WatchAccess)
+    byte_select = Field(5, 4)
+    mask = Field(24, 5)
+
+
 class V7DebugAbort(IOError):
     pass
 
@@ -150,6 +182,28 @@ class V7Debug(Dbg):
                 return dscr
             if loop.time() > deadline:
                 raise TimeoutError(f"{self.name}: DSCR stuck at {dscr}")
+
+    async def breakpoint_count(self) -> int:
+        return (await self.didr()).brps + 1
+
+    async def watchpoint_count(self) -> int:
+        return (await self.didr()).wrps + 1
+
+    async def breakpoint_set(self, index: int, address: int, bcr: Bcr):
+        await self.reg_write(self.BCR + 4 * index, 0)
+        await self.reg_write(self.BVR + 4 * index, address & ~3)
+        await self.reg_write(self.BCR + 4 * index, int(bcr))
+
+    async def breakpoint_clear(self, index: int):
+        await self.reg_write(self.BCR + 4 * index, 0)
+
+    async def watchpoint_set(self, index: int, address: int, wcr: Wcr):
+        await self.reg_write(self.WCR + 4 * index, 0)
+        await self.reg_write(self.WVR + 4 * index, address & ~3)
+        await self.reg_write(self.WCR + 4 * index, int(wcr))
+
+    async def watchpoint_clear(self, index: int):
+        await self.reg_write(self.WCR + 4 * index, 0)
 
     async def unlock(self):
         await self.reg_write(self.LAR, self.LAR_KEY)

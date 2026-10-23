@@ -6,7 +6,8 @@ from acrobe.component.arm.a32 import A32
 from acrobe.component.arm.coresight.model import (
     ComponentIds, MemoryMappedComponent)
 from acrobe.component.arm.coresight.v7_debug import (
-    Dscr, V7Debug, V7DebugAbort)
+    Bcr, BreakpointType, Dscr, PrivilegeMatch, V7Debug, V7DebugAbort,
+    WatchAccess, Wcr)
 from acrobe.part_id import PartId
 
 
@@ -130,3 +131,21 @@ async def test_enter_enables_itr():
     debug = make_debug(bus)
     await debug.enter()
     assert bus.dscr.itren and bus.dscr.adadiscard
+
+
+async def test_breakpoint_disabled_while_reprogrammed():
+    bus = FakeA9()
+    debug = make_debug(bus)
+    bcr = Bcr(enable=True, privilege=PrivilegeMatch.ANY, byte_select=0b1111,
+              type=BreakpointType.ADDRESS_MISMATCH)
+    await debug.breakpoint_set(2, 0x1003, bcr)
+    assert bus.writes == [(0x148, 0), (0x108, 0x1000), (0x148, 0x004001e7)]
+
+
+async def test_watchpoint_encoding():
+    bus = FakeA9()
+    debug = make_debug(bus)
+    wcr = Wcr(enable=True, privilege=PrivilegeMatch.ANY,
+              access=WatchAccess.STORE, byte_select=0b1111, mask=6)
+    await debug.watchpoint_set(3, 0x2040, wcr)
+    assert bus.writes == [(0x1cc, 0), (0x18c, 0x2040), (0x1cc, 0x060001f7)]
