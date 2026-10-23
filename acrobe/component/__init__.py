@@ -14,6 +14,7 @@ from . import i2c_mem  # noqa: F401
 from . import arm  # noqa: F401
 from . import renesas  # noqa: F401
 from . import ti  # noqa: F401
+from . import cypress  # noqa: F401
 from . import raspberry  # noqa: F401
 from . import hdlc  # noqa: F401
 from .nsl import sld  # noqa: F401
