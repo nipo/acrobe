@@ -50,6 +50,7 @@ class ZynqDebuggable(Debuggable):
         await super().attach()
         for core in self.cores:
             await core.halt()
+            await core.points_clear()
 
     async def detach(self):
         for core in self.cores:

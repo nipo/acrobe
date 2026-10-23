@@ -3,7 +3,7 @@ import pytest
 from acrobe.component.arm.a32 import A32
 from acrobe.component.arm.a32_state import Mode, Psr
 from acrobe.component.arm.coresight.v7_debug import (
-    Dscr, MethodOfEntry, V7DebugAbort,
+    BreakpointType, Dscr, MethodOfEntry, V7DebugAbort, WatchAccess,
 )
 from acrobe.target.arm.cortex_a import CortexACore, CortexAMemoryAbort
 from acrobe.target.debuggable import CoreState, HaltCause
@@ -21,9 +21,35 @@ class FakeV7Debug:
         self.executed = []
         self.abort_at = None
         self.sctlr = 0x00c5187d
+        self.moe = MethodOfEntry.HALT_REQUEST
+        self.breakpoints = {}
+        self.watchpoints = {}
+        self.intdis = False
+        self.intdis_on_restart = None
 
     async def dscr(self):
-        return Dscr(halted=self.halted, moe=MethodOfEntry.HALT_REQUEST)
+        return Dscr(halted=self.halted, moe=self.moe, intdis=self.intdis)
+
+    async def dscr_update(self, **fields):
+        self.intdis = fields.get("intdis", self.intdis)
+
+    async def breakpoint_count(self):
+        return 6
+
+    async def watchpoint_count(self):
+        return 4
+
+    async def breakpoint_set(self, index, address, bcr):
+        self.breakpoints[index] = (address, bcr)
+
+    async def breakpoint_clear(self, index):
+        self.breakpoints.pop(index, None)
+
+    async def watchpoint_set(self, index, address, wcr):
+        self.watchpoints[index] = (address, wcr)
+
+    async def watchpoint_clear(self, index):
+        self.watchpoints.pop(index, None)
 
     async def enter(self):
         return await self.dscr()
@@ -33,6 +59,15 @@ class FakeV7Debug:
 
     async def restart(self):
         self.halted = False
+        self.intdis_on_restart = self.intdis
+        types = {bcr.type: address for address, bcr in self.breakpoints.values()}
+        if types.get(BreakpointType.ADDRESS_MATCH) == self.pc:
+            self.halted = True
+        elif BreakpointType.ADDRESS_MISMATCH in types:
+            self.pc += 2 if Psr(self.cpsr).thumb else 4
+            self.halted = True
+        if self.halted:
+            self.moe = MethodOfEntry.BREAKPOINT
 
     async def reg_get(self, r):
         return self.regs[r]
@@ -136,3 +171,78 @@ async def test_caches_disable():
     await core.caches_disable()
     assert debug.sctlr == 0x00c50078
     assert A32.mcr(15, 0, 0, 8, 7, 0) in debug.executed
+
+
+async def test_breakpoints_leave_step_unit():
+    debug = FakeV7Debug()
+    core = CortexACore("cpu", debug)
+    await core.halt()
+    for i in range(5):
+        await core.breakpoint_add(0x1000 + 4 * i, 4)
+    with pytest.raises(RuntimeError):
+        await core.breakpoint_add(0x2000, 4)
+    assert sorted(debug.breakpoints) == [0, 1, 2, 3, 4]
+    bp = (await core.breakpoint_list())[1]
+    await core.breakpoint_remove(bp)
+    thumb = await core.breakpoint_add(0x3002, 2)
+    assert thumb == (1, 0x3002, 2)
+    address, bcr = debug.breakpoints[1]
+    assert address == 0x3002 and bcr.byte_select == 0b1100
+    assert bcr.type == BreakpointType.ADDRESS_MATCH and bcr.enable
+
+
+async def test_step_reports_debugger_halt():
+    debug = FakeV7Debug(pc=0x2000)
+    core = CortexACore("cpu", debug)
+    await core.halt()
+    await core.step()
+    assert debug.intdis_on_restart and not debug.intdis
+    assert debug.breakpoints == {}
+    assert (await core.reg_read([15]))[core.lookup_register(15)] == 0x2004
+    assert await core.halt_cause() == HaltCause.DEBUGGER
+
+
+@pytest.mark.parametrize("addr,size,byte_select,mask", [
+    (0x1000, 4, 0b1111, 0),
+    (0x1001, 1, 0b0010, 0),
+    (0x1002, 2, 0b1100, 0),
+    (0x1040, 64, 0b1111, 6),
+])
+def test_watch_span(addr, size, byte_select, mask):
+    assert CortexACore.watch_span(addr, size) == (byte_select, mask)
+
+
+@pytest.mark.parametrize("addr,size", [(0x1003, 2), (0x1004, 8 + 4), (0x1004, 8)])
+def test_watch_span_rejected(addr, size):
+    with pytest.raises(ValueError):
+        CortexACore.watch_span(addr, size)
+
+
+async def test_watchpoints():
+    debug = FakeV7Debug()
+    core = CortexACore("cpu", debug)
+    await core.halt()
+    wp = await core.watchpoint_add(0x2000, 4, 3)
+    address, wcr = debug.watchpoints[0]
+    assert address == 0x2000 and wcr.access == WatchAccess.LOAD
+    assert await core.watchpoint_list() == [wp]
+    await core.resume()
+    debug.halted = True
+    debug.moe = MethodOfEntry.SYNC_WATCHPOINT
+    assert await core.watchpoint_hit() == wp
+    await core.watchpoint_add(0x3000, 4, 2)
+    assert await core.watchpoint_hit() is None
+    await core.watchpoint_remove(wp)
+    assert list(debug.watchpoints) == [1]
+    await core.points_clear()
+    assert debug.watchpoints == {}
+
+
+async def test_resume_steps_over_breakpoint_at_pc():
+    debug = FakeV7Debug(pc=0x2000)
+    core = CortexACore("cpu", debug)
+    await core.halt()
+    await core.breakpoint_add(0x2000, 4)
+    await core.resume()
+    assert debug.pc == 0x2004 and not debug.halted
+    assert list(debug.breakpoints) == [0]
