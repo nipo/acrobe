@@ -13,6 +13,11 @@ script.
 Loading is destructive: CPU0 runs the image, CPU1 is sent back to
 the BootROM wait loop, the state of both cores at attach time is
 not preserved.
+
+A boot image (BOOT.BIN) is loaded the way the BootROM and FSBL would
+from flash: the FSBL runs until it reads the boot mode, by then the
+clocks, MIO and DDR are initialized. The remaining partitions are then
+placed from the host and CPU0 is handed to the first of them.
 """
 
 from __future__ import annotations
@@ -22,12 +27,14 @@ from ...component.arm.dp import Dp
 from ...component.arm.jtag_dp import JtagDpTap
 from ...component.arm.mem_ap import MemAp
 from ...component.arm.memory import BusRam
+from ...component.xilinx.boot_image import Destination
 from ...component.xilinx.zynq import Zynq
 from ...db import NoMatch
+from ...memory_map import MemoryMap
 from ...part_id import PartId
-from ..debuggable import CoreState, Debuggable
+from ..debuggable import CoreState, Debuggable, HaltCause
 from ..fpga import FpgaLoadable
-from ..loadable import RamLoadable
+from ..loadable import Loadable, RamLoadable
 from ..memory import Memory
 from ..region import Ram
 from ..target import Target
@@ -112,11 +119,11 @@ class ZynqPsLoadable(RamLoadable):
 
     async def post_program(self, *, success, do_start, memory_map):
         if do_start and success and self.cpu1 is not None:
-            await self.__cpu1_park(memory_map)
+            await self.cpu1_park(memory_map)
         await super().post_program(success=success, do_start=do_start,
                                    memory_map=memory_map)
 
-    async def __cpu1_park(self, memory_map):
+    async def cpu1_park(self, memory_map):
         code_end = self.CPU1_LOOP + 4 * len(self.CPU1_LOOP_CODE)
         if memory_map.within(self.CPU1_LOOP, code_end).size \
                 or memory_map.within(self.CPU1_START, self.CPU1_START + 4).size:
@@ -128,6 +135,121 @@ class ZynqPsLoadable(RamLoadable):
         await self.core.mem_write(self.CPU1_START,
                                   self.CPU1_LOOP.to_bytes(4, "little"))
         await self.cpu1.run_at(self.CPU1_LOOP)
+
+
+class ZynqBootLoadable(Loadable):
+    """Boots a BOOT.BIN image: plays the BootROM to run the FSBL,
+    stops it once the hardware is initialized, then plays the FSBL to
+    place the other partitions and hand over."""
+
+    BOOT_MODE = 0xf800025c
+    FSBL_TIMEOUT = 10.0
+    DDR_START = 0x00100000
+
+    SLCR_LOCK = 0xf8000004
+    SLCR_UNLOCK = 0xf8000008
+    SLCR_LOCK_KEY = 0x767b
+    SLCR_UNLOCK_KEY = 0xdf0d
+    FPGA_RST_CTRL = 0xf8000240
+    LVL_SHFTR_EN = 0xf8000900
+    LVL_SHFTR_ALL = 0xf
+
+    SWDT_MODE = 0xf8005000
+    SWDT_DISABLE = 0x00abc000
+
+    L2_CLEAN_INVALIDATE_WAY = 0xf8f027fc
+    L2_WAYS = 0xff
+
+    def __init__(self, ps: ZynqPsLoadable, ahb: MemAp, pl: Zynq | None,
+                 name="boot"):
+        super().__init__(name)
+        self.ps = ps
+        self.ahb = ahb
+        self.pl = pl
+
+    async def write(self, source, *, do_erase=False, do_verify=False,
+                    do_start=False, update=True, assume_clean=False):
+        fsbl = source.child_lookup("fsbl")
+        partitions = source.child_lookup("partition").children[1:]
+        self.__check(partitions)
+        cpu0 = self.ps.core
+        async with self.event_emitter("program", target=self.parent.path,
+                                      do_erase=do_erase, do_verify=do_verify):
+            await self.ps.pre_program(do_erase=do_erase, assume_clean=assume_clean)
+            for address, value in source.metadata.get("register_init", []):
+                await self.__write32(cpu0, address, value)
+            fsbl_data = await fsbl.read(0, fsbl.size)
+            if self.ps.cpu1 is not None:
+                await self.ps.cpu1_park(MemoryMap([(fsbl.metadata["load_address"], fsbl_data)]))
+            await cpu0.mem_write(fsbl.metadata["load_address"], fsbl_data)
+            await self.__fsbl_run(cpu0, fsbl.metadata["entry"])
+            await self.__fsbl_stop(cpu0)
+            for partition in partitions:
+                await self.__place(partition)
+            entries = [p.metadata["entry"] for p in partitions
+                       if p.metadata["destination"] == Destination.PS]
+            if do_start and entries:
+                await cpu0.run_at(entries[0])
+
+    def __check(self, partitions):
+        """Refuse what the FSBL would refuse before it starts."""
+        for p in partitions:
+            name = p.metadata["name"] or p.name
+            if p.metadata["destination"] == Destination.PL:
+                if self.pl is None:
+                    raise ValueError(f"{name}: no PL to configure")
+            elif p.metadata["load_address"] < self.DDR_START:
+                raise ValueError(
+                    f"{name}: load address {p.metadata['load_address']:#x} "
+                    "is below DDR, the FSBL would stop loading there; "
+                    "set load= and startup= for it in the BIF")
+
+    async def __fsbl_run(self, cpu0: CortexACore, entry: int):
+        watch = await cpu0.watchpoint_add(self.BOOT_MODE, 4, 3)
+        try:
+            await cpu0.run_at(entry)
+            if not await cpu0.wait_halted(self.FSBL_TIMEOUT):
+                await cpu0.halt()
+                pc = (await cpu0.reg_read(["pc"]))[cpu0.lookup_register("pc")]
+                raise TimeoutError(
+                    f"FSBL did not read the boot mode within "
+                    f"{self.FSBL_TIMEOUT}s, CPU0 at {pc:#010x}")
+            if await cpu0.halt_cause() != HaltCause.WATCHPOINT:
+                raise RuntimeError(
+                    f"FSBL stopped on {await cpu0.halt_cause()}")
+        finally:
+            await cpu0.watchpoint_remove(watch)
+
+    async def __fsbl_stop(self, cpu0: CortexACore):
+        """Take the FSBL's place at handoff: stop the watchdog it may
+        have started, flush the caches it enabled to DDR and turn them
+        off. The L2 controller is CPU private, out of the AHB-AP's
+        reach."""
+        await self.__write32(cpu0, self.SWDT_MODE, self.SWDT_DISABLE)
+        await cpu0.dcache_clean_invalidate()
+        await cpu0.caches_disable()
+        await self.__write32(cpu0, self.L2_CLEAN_INVALIDATE_WAY, self.L2_WAYS)
+        while int.from_bytes(await cpu0.mem_read(self.L2_CLEAN_INVALIDATE_WAY, 4), "little"):
+            pass
+        await self.__write32(cpu0, ZynqPsLoadable.L2_CONTROL, 0)
+
+    async def __place(self, partition):
+        name = partition.metadata["name"] or partition.name
+        if partition.metadata["destination"] == Destination.PL:
+            self.logger.info("Configuring PL from %s", name)
+            await self.pl.load(partition.child_lookup("bitstream"))
+            await self.__write32(self.ahb, self.SLCR_UNLOCK, self.SLCR_UNLOCK_KEY)
+            await self.__write32(self.ahb, self.LVL_SHFTR_EN, self.LVL_SHFTR_ALL)
+            await self.__write32(self.ahb, self.FPGA_RST_CTRL, 0)
+            await self.__write32(self.ahb, self.SLCR_LOCK, self.SLCR_LOCK_KEY)
+            return
+        address = partition.metadata["load_address"]
+        self.logger.info("Loading %s at %#010x", name, address)
+        await self.ahb.mem_write(address, await partition.read(0, partition.size))
+
+    @staticmethod
+    async def __write32(bus, address: int, value: int):
+        await bus.mem_write(address, value.to_bytes(4, "little"))
 
 
 class ZynqTarget(Target):
@@ -186,6 +308,7 @@ class ZynqTarget(Target):
 
         if pl is not None:
             self.child_add(FpgaLoadable(pl, "pl"))
+        self.child_add(ZynqBootLoadable(loadable, ahb, pl))
 
 
 @Target.register(Zynq, precedence=900)
