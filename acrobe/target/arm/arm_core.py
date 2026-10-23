@@ -36,9 +36,9 @@ class ArmCore(Core):
     PC = 15
     CPSR = 25
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, registers=ARM_CORE_REGISTERS):
         super().__init__(name)
-        self.registers = list(ARM_CORE_REGISTERS)
+        self.registers = list(registers)
         self.__by_name = {r.name: r for r in self.registers}
         self.__by_number = {r.number: r for r in self.registers}
         self.__context: dict[int, int] | None = None

@@ -3,24 +3,79 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
-from ...component.arm.a32 import A32
-from ...component.arm.a32_state import Psr
+from ...component.arm.a32 import A32, PsrMask, VfpSysReg
+from ...component.arm.a32_state import Mode, Psr
 from ...component.arm.coresight.v7_debug import (
     Bcr, BreakpointType, MethodOfEntry, PrivilegeMatch, V7Debug,
     V7DebugAbort, WatchAccess, Wcr,
 )
-from ..debuggable import HaltCause
-from .arm_core import ArmCore
+from ..debuggable import HaltCause, Register, RegisterType
+from .arm_core import ARM_CORE_REGISTERS, ArmCore
 
 
 class CortexAMemoryAbort(IOError):
     pass
 
 
+class CortexARegisters:
+    """Registers beyond the current-mode core set. They are only
+    reachable by switching mode or enabling the FPU from Debug state,
+    so GDB fetches them on demand. VFP numbers follow GDB's ARM
+    layout, banked ones come after."""
+
+    VFP_FEATURE = "org.gnu.gdb.arm.vfp"
+    NEON_FEATURE = "org.gnu.gdb.arm.neon"
+    BANKED_FEATURE = "org.acrobe.arm.banked"
+
+    D0 = 26
+    FPSCR = 58
+    BANKED = 59
+
+    # User registers are reached from System mode, which shares them
+    # and stays privileged.
+    MODES = (Mode.SYS, Mode.FIQ, Mode.IRQ, Mode.SVC, Mode.ABT, Mode.UND,
+             Mode.MON)
+
+    @classmethod
+    def vfp(cls, d_count: int) -> list[Register]:
+        return [
+            Register(cls.D0 + i, f"d{i}", 64, RegisterType.DOUBLE, "float",
+                     gdb_feature=cls.VFP_FEATURE, gdb_in_g_packet=False)
+            for i in range(d_count)
+        ] + [
+            Register(cls.FPSCR, "fpscr", 32, RegisterType.SYSTEM, "float",
+                     gdb_feature=cls.VFP_FEATURE, gdb_in_g_packet=False),
+        ]
+
+    @classmethod
+    def banked(cls) -> list[tuple[Register, Mode, int | None]]:
+        """(register, mode, core register index or None for SPSR)."""
+        out = []
+        number = cls.BANKED
+        for mode in cls.MODES:
+            suffix = "usr" if mode is Mode.SYS else mode.name.lower()
+            indexes = list(range(8, 15)) if mode in (Mode.SYS, Mode.FIQ) \
+                else list(mode.banked_registers())
+            if mode.has_spsr:
+                indexes.append(None)
+            for index in indexes:
+                name = f"spsr_{suffix}" if index is None else f"r{index}_{suffix}"
+                out.append((Register(number, name, 32, RegisterType.SYSTEM,
+                                     "system", gdb_feature=cls.BANKED_FEATURE,
+                                     gdb_in_g_packet=False),
+                            mode, index))
+                number += 1
+        return out
+
+
 class CortexACore(ArmCore):
     """One ARMv7-A core. Memory accesses go through the core, so they
-    see its current translation and cache state."""
+    see its current translation and cache state.
+
+    `vfp_registers` is the number of VFP D registers, 0 without an
+    FPU; `neon` tells GDB to show the Q view of them."""
 
     # Bounds the time between two abort checks.
     MEMORY_RUN = 256
@@ -51,9 +106,26 @@ class CortexACore(ArmCore):
         4: WatchAccess.ANY,
     }
 
-    def __init__(self, name: str, debug: V7Debug):
-        super().__init__(name)
+    CPACR_CP10_CP11 = 0xf << 20
+    FPEXC_EN = 1 << 30
+
+    def __init__(self, name: str, debug: V7Debug, *, vfp_registers: int = 0,
+                 neon: bool = False):
+        if vfp_registers not in (0, 16, 32) or (neon and vfp_registers != 32):
+            raise ValueError(f"{vfp_registers} VFP registers, neon={neon}")
+        banked = CortexARegisters.banked()
+        vfp = CortexARegisters.vfp(vfp_registers) if vfp_registers else []
+        super().__init__(name, list(ARM_CORE_REGISTERS) + vfp
+                         + [r for r, _, _ in banked])
+        if neon:
+            self.gdb_empty_features = (CortexARegisters.NEON_FEATURE,)
         self.debug = debug
+        self.__vfp_count = vfp_registers
+        self.__banked = {r.number: (mode, index) for r, mode, index in banked}
+        # Values of the on-demand registers read or written during
+        # this halt; written ones are put back on resume.
+        self.__shadow: dict[int, int] = {}
+        self.__dirty: set[int] = set()
         self.__breakpoints: dict[int, tuple[int, int]] = {}
         self.__watchpoints: dict[int, tuple[int, int, int]] = {}
         self.__breakpoint_count: int | None = None
@@ -70,6 +142,8 @@ class CortexACore(ArmCore):
         await self.debug.restart()
 
     async def context_save(self):
+        self.__shadow.clear()
+        self.__dirty.clear()
         dscr = await self.debug.enter()
         context = {r: await self.debug.reg_get(r) for r in range(15)}
         # Neither read may follow a CPSR or PC update, which would
@@ -87,6 +161,7 @@ class CortexACore(ArmCore):
         return context, self.__HALT_CAUSES.get(dscr.moe, HaltCause.UNKNOWN)
 
     async def context_restore(self, context):
+        await self.__shadow_flush(context)
         cpsr = context[self.CPSR]
         await self.debug.set_execute(A32.msr(0), cpsr)
         # A PC write in Thumb state needs bit 0 set.
@@ -94,6 +169,142 @@ class CortexACore(ArmCore):
         await self.debug.set_execute(A32.mov(A32.PC, 0), pc)
         for r in range(15):
             await self.debug.reg_set(r, context[r])
+
+    # On-demand registers
+
+    async def reg_read(self, regs):
+        registers = [self.lookup_register(r) for r in regs]
+        context = await self.halted_context()
+        values = await super().reg_read(
+            [r for r in registers if r.number in context])
+        for r in registers:
+            if r.number in context:
+                continue
+            alias = self.__alias(context, r.number)
+            if alias is not None:
+                values[r] = context[alias]
+                continue
+            if r.number not in self.__shadow:
+                await self.__fetch(context, r.number)
+            values[r] = self.__shadow[r.number]
+        return {r: values[r] for r in registers}
+
+    async def reg_write(self, reg_values):
+        context = await self.halted_context()
+        plain = {}
+        for k, v in reg_values.items():
+            r = self.lookup_register(k)
+            alias = None if r.number in context else self.__alias(context, r.number)
+            if r.number in context or alias is not None:
+                plain[alias if alias is not None else r.number] = v
+            else:
+                self.__shadow[r.number] = int(v) & ((1 << r.width) - 1)
+                self.__dirty.add(r.number)
+        await super().reg_write(plain)
+
+    def __alias(self, context, number: int) -> int | None:
+        """Context register a banked register currently is, if any."""
+        if number not in self.__banked:
+            return None
+        mode, index = self.__banked[number]
+        if index is None:
+            return None
+        current = Psr(context[self.CPSR]).mode
+        if self.__owner(current, index) is self.__owner(mode, index):
+            return index
+        return None
+
+    @staticmethod
+    def __owner(mode: Mode, index: int) -> Mode:
+        return mode.bank if mode.is_banked(index) else Mode.USR
+
+    async def __fetch(self, context, number: int):
+        if number in self.__banked:
+            mode = self.__banked[number][0]
+            async with self.__in_mode(context, mode):
+                for n, (m, index) in self.__banked.items():
+                    if m is mode and n not in self.__shadow:
+                        self.__shadow[n] = await self.__banked_get(index)
+            return
+        async with self.__fpu_enabled():
+            for i in range(self.__vfp_count):
+                n = CortexARegisters.D0 + i
+                if n in self.__shadow:
+                    continue
+                await self.debug.execute(A32.vmov_from_d(0, 1, i))
+                low = await self.debug.reg_get(0)
+                self.__shadow[n] = low | await self.debug.reg_get(1) << 32
+            if CortexARegisters.FPSCR not in self.__shadow:
+                self.__shadow[CortexARegisters.FPSCR] = \
+                    await self.debug.execute_get(A32.vmrs(0))
+
+    async def __banked_get(self, index: int | None) -> int:
+        if index is None:
+            return await self.debug.execute_get(A32.mrs(0, spsr=True))
+        return await self.debug.reg_get(index)
+
+    async def __shadow_flush(self, context):
+        modes = {self.__banked[n][0] for n in self.__dirty if n in self.__banked}
+        for mode in modes:
+            async with self.__in_mode(context, mode):
+                for n in sorted(self.__dirty):
+                    m, index = self.__banked.get(n, (None, None))
+                    if m is not mode:
+                        continue
+                    if index is None:
+                        await self.debug.set_execute(
+                            A32.msr(0, spsr=True), self.__shadow[n])
+                    else:
+                        await self.debug.reg_set(index, self.__shadow[n])
+        vfp = sorted(n for n in self.__dirty if n not in self.__banked)
+        if vfp:
+            async with self.__fpu_enabled():
+                for n in vfp:
+                    if n == CortexARegisters.FPSCR:
+                        await self.debug.set_execute(A32.vmsr(0), self.__shadow[n])
+                        continue
+                    value = self.__shadow[n]
+                    await self.debug.reg_set(0, value & 0xffffffff)
+                    await self.debug.reg_set(1, value >> 32)
+                    await self.debug.execute(
+                        A32.vmov_to_d(n - CortexARegisters.D0, 0, 1))
+        self.__shadow.clear()
+        self.__dirty.clear()
+
+    @contextlib.asynccontextmanager
+    async def __in_mode(self, context, mode: Mode):
+        """Switch to `mode` for banked register access and back to the
+        halted one. Leaves r0 clobbered."""
+        if mode is Mode.MON and (await self.debug.dscr()).ns:
+            raise RuntimeError("Monitor mode is out of reach from Non-secure state")
+        cpsr = context[self.CPSR]
+        await self.debug.set_execute(A32.msr(0, PsrMask.C), (cpsr & ~0x1f) | mode)
+        await self.debug.execute(A32.isb())
+        try:
+            yield
+        finally:
+            await self.debug.set_execute(A32.msr(0, PsrMask.C), cpsr)
+            await self.debug.execute(A32.isb())
+
+    @contextlib.asynccontextmanager
+    async def __fpu_enabled(self):
+        """Grant coprocessor access and enable the FPU for the time of
+        an access, the halted program may have left it off. Leaves r0
+        and r1 clobbered."""
+        cpacr_access = A32.mrc(15, 0, 0, 1, 0, 2)
+        cpacr = await self.debug.execute_get(cpacr_access)
+        await self.debug.set_execute(A32.mcr(15, 0, 0, 1, 0, 2),
+                                     cpacr | self.CPACR_CP10_CP11)
+        await self.debug.execute(A32.isb())
+        fpexc = await self.debug.execute_get(A32.vmrs(0, VfpSysReg.FPEXC))
+        await self.debug.set_execute(A32.vmsr(0, VfpSysReg.FPEXC),
+                                     fpexc | self.FPEXC_EN)
+        try:
+            yield
+        finally:
+            await self.debug.set_execute(A32.vmsr(0, VfpSysReg.FPEXC), fpexc)
+            await self.debug.set_execute(A32.mcr(15, 0, 0, 1, 0, 2), cpacr)
+            await self.debug.execute(A32.isb())
 
     async def caches_disable(self):
         """Turn the MMU, caches and branch prediction off, then drop

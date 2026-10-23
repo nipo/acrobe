@@ -266,3 +266,134 @@ async def test_dcache_clean_invalidate_walks_sets_and_ways():
     await core.dcache_clean_invalidate()
     assert sorted(issued) == sorted(
         way << 30 | index << 5 for way in range(4) for index in range(2))
+
+
+class BankedFakeV7Debug(FakeV7Debug):
+    """Adds mode-banked core registers, SPSRs and a VFP that only
+    answers with coprocessor access granted and FPEXC.EN set."""
+
+    def __init__(self, mode=Mode.SVC, **kwargs):
+        super().__init__(cpsr=int(Psr(mode=mode)), **kwargs)
+        self.banks = {}
+        self.spsr = {m: 0x1000 + m for m in Mode if m.has_spsr}
+        self.d = [0x1111_0000_0000_0000 + i for i in range(32)]
+        self.fpscr = 0x03000000
+        self.cpacr = 0
+        self.fpexc = 0
+
+    def owner(self, r):
+        mode = Psr(self.cpsr).mode
+        return mode.bank if mode.is_banked(r) else Mode.USR
+
+    def bank(self, mode, r):
+        return self.banks.get((mode, r), mode << 8 | r)
+
+    async def reg_get(self, r):
+        owner = self.owner(r)
+        return self.regs[r] if owner is Mode.USR else self.bank(owner, r)
+
+    async def reg_set(self, r, v):
+        owner = self.owner(r)
+        if owner is Mode.USR:
+            self.regs[r] = v
+        else:
+            self.banks[owner, r] = v
+
+    def fpu_on(self):
+        return (self.cpacr & 0xf << 20) == 0xf << 20 and self.fpexc & 1 << 30
+
+    async def execute(self, instr):
+        if instr == A32.msr(0, 1):
+            self.cpsr = (self.cpsr & ~0xff) | (self.regs[0] & 0xff)
+        elif instr == A32.mrs(0, spsr=True):
+            self.regs[0] = self.spsr[Psr(self.cpsr).mode]
+        elif instr == A32.msr(0, spsr=True):
+            self.spsr[Psr(self.cpsr).mode] = self.regs[0]
+        elif instr == A32.mrc(15, 0, 0, 1, 0, 2):
+            self.regs[0] = self.cpacr
+        elif instr == A32.mcr(15, 0, 0, 1, 0, 2):
+            self.cpacr = self.regs[0]
+        elif instr == A32.vmrs(0, 8):
+            assert self.cpacr & 0xf << 20
+            self.regs[0] = self.fpexc
+        elif instr == A32.vmsr(0, 8):
+            self.fpexc = self.regs[0]
+        elif instr == A32.vmrs(0):
+            assert self.fpu_on()
+            self.regs[0] = self.fpscr
+        elif instr == A32.vmsr(0):
+            assert self.fpu_on()
+            self.fpscr = self.regs[0]
+        elif any(instr == A32.vmov_from_d(0, 1, i) for i in range(32)):
+            assert self.fpu_on()
+            i = next(i for i in range(32) if instr == A32.vmov_from_d(0, 1, i))
+            self.regs[0], self.regs[1] = self.d[i] & 0xffffffff, self.d[i] >> 32
+        elif any(instr == A32.vmov_to_d(i, 0, 1) for i in range(32)):
+            assert self.fpu_on()
+            i = next(i for i in range(32) if instr == A32.vmov_to_d(i, 0, 1))
+            self.d[i] = self.regs[0] | self.regs[1] << 32
+        else:
+            await super().execute(instr)
+
+
+async def read(core, *names):
+    values = await core.reg_read(list(names))
+    return [values[core.lookup_register(n)] for n in names]
+
+
+async def test_banked_read_switches_mode_and_back():
+    debug = BankedFakeV7Debug(mode=Mode.SVC)
+    core = CortexACore("cpu", debug)
+    await core.halt()
+    sp_svc, = await read(core, "sp")
+    assert await read(core, "r13_svc", "r13_irq", "spsr_irq", "r8_usr") == \
+        [sp_svc, Mode.IRQ << 8 | 13, debug.spsr[Mode.IRQ], 0x108]
+    assert Psr(debug.cpsr).mode is Mode.SVC
+
+
+async def test_fiq_mode_user_registers():
+    debug = BankedFakeV7Debug(mode=Mode.FIQ)
+    core = CortexACore("cpu", debug)
+    await core.halt()
+    r8, = await read(core, "r8")
+    assert r8 == Mode.FIQ << 8 | 8
+    assert await read(core, "r8_fiq", "r8_usr") == [r8, 0x108]
+
+
+async def test_banked_write_lands_on_resume():
+    debug = BankedFakeV7Debug(mode=Mode.SVC)
+    core = CortexACore("cpu", debug)
+    await core.halt()
+    await core.reg_write({"r14_abt": 0xabcd, "spsr_irq": 0x1d3, "sp": 0x8000})
+    assert debug.bank(Mode.ABT, 14) != 0xabcd
+    assert await read(core, "r14_abt", "r13_svc") == [0xabcd, 0x8000]
+    await core.resume()
+    assert debug.bank(Mode.ABT, 14) == 0xabcd
+    assert debug.spsr[Mode.IRQ] == 0x1d3
+    assert debug.bank(Mode.SVC, 13) == 0x8000
+    assert Psr(debug.cpsr).mode is Mode.SVC
+
+
+async def test_vfp_access_restores_fpu_state():
+    debug = BankedFakeV7Debug()
+    core = CortexACore("cpu", debug, vfp_registers=32, neon=True)
+    await core.halt()
+    assert await read(core, "d31", "fpscr") == [debug.d[31], 0x03000000]
+    assert debug.cpacr == 0 and debug.fpexc == 0
+    await core.reg_write({"d3": 0x4000000000000000, "fpscr": 0})
+    await core.resume()
+    assert debug.d[3] == 0x4000000000000000 and debug.fpscr == 0
+    assert debug.cpacr == 0 and debug.fpexc == 0
+
+
+def test_register_catalog():
+    core = CortexACore("cpu", FakeV7Debug(), vfp_registers=32, neon=True)
+    names = [r.name for r in core.registers]
+    assert names[17:19] == ["d0", "d1"] and "d31" in names
+    assert core.lookup_register("fpscr").number == 58
+    assert core.lookup_register("r8_usr").number == 59
+    assert "spsr_mon" in names and "spsr_usr" not in names
+    assert all(not r.gdb_in_g_packet for r in core.registers[17:])
+    assert core.gdb_empty_features == ("org.gnu.gdb.arm.neon",)
+    with pytest.raises(ValueError):
+        CortexACore("cpu", FakeV7Debug(), vfp_registers=16, neon=True)

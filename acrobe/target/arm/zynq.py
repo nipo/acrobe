@@ -278,7 +278,9 @@ class ZynqTarget(Target):
         self.claim(dp, *aps.values())
         ahb = aps[0]
 
-        self.cores = [CortexACore(f"cpu{i}", d) for i, d in enumerate(debugs)]
+        # Zynq-7000 A9s carry VFPv3-D32 with NEON.
+        self.cores = [CortexACore(f"cpu{i}", d, vfp_registers=32, neon=True)
+                      for i, d in enumerate(debugs)]
         cpu0 = self.cores[0]
 
         regions = {
