@@ -29,13 +29,13 @@ from . import message
 
 
 REGTYPE_MAP = {
-    RegisterType.GPR:    ("int",         "general"),
-    RegisterType.FLOAT:  ("float",       "float"),
-    RegisterType.DOUBLE: ("ieee_double", "float"),
-    RegisterType.PC:     ("code_ptr",    "general"),
-    RegisterType.LR:     ("code_ptr",    "general"),
-    RegisterType.SP:     ("data_ptr",    "general"),
-    RegisterType.SYSTEM: ("int",         "general"),
+    RegisterType.GPR:    "int",
+    RegisterType.FLOAT:  "float",
+    RegisterType.DOUBLE: "ieee_double",
+    RegisterType.PC:     "code_ptr",
+    RegisterType.LR:     "code_ptr",
+    RegisterType.SP:     "data_ptr",
+    RegisterType.SYSTEM: "int",
 }
 
 
@@ -184,11 +184,15 @@ class Responder:
             return message.ok()
         return message.error(1)
 
+    def __g_registers(self):
+        return [r for r in self.current_core.registers if r.gdb_in_g_packet]
+
     async def handle_g(self, payload: bytes) -> bytes:
-        regs = await self.current_core.reg_read(self.current_core.registers)
+        registers = self.__g_registers()
+        regs = await self.current_core.reg_read(registers)
         out = bytearray()
         byteorder = self.current_core.gdb_byteorder
-        for r in self.current_core.registers:
+        for r in registers:
             value = regs[r]
             out.extend(value.to_bytes(r.width // 8, byteorder=byteorder).hex().encode("ascii"))
         return bytes(out)
@@ -198,7 +202,7 @@ class Responder:
         to_write = {}
         cursor = 0
         byteorder = self.current_core.gdb_byteorder
-        for r in self.current_core.registers:
+        for r in self.__g_registers():
             hex_len = (r.width // 8) * 2
             chunk = raw[cursor:cursor + hex_len]
             cursor += hex_len
@@ -621,28 +625,31 @@ class Responder:
 
     def __build_target_xml(self) -> bytes:
         target = et.Element("target")
-        # Group registers by feature name. Cortex-M cores all share
-        # one feature; AMP / heterogeneous Debuggables may have more.
+        # Group registers by feature name. AMP / heterogeneous
+        # Debuggables may bring more features than one core.
         by_feature: dict[str, list] = {}
         for core in self.cores:
-            feat = core.gdb_feature_name or "org.gnu.gdb.generic"
-            by_feature.setdefault(feat, [])
             for r in core.registers:
-                if not getattr(r, "gdb_visible", True):
+                if not r.gdb_visible:
                     continue
-                if r not in by_feature[feat]:
-                    by_feature[feat].append(r)
+                feat = (r.gdb_feature or core.gdb_feature_name
+                        or "org.gnu.gdb.generic")
+                regs = by_feature.setdefault(feat, [])
+                if r not in regs:
+                    regs.append(r)
+            for feat in core.gdb_empty_features:
+                by_feature.setdefault(feat, [])
         for feat_name, regs in by_feature.items():
             feature_el = et.SubElement(target, "feature", name=feat_name)
             for r in regs:
-                t, g = REGTYPE_MAP.get(r.datatype, ("int", "general"))
+                t = REGTYPE_MAP.get(r.datatype, "int")
                 et.SubElement(
                     feature_el, "reg",
                     name=r.name,
                     bitsize=str(r.width),
                     regnum=str(r.number),
                     type=t,
-                    group=g,
+                    group=r.group,
                 )
         return (b'<?xml version="1.0"?>'
                 b'<!DOCTYPE target SYSTEM "gdb-target.dtd">'

@@ -306,6 +306,37 @@ class TestResponderRegs:
         assert responder.current_core.values[regs[2]] == 3
 
 
+class TestResponderFeatures:
+    @staticmethod
+    def responder():
+        core = FakeCore(registers=[
+            Register(0, "r0", 32, RegisterType.GPR, "general"),
+            Register(15, "pc", 32, RegisterType.PC, "general"),
+            Register(26, "d0", 64, RegisterType.DOUBLE, "float",
+                     gdb_feature="org.gnu.gdb.arm.vfp", gdb_in_g_packet=False),
+        ])
+        core.gdb_empty_features = ("org.gnu.gdb.arm.neon",)
+        return Responder(FakeDebuggable(cores=[core]))
+
+    @pytest.mark.asyncio
+    async def test_target_xml_features(self):
+        resp = await self.responder().handle_packet(
+            b"qXfer:features:read:target.xml:0,1000")
+        assert b'<feature name="org.gnu.gdb.arm.m-profile"><reg name="r0"' in resp
+        assert (b'<feature name="org.gnu.gdb.arm.vfp"><reg name="d0" '
+                b'bitsize="64" regnum="26" type="ieee_double" group="float" />'
+                b'</feature>') in resp
+        assert b'<feature name="org.gnu.gdb.arm.neon" />' in resp
+
+    @pytest.mark.asyncio
+    async def test_g_leaves_lazy_registers_out(self):
+        responder = self.responder()
+        core = responder.current_core
+        core.values[core.lookup_register("d0")] = 0x1122334455667788
+        assert len(await responder.handle_packet(b"g")) == 16
+        assert await responder.handle_packet(b"p1a") == b"8877665544332211"
+
+
 class TestResponderMemory:
     @pytest.mark.asyncio
     async def test_m_reads_memory(self, responder):

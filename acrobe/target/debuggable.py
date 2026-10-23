@@ -38,6 +38,10 @@ class Register:
     `datatype`    — `RegisterType` value.
     `group`       — coarse register group ("general", "system", …).
     `gdb_visible` — whether GDB target.xml exposes this register.
+    `gdb_feature` — target.xml feature, the core's one when None.
+    `gdb_in_g_packet` — whether `g` / `G` transfer it. Others are
+                    fetched one by one, only when GDB needs them.
+                    They must be numbered after all `g` registers.
     """
 
     number: int
@@ -46,6 +50,8 @@ class Register:
     datatype: RegisterType
     group: str
     gdb_visible: bool = True
+    gdb_feature: str | None = None
+    gdb_in_g_packet: bool = True
 
     def __lt__(self, other):
         return self.number < other.number
@@ -78,6 +84,8 @@ class Core(Node):
 
     gdb_feature_name: str = ""
     gdb_byteorder: Literal["little", "big"] = "little"
+    # Features GDB keys behaviour on that carry no register.
+    gdb_empty_features: tuple[str, ...] = ()
 
     def __init__(self, name):
         super().__init__(name)
