@@ -4,3 +4,4 @@ from . import spartan7  # noqa: F401
 from . import kintex7  # noqa: F401
 from . import zynq  # noqa: F401
 from . import formats  # noqa: F401
+from . import boot_image  # noqa: F401
