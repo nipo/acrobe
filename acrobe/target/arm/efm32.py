@@ -427,7 +427,7 @@ class EfmLoadable(Loadable):
             await core.halt()
         await super().pre_program(do_erase=do_erase, assume_clean=assume_clean)
 
-    async def post_program(self, *, success, do_start):
+    async def post_program(self, *, success, do_start, memory_map):
         if do_start and success:
             core = self.find_core()
             if core is not None:

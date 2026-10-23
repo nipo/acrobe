@@ -101,6 +101,10 @@ class Core(Node):
     async def reset(self, *, stop=True):
         raise NotImplementedError
 
+    async def run_at(self, address: int):
+        """Start executing at `address` from a reset-like state."""
+        raise NotImplementedError
+
     async def reg_read(self, regs):
         raise NotImplementedError
 

@@ -9,6 +9,7 @@ from acrobe.component.arm.dp import DpAccessFailure
 from acrobe.component.arm.mem_ap import MemAp
 from acrobe.component.nordic.ctrl_ap import CtrlAp
 from acrobe.db import NoMatch
+from acrobe.memory_map import MemoryMap
 from acrobe.node import Node
 from acrobe.target import Loadable, Target
 from acrobe.target.arm.cortex_m import CortexMDebuggable
@@ -562,13 +563,15 @@ class TestNrf52LoadableHalt:
     @pytest.mark.asyncio
     async def test_post_program_reset_on_do_start(self):
         loadable, core = self.make()
-        await loadable.post_program(success=True, do_start=True)
+        await loadable.post_program(success=True, do_start=True,
+                                    memory_map=MemoryMap())
         assert core.history == ["reset(stop=False)"]
 
     @pytest.mark.asyncio
     async def test_post_program_no_reset_on_failure(self):
         loadable, core = self.make()
-        await loadable.post_program(success=False, do_start=True)
+        await loadable.post_program(success=False, do_start=True,
+                                    memory_map=MemoryMap())
         assert core.history == []
 
     @pytest.mark.asyncio

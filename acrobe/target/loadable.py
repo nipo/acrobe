@@ -18,6 +18,7 @@ override `write` directly.
 
 from ..node import Node
 from ..memory_map import MemoryMap
+from .debuggable import Core
 from .region import Flash, Region
 
 
@@ -70,7 +71,8 @@ class Loadable(Node):
             if do_verify:
                 success = await self.verify(m)
 
-            await self.post_program(success=success, do_start=do_start)
+            await self.post_program(success=success, do_start=do_start,
+                                    memory_map=m)
 
     async def read(self, begin=0, end=None) -> MemoryMap:
         regions = sorted(self.regions)
@@ -123,7 +125,8 @@ class Loadable(Node):
         if assume_clean:
             self.force_blank()
 
-    async def post_program(self, *, success, do_start):
+    async def post_program(self, *, success, do_start, memory_map):
+        """`memory_map` is the image just programmed."""
         if do_start and success:
             await self.reset()
 
@@ -132,3 +135,23 @@ class Loadable(Node):
         Override in subclasses that own a reset path; default is a
         no-op so the framework doesn't crash on do_start=True for
         passive devices (SPI flash, EEPROM, …)."""
+
+
+class RamLoadable(Loadable):
+    """Loads an image to volatile memory with the core halted, and
+    starts it from the image entry point."""
+
+    def __init__(self, core: Core, name="main"):
+        super().__init__(name)
+        self.core = core
+
+    async def pre_program(self, *, do_erase, assume_clean):
+        await self.core.halt()
+        await super().pre_program(do_erase=do_erase, assume_clean=assume_clean)
+
+    async def post_program(self, *, success, do_start, memory_map):
+        if not (do_start and success):
+            return
+        if memory_map.entry is None:
+            raise ValueError("Image declares no entry point to start from")
+        await self.core.run_at(memory_map.entry)

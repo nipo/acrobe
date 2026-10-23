@@ -12,7 +12,7 @@ See `PLAN_target.md` for the full design.
 
 from .target import Target, Explorer
 from .discovery import TargetDiscovery
-from .loadable import Loadable
+from .loadable import Loadable, RamLoadable
 from .memory import Memory
 from .region import Region, Ram, Flash, Eeprom, NotUpdatable
 from .debuggable import (
@@ -36,7 +36,7 @@ from .arm import rp2040_swd as _rp2040_swd  # noqa: F401,E402
 
 __all__ = [
     "Target", "Explorer", "TargetDiscovery",
-    "Loadable",
+    "Loadable", "RamLoadable",
     "Memory",
     "Region", "Ram", "Flash", "Eeprom", "NotUpdatable",
     "Debuggable", "Core", "Register", "RegisterType",

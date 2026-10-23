@@ -173,7 +173,7 @@ class PicobootLoadable(Loadable):
         else:
             await super().erase_all()
 
-    async def post_program(self, *, success, do_start):
+    async def post_program(self, *, success, do_start, memory_map):
         # Release exclusive access before optionally rebooting —
         # the REBOOT command needs the device to be willing to
         # finalise it, and exclusive-access state otherwise stays

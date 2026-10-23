@@ -214,9 +214,10 @@ class TestLoadable:
                 await super().pre_program(do_erase=do_erase,
                                           assume_clean=assume_clean)
 
-            async def post_program(self, *, success, do_start):
+            async def post_program(self, *, success, do_start, memory_map):
                 order.append("post")
-                await super().post_program(success=success, do_start=do_start)
+                await super().post_program(success=success, do_start=do_start,
+                                           memory_map=memory_map)
 
             async def reset(self):
                 order.append("reset")
@@ -254,7 +255,8 @@ class TestLoadable:
         bad = _mm((0x100, b"\x55" * 16))
         # Manually invoke verify path + post_program to simulate verify
         # failing on a do_start flow.
-        await hl.post_program(success=False, do_start=True)
+        await hl.post_program(success=False, do_start=True,
+                              memory_map=bad)
         assert order == []
 
 
