@@ -236,6 +236,15 @@ class V7Debug(Dbg):
     async def restart(self) -> Dscr:
         await self.dscr_update(itren=False)
         await self.drcr(clear_sticky_exceptions=True, restart=True)
+        return await self.wait_restarted()
+
+    async def restart_prepare(self):
+        """Leave a halted core ready for a restart request from
+        another source than DBGDRCR, like a cross trigger."""
+        await self.dscr_update(itren=False)
+        await self.drcr(clear_sticky_exceptions=True)
+
+    async def wait_restarted(self) -> Dscr:
         return await self.wait_dscr(lambda d: d.restarted)
 
     async def enter(self) -> Dscr:

@@ -22,6 +22,7 @@ placed from the host and CPU0 is handed to the first of them.
 
 from __future__ import annotations
 
+from ...component.arm.coresight.cti import Cti
 from ...component.arm.coresight.v7_debug import V7Debug
 from ...component.arm.dp import Dp
 from ...component.arm.jtag_dp import JtagDpTap
@@ -39,6 +40,7 @@ from ..memory import Memory
 from ..region import Ram
 from ..target import Target
 from .cortex_a import CortexACore
+from .cross_trigger import CrossTrigger
 from .soc import ArmSocTarget
 
 
@@ -47,9 +49,11 @@ class ZynqDebuggable(Debuggable):
     core when there is one, so it sees caches and translation as
     the software does, else through the AHB-AP."""
 
-    def __init__(self, cores, ahb: MemAp, name: str = "debug"):
+    def __init__(self, cores, ahb: MemAp, cross_trigger: CrossTrigger | None,
+                 name: str = "debug"):
         super().__init__(name)
         self.ahb = ahb
+        self.cross_trigger = cross_trigger
         for core in cores:
             self.child_add(core)
 
@@ -60,9 +64,33 @@ class ZynqDebuggable(Debuggable):
             await core.points_clear()
 
     async def detach(self):
+        if self.cross_trigger is not None:
+            await self.cross_trigger.teardown()
         for core in self.cores:
             if await core.state() == CoreState.HALT:
                 await core.resume()
+
+    async def monitor(self, cmd: str, args: list[str]) -> str:
+        """`halt` and `resume` act on every core in the same cycle
+        when the CPU CTIs are there."""
+        if cmd == "help":
+            return ("halt    halt every core\n"
+                    "resume  resume every core\n")
+        if cmd == "halt":
+            if self.cross_trigger is not None:
+                await self.cross_trigger.halt()
+            else:
+                for core in self.cores:
+                    await core.halt()
+            return "Halted.\n"
+        if cmd == "resume":
+            if self.cross_trigger is not None:
+                await self.cross_trigger.resume()
+            else:
+                for core in self.cores:
+                    await core.resume()
+            return "Resumed.\n"
+        raise NotImplementedError(cmd)
 
     async def __bus(self):
         for core in self.cores:
@@ -267,6 +295,9 @@ class ZynqTarget(Target):
 
     LOADABLE = ("ocm_low", "ddr", "ocm_high")
 
+    # Debug bus addresses of the CTIs wired to CPU0 and CPU1.
+    CPU_CTI = (0x80098000, 0x80099000)
+
     def __init__(self, dp: Dp, pl: Zynq | None):
         super().__init__(pl.name if pl is not None else "zynq")
         aps = {ap.base >> 24: ap for ap in dp.children_of_class(MemAp)}
@@ -291,7 +322,14 @@ class ZynqTarget(Target):
             "qspi": self.QSPI, "ocm_high": self.OCM_HIGH,
         }
 
-        debug = ZynqDebuggable(self.cores, ahb)
+        ctis = {cti.base: cti for cti in dp.children_of_class(Cti)}
+        pairs = [(core, ctis.get(base))
+                 for core, base in zip(self.cores, self.CPU_CTI)]
+        cross_trigger = None
+        if all(cti is not None for _core, cti in pairs):
+            cross_trigger = CrossTrigger(pairs)
+
+        debug = ZynqDebuggable(self.cores, ahb, cross_trigger)
         for name, (address, size) in regions.items():
             debug.memory_map.append(Ram(name, address, size))
         self.child_add(debug)

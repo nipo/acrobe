@@ -337,12 +337,13 @@ class CortexACore(ArmCore):
                     way << way_shift | index << line_shift)
         await self.debug.execute(A32.dsb())
 
-    async def resume(self, *, allow_interrupts=True):
+    async def resume_prepare(self, *, allow_interrupts=True):
         """A breakpoint on the resume address would hit again before
         the instruction executes, step over it first."""
-        if self.__breakpoints_at((await self.halted_context())[self.PC]):
+        if not self.__stepping and \
+                self.__breakpoints_at((await self.halted_context())[self.PC]):
             await self.step()
-        await super().resume(allow_interrupts=allow_interrupts)
+        await super().resume_prepare(allow_interrupts=allow_interrupts)
 
     def __breakpoints_at(self, addr: int) -> list[int]:
         return [index for index, (a, _kind) in self.__breakpoints.items()

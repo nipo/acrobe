@@ -94,13 +94,18 @@ class ArmCore(Core):
         await self.halted_context()
 
     async def resume(self, *, allow_interrupts=True):
+        await self.resume_prepare(allow_interrupts=allow_interrupts)
+        await self.debug_restart()
+
+    async def resume_prepare(self, *, allow_interrupts=True):
+        """Everything resume does but the restart request, for
+        restarting several cores at once."""
         if not allow_interrupts:
             raise NotImplementedError("Resuming with interrupts masked")
         context = await self.halted_context()
         await self.context_restore(context)
         self.__context = None
         self.__cause = None
-        await self.debug_restart()
 
     async def run_at(self, address: int):
         """Start executing ARM code at `address` from Supervisor mode
