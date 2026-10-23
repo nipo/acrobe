@@ -103,6 +103,19 @@ class MemoryMap:
     def end(self) -> int:
         return max(a + len(d) for a, d in self.chunks)
 
+    @property
+    def entry(self) -> int | None:
+        """Execution start address, as declared by the image format
+        (ELF e_entry, ihex start linear address), or None."""
+        return self.info.get("entry")
+
+    @entry.setter
+    def entry(self, address: int | None):
+        if address is None:
+            self.info.pop("entry", None)
+        else:
+            self.info["entry"] = int(address)
+
     # --- Composition ---
 
     def __add__(self, other: "MemoryMap") -> "MemoryMap":

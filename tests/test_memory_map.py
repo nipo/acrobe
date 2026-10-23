@@ -164,3 +164,22 @@ class TestSaveDispatch:
         save(m, str(path2))
         text = path2.read_text()
         assert text.startswith(":")  # ihex format
+
+
+class TestEntry:
+    def test_absent(self):
+        assert MemoryMap([(0, b"a")]).entry is None
+
+    def test_survives_derivations(self):
+        m = MemoryMap([(0x100, b"ab"), (0x102, b"cd")])
+        m.entry = 0x101
+        assert m.simplified().entry == 0x101
+        assert m.within(0x100, 0x102).entry == 0x101
+        assert m.paged(16).entry == 0x101
+        assert (MemoryMap() + m).entry == 0x101
+
+    def test_clear(self):
+        m = MemoryMap()
+        m.entry = 4
+        m.entry = None
+        assert m.entry is None
