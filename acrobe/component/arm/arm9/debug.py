@@ -315,13 +315,63 @@ class Arm9Debug(Batcher, Node):
         return self.nop()
 
     def post_system_speed(self, instr: int) -> asyncio.Future:
-        """Execute `instr` (typically a memory access) at system
-        speed. The core leaves debug state and re-enters it once the
-        access completes; poll status for `syscomp` before shifting
-        anything else."""
+        """Execute `instr`, a memory access, at system speed. The
+        core leaves debug state and re-enters it once the access
+        completes. Resolves to the debug status read right after the
+        restart: unless both `syscomp` and `dbgack` are set, the
+        access was still pending and the pipeline state is lost."""
         self.shift(instr)
         self.nop(sysspeed=True)
-        return self.post(Restart())
+        self.post(Restart())
+        status = asyncio.get_running_loop().create_future()
+        chain_future(self.post(IceRead(IceRegister.DEBUG_STATUS)),
+                     status, DebugStatus)
+        return status
+
+    def post_load_words(self, count: int):
+        """Load `count` words (up to 14) from the address in r0 into
+        r1.., post-incrementing r0. Returns the system speed status
+        future and the loaded value futures."""
+        regs = self.__data_registers(count)
+        status = self.post_system_speed(A32.ldmia(0, regs, writeback=True))
+        return status, self.post_regs_read(regs)
+
+    def post_store_words(self, values):
+        """Store words (up to 14) to the address in r0 through r1..,
+        post-incrementing r0. Returns the system speed status
+        future."""
+        regs = self.__data_registers(len(values))
+        self.post_regs_write(dict(zip(regs, values)))
+        return self.post_system_speed(A32.stmia(0, regs, writeback=True))
+
+    __LOADS = {1: A32.ldrb, 2: A32.ldrh, 4: A32.ldr}
+    __STORES = {1: A32.strb, 2: A32.strh, 4: A32.str}
+
+    def post_load_units(self, width: int, count: int):
+        """Load `count` (up to 14) `width`-byte units from the address
+        in r0, one access each, post-incrementing r0. Returns the
+        system speed status futures and the loaded value futures."""
+        regs = self.__data_registers(count)
+        load = self.__LOADS[width]
+        statuses = [self.post_system_speed(load(r, 0, width, post_index=True))
+                    for r in regs]
+        return statuses, self.post_regs_read(regs)
+
+    def post_store_units(self, width: int, values):
+        """Store `width`-byte units (up to 14) to the address in r0, one
+        access each, post-incrementing r0. Returns the system speed
+        status futures."""
+        regs = self.__data_registers(len(values))
+        store = self.__STORES[width]
+        self.post_regs_write(dict(zip(regs, values)))
+        return [self.post_system_speed(store(r, 0, width, post_index=True))
+                for r in regs]
+
+    @staticmethod
+    def __data_registers(count: int) -> list[int]:
+        if not 1 <= count <= 14:
+            raise ValueError(f"Cannot move {count} registers through r1-r14")
+        return list(range(1, count + 1))
 
     def post_branch_resume(self) -> asyncio.Future:
         """Leave debug state and resume at the pc written by
