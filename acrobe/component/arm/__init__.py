@@ -10,3 +10,4 @@ from . import mem_ap  # noqa: F401
 from . import jtag_dp  # noqa: F401
 from . import sw_dp  # noqa: F401
 from . import coresight  # noqa: F401
+from . import arm9  # noqa: F401
