@@ -206,6 +206,10 @@ class Dp(Batcher, Node):
     RDBUFF    = 0x0c  # bank-agnostic, R
     TARGETSEL = 0x0c  # bank-agnostic, W (multidrop)
 
+    # Whether flush_ops drives SELECT1 (ADIv6 ADDR[63:32]), making
+    # system addresses above 4 GiB reachable when DPIDR1.ASIZE > 32.
+    SUPPORTS_SELECT1 = False
+
     # CTRL/STAT bits
     ORUNDETECT   = 1 << 0
     STICKYORUN   = 1 << 1
@@ -367,10 +371,9 @@ class Dp(Batcher, Node):
 
         # DPIDR1.ASIZE: bits[6:0] — system address size in bits.
         asize = (self.dpidr1 or 0) & 0x7f
-        if asize > 32:
-            # SELECT1 (ADDR[63:32]) needed for >32-bit address space.
-            # Not yet wired in JtagDp/SwDp — components above the
-            # 4 GiB boundary will fault.
+        if asize > 32 and not self.SUPPORTS_SELECT1:
+            # SELECT1 (ADDR[63:32]) needed for >32-bit address space;
+            # a DP without it can't reach components above 4 GiB.
             self.logger.warning(
                 "DPIDR1.ASIZE=%d > 32: SELECT1 unsupported, only "
                 "ADDR[31:0] reachable", asize)
@@ -383,6 +386,11 @@ class Dp(Batcher, Node):
                 "no APs to enumerate")
             return
         base_addr = baseptr0 & 0xfffff000
+        if asize > 32:
+            # BASEPTR1 holds PTR[63:32] (IHI0074F B2.2.2).
+            baseptr1 = await self.post(DpRead(self.BASEPTR1))
+            self.logger.info("BASEPTR1 0x%08x", baseptr1)
+            base_addr |= baseptr1 << 32
 
         bus = DpSystemBus(self)
         try:

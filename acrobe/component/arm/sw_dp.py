@@ -46,6 +46,8 @@ class SwDp(dpmod.Dp):
     ABORT_REG  = 0x00  # write to DP addr 0 = ABORT (read at 0 = DPIDR)
     RDBUFF_REG = 0x0c
 
+    SUPPORTS_SELECT1 = True
+
     # Idle clock cycles inserted after each AP transaction. Without
     # them the chip's AP can't keep up and returns WAIT/FAULT on the
     # following access. 32 is conservative; OpenOCD uses 8 by default.
@@ -64,25 +66,44 @@ class SwDp(dpmod.Dp):
         # (line reset clears it); pre-seed accordingly so the first
         # access doesn't emit a redundant SELECT write.
         self.__select: int = 0
+        # SELECT1 (ADIv6 ADDR[63:32]) is UNKNOWN after reset; None
+        # forces a write before the first access that depends on it.
+        self.__select1: int | None = None
         # On a multidrop wire, the DP must announce itself at the
         # head of every batch — the Interface deduplicates so
         # back-to-back batches for the same target don't actually
         # send a TARGETSEL preamble.
         self.targetsel: int | None = targetsel
 
-    def __select_for(self, op) -> int:
-        """Compute the SELECT value needed to access ``op``'s register.
+    def __select1_for(self, op) -> int | None:
+        """Compute the SELECT1 value needed to access ``op``'s register,
+        or None if SELECT1 doesn't take part in the access.
 
-        For AP ops, ``op.addr`` is the absolute system address, encoded
-        ADIv5-style as ``(apsel << 24) | reg_offset``. APSEL goes in
-        SELECT[31:24] and APBANKSEL (upper nibble of the register
-        offset) in SELECT[7:4]. For DP ops, only DPBANKSEL (lower
-        nibble) changes; APSEL/APBANKSEL stick."""
-        cur = self.__select
+        SELECT1 holds ADDR[63:32] on DPv3 (ADIv6). It only matters when
+        DPIDR1.ASIZE > 32; below that the upper address bits are out of
+        range and SELECT1 is left alone. Since it's UNKNOWN after reset,
+        every AP access depends on it then, not only those above 4 GiB."""
+        if (self.adi_version == 6 and (self.asize or 0) > 32
+                and isinstance(op, (dpmod.ApRead, dpmod.ApWrite))):
+            return op.addr >> 32
+        return None
+
+    def __select_for(self, op, cur: int) -> int:
+        """Compute the SELECT value needed to access ``op``'s register,
+        given the current SELECT value ``cur``.
+
+        For AP ops, ``op.addr`` is the absolute system address and goes
+        in SELECT[31:4] as-is. On DPv3 (ADIv6) that is the AP register
+        address. ADIv5 addresses are ``(apsel << 24) | reg_offset`` with
+        offsets below 0x100, so the same bits land as APSEL in
+        SELECT[31:24] and APBANKSEL in SELECT[7:4]. For DP ops, only
+        DPBANKSEL (lower nibble) changes; the AP address bits stick."""
         if isinstance(op, (dpmod.ApRead, dpmod.ApWrite)):
-            apsel = (op.addr >> 24) & 0xff
-            apbank = (op.addr >> 4) & 0xf
-            return (apsel << 24) | (apbank << 4) | (cur & 0xf)
+            if self.adi_version == 5:
+                apsel = (op.addr >> 24) & 0xff
+                apbank = (op.addr >> 4) & 0xf
+                return (apsel << 24) | (apbank << 4) | (cur & 0xf)
+            return (op.addr & 0xFFFFFFF0) | (cur & 0xf) # For ADIv6, ADDR is SELECT[31:4] and DPBANKSEL is SELECT[3:0]
         return (cur & 0xFFFFFFF0) | ((op.addr >> 4) & 0xf)
 
     async def flush_ops(self, batch):
@@ -90,6 +111,7 @@ class SwDp(dpmod.Dp):
         # at the end and propagate results / exceptions.
         records: list[tuple] = []
         select = self.__select
+        select1 = self.__select1
         # User-future of the in-flight AP read whose data is in the
         # chip's posted-read latch. The wire-future of the *next* op
         # that drains the latch (an AP read or an RDBUFF read) is
@@ -107,6 +129,31 @@ class SwDp(dpmod.Dp):
             records.append((pending, f))
             pending = None
 
+        def write_select(value):
+            """SELECT change is a DP write — drain first."""
+            nonlocal select
+            if select != value:
+                drain_pending()
+                self.__swd.post(swd.Write(False, self.SELECT_REG, value))
+                select = value
+
+        def select_for(op):
+            """Emit the SELECT1 and SELECT writes needed for ``op``.
+            SELECT1 goes first: it's reached through DP bank 5, which
+            the SELECT write that follows switches away from."""
+            nonlocal select1
+            new_select1 = self.__select1_for(op)
+            if new_select1 is not None and new_select1 != select1:
+                # SELECT1 is a DP write too, even when SELECT already
+                # sits on bank 5 and isn't rewritten.
+                drain_pending()
+                write_select((select & 0xFFFFFFF0)
+                             | ((dpmod.Dp.SELECT1 >> 4) & 0xf))
+                self.__swd.post(swd.Write(False, dpmod.Dp.SELECT1 & 0xc,
+                                          new_select1))
+                select1 = new_select1
+            write_select(self.__select_for(op, select))
+
         if self.targetsel is not None:
             # The Interface elides this when current_target already
             # matches, so the cost is one Python-side post per batch
@@ -117,6 +164,8 @@ class SwDp(dpmod.Dp):
             if self.__swd.current_target != self.targetsel:
                 self.__select = 0
                 select = 0
+                self.__select1 = None
+                select1 = None
             self.__swd.post(swd.TargetSelect(target=self.targetsel))
 
         for op, future in batch:
@@ -140,12 +189,7 @@ class SwDp(dpmod.Dp):
                     f"SwDp can't lower {type(op).__name__}"))
                 continue
 
-            new_select = self.__select_for(op)
-            if select != new_select:
-                # SELECT change is a DP write — drain first.
-                drain_pending()
-                self.__swd.post(swd.Write(False, self.SELECT_REG, new_select))
-                select = new_select
+            select_for(op)
 
             wire_addr = op.addr & 0xc
 
@@ -196,6 +240,7 @@ class SwDp(dpmod.Dp):
         drain_pending()
 
         self.__select = select
+        self.__select1 = select1
 
         # Resolve user futures from wire futures. We gather rather
         # than await individually so that a single failure doesn't

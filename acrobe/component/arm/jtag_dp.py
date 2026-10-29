@@ -158,14 +158,17 @@ class JtagDpLowerer:
     CHECK = object()
 
     def __init__(self, version: int, tap: JtagDpTap,
-                 ctrl_stat: int | None = None):
+                 ctrl_stat: int | None = None, select1: bool = False):
         self.version = version
         self.tap = tap
         # CTRL/STAT control bits to write back when clearing the
         # sticky flags, None until the DP wrote CTRL/STAT.
         self.ctrl_stat = ctrl_stat
+        # Whether AP accesses also set SELECT1 (ADIv6, ASIZE > 32).
+        self.uses_select1 = select1
 
         self.last_select = None
+        self.last_select1 = None
 
         self.pending = None
 
@@ -319,6 +322,19 @@ class JtagDpLowerer:
         self.last_select = select
         self.dp_access(False, dpmod.Dp.SELECT, select)
 
+    def select1(self, select1: int):
+        """
+        Update SELECT1 (ADDR[63:32]), may be a noop if not actually
+        changing. SELECT1 is in DP bank 5, so this moves DPBANKSEL;
+        it's UNKNOWN after reset, hence written once per batch.
+        """
+        if self.last_select1 == select1:
+            return
+
+        self.last_select1 = select1
+        self.dp_select(dpmod.Dp.SELECT1, False)
+        self.dp_access(False, dpmod.Dp.SELECT1, select1)
+
     def flush(self):
         """
         In pending AP and DP reads, get one
@@ -364,6 +380,8 @@ class JtagDpLowerer:
         read = isinstance(op, dpmod.ApRead)
         data = 0 if read else op.data
 
+        if self.uses_select1:
+            self.select1(address >> 32)
         self.ap_select(address)
         self.ap_access(read, address, data)
         self.pending = pending
@@ -421,6 +439,8 @@ class JtagDp(dpmod.Dp):
     """ARM Debug Port over JTAG. Translates batched DP/AP ops to
     DPACC/APACC shifts on the parent :class:`JtagDpTap`."""
 
+    SUPPORTS_SELECT1 = True
+
     def __init__(self, name: str = "dap", jtag_protocol_version: int = 0):
         super().__init__(name)
         self.__select: int | None = None  # cached SELECT value
@@ -435,8 +455,10 @@ class JtagDp(dpmod.Dp):
         """Lower a DP/AP batch to JTAG-DP wire shifts."""
 
         try:
-            lowerer = JtagDpLowerer(self.__jtag_protocol_version,
-                                    self.parent, self.__ctrl_stat)
+            lowerer = JtagDpLowerer(
+                self.__jtag_protocol_version, self.parent,
+                self.__ctrl_stat,
+                select1=(self.adi_version == 6 and (self.asize or 0) > 32))
             lowerer.process(batch)
             self.__ctrl_stat = lowerer.ctrl_stat
         except Exception as e:
