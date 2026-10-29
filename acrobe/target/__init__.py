@@ -35,6 +35,7 @@ from .arm import fx3 as _fx3  # noqa: F401,E402
 from .arm import zynq as _zynq  # noqa: F401,E402
 from .arm import rp2040 as _rp2040  # noqa: F401,E402
 from .arm import rp2040_swd as _rp2040_swd  # noqa: F401,E402
+from .arm import rp2350_swd as _rp2350_swd  # noqa: F401,E402
 
 __all__ = [
     "Target", "Explorer", "TargetDiscovery",

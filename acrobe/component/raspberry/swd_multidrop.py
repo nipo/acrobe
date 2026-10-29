@@ -1,10 +1,11 @@
 """SWD multidrop TARGETSEL registrations for Raspberry Pi silicon.
 
 Importing this module populates :data:`swd.Interface.targetsel_db`
-with the TARGETID values that ``swd(multidrop=scan)`` walks. Each
-RP2040 / RP2350 die exposes one Debug Port per Cortex core plus a
-rescue DP for recovering a hung chip, all sharing a single SWD
-wire and selected via TARGETSEL.
+with the TARGETID values that ``swd(multidrop=scan)`` walks. An
+RP2040 die exposes one Debug Port per Cortex core plus a rescue DP
+for recovering a hung chip, all sharing a single SWD wire and
+selected via TARGETSEL. An RP2350 has a single DP, with both cores
+behind it as APs and rescue done through its RP-AP.
 
 TARGETID layout (ADIv5/v6 multidrop):
 
@@ -14,8 +15,9 @@ TARGETID layout (ADIv5/v6 multidrop):
     bit[31:28]  = TINSTANCE (core / DP index on this chip)
 
 For Raspberry Pi: TDESIGNER = (bank=9, id=0x13), TPARTNO=0x1002 on
-RP2040, 0x0004 on RP2350. TINSTANCE distinguishes the per-core
-DPs from the rescue DP."""
+RP2040, 0x0040 on RP2350. On RP2040, TINSTANCE distinguishes the
+per-core DPs from the rescue DP; on RP2350 it is the DP's instance
+ID, POWMAN.DBGCONFIG.DP_INSTID (0 out of reset)."""
 
 from ...protocol import swd
 from ...part_id import PartId
@@ -42,18 +44,16 @@ swd.Interface.targetsel_db.register(
 swd.Interface.targetsel_db.register(
     _targetsel(9, 0x13, 0x1002, 0xf))("rp2040-rescue")
 
-# RP2350 — dual Cortex-M33 (or RISC-V Hazard3). TPARTNO 0x0004.
+# RP2350 — dual Cortex-M33 (or RISC-V Hazard3). TPARTNO 0x0040
+# (TARGETID 0x00040927). One DP; firmware that changes
+# POWMAN.DBGCONFIG.DP_INSTID would need TINSTANCE adjusted.
 swd.Interface.targetsel_db.register(
-    _targetsel(9, 0x13, 0x0004, 0))("rp2350-core0")
-swd.Interface.targetsel_db.register(
-    _targetsel(9, 0x13, 0x0004, 1))("rp2350-core1")
-swd.Interface.targetsel_db.register(
-    _targetsel(9, 0x13, 0x0004, 0xf))("rp2350-rescue")
+    _targetsel(9, 0x13, 0x0040, 0))("rp2350")
 
 
 @swd.Interface.db.register(0x10212927)
 class Rp2040RescueDp(SwDp):
-    """RP2040 / RP2350 Rescue DP.
+    """RP2040 Rescue DP.
 
     The rescue DP differs from a regular ARM SW-DP in two crucial
     ways:

@@ -1,6 +1,6 @@
-"""Raspberry Pi RP2040 / RP2350 SWD multidrop target.
+"""Raspberry Pi RP2040 SWD multidrop target.
 
-The RP2 family exposes one Debug Port per Cortex core plus a
+The RP2040 exposes one Debug Port per Cortex core plus a
 rescue DP on a single shared SWD wire (ADIv5 multidrop, selected
 via TARGETSEL). The multidrop bring-up
 (:mod:`acrobe.protocol.swd`) already spawns one
@@ -11,7 +11,7 @@ with one :class:`CortexMDebuggable` per core.
 Discovery hooks on :class:`Dp` at precedence 500 — lower than
 the generic :func:`arm_soc_probe` at 10000, higher than the
 chip-specific MCU explorers. The PartId match is a constant
-compare against the RP2 family TPARTNO (0x1002 / 0x0004); no
+compare against the RP2040 TPARTNO (0x1002); no
 bus reads needed. Once matched, the probe walks the parent
 :class:`swd.Interface` for sibling :class:`SwDp` children and
 claims them all, so the generic factory does not refire on
@@ -63,12 +63,10 @@ from .soc import ArmSocTarget
 
 
 # (TPARTNO, family-name) for chips whose multidrop layout this
-# module understands. RP2350 is included pre-emptively — the
-# multidrop shape is identical, TPARTNO is the only thing that
-# differs between the families.
+# module understands. RP2350 is not one of them: it has a single
+# DPv3 with both cores behind it as APs — see ``rp2350_swd``.
 RP2_FAMILIES = {
     0x1002: "rp2040",
-    0x0004: "rp2350",
 }
 
 
@@ -134,7 +132,7 @@ async def rp2040_exit_xip_via_puppet(puppet: Puppet) -> None:
 
 
 class Rp2040SwdTarget(ArmSocTarget):
-    """RP2040 / RP2350 run-control target accessed via SWD multidrop.
+    """RP2040 run-control target accessed via SWD multidrop.
 
     Holds one :class:`CortexMDebuggable` per core DP. Exposes
     ``spi`` as an on-demand child: summon it (via
@@ -192,7 +190,7 @@ class Rp2040SwdTarget(ArmSocTarget):
 
 
 def _rp2_family(partid: PartId) -> str | None:
-    """Return the family name (``"rp2040"`` / ``"rp2350"``) if
+    """Return the family name (``"rp2040"``) if
     ``partid`` matches a known RP2 chip; ``None`` otherwise.
     Compares the JEDEC + TPARTNO fields only — TINSTANCE
     (encoded in PartId.revision) varies per DP."""
