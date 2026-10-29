@@ -363,9 +363,10 @@ class Scs(MemoryMappedComponent):
         return await self.reg_read(self.DFSR_OFFSET)
 
     async def enable_debug(self) -> None:
-        """Set DHCSR.C_DEBUGEN (debug enabled, core not halted)."""
-        await self.reg_write(self.DHCSR_OFFSET,
-                             self.DHCSR_KEY | self.DHCSR_C_DEBUGEN)
+        """Set DHCSR.C_DEBUGEN, leaving the other control bits as they
+        are. A plain write of KEY | C_DEBUGEN would also clear C_HALT,
+        resuming a core that's already halted."""
+        await self.dhcsr_modify(self.DHCSR_C_DEBUGEN, 0)
 
     async def disable_debug(self) -> None:
         """Clear DHCSR.C_DEBUGEN.
@@ -507,28 +508,47 @@ class Scs(MemoryMappedComponent):
 
     async def cpu_reset(self, *, poll_interval: float = 0.01,
                         max_polls: int = 100) -> None:
-        """Trigger SYSRESETREQ and wait for the core to clear
-        DHCSR.S_RESET_ST.
+        """Trigger SYSRESETREQ and wait for the reset to happen and
+        complete.
+
+        DHCSR.S_RESET_ST is sticky — "reset since the last DHCSR
+        read" — so a read that lands before the reset takes effect
+        returns 0 too. Wait to see it set (the reset happened), then
+        clear (the core left reset); a stale value from an earlier
+        reset is drained by a read before the request. Returning
+        early would let a caller clear the reset catch before the
+        reset, leaving the core running instead of halted.
 
         Bus access often fails transiently while the system is
-        resetting; up to `max_polls` `DpAccessFailure`s are
-        absorbed before re-raising. Set `set_reset_catch(True)`
-        beforehand if the caller wants the core to come up
-        halted."""
+        resetting; up to `max_polls` consecutive `DpAccessFailure`s
+        are absorbed before re-raising. If S_RESET_ST is never seen
+        within `max_polls` polls, logs a warning and returns. Set
+        `set_reset_catch(True)` beforehand if the caller wants the
+        core to come up halted."""
+        await self.read_dhcsr()
         await asyncio.gather(
             self.reg_write(self.DFSR_OFFSET, self.DFSR_CLEAR),
             self.reg_write(self.AIRCR_OFFSET,
                            self.AIRCR_KEY | self.AIRCR_SYSRESETREQ),
         )
         errs = 0
+        polls = 0
+        seen_reset = False
         while True:
             try:
                 dhcsr = await self.read_dhcsr()
                 errs = 0
-                if not (dhcsr & self.DHCSR_S_RESET_ST):
+                if dhcsr & self.DHCSR_S_RESET_ST:
+                    seen_reset = True
+                elif seen_reset:
                     return
             except DpAccessFailure:
                 errs += 1
                 if errs > max_polls:
                     raise
+            polls += 1
+            if not seen_reset and polls > max_polls:
+                self.logger.warning(
+                    "SYSRESETREQ: DHCSR.S_RESET_ST never set")
+                return
             await asyncio.sleep(poll_interval)
