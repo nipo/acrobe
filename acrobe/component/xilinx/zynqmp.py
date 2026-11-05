@@ -1,4 +1,4 @@
-from ...protocol.jtag import Tap, Chain, Instruction
+from ...protocol.jtag import Tap, Chain, Dr, Instruction
 from ...part_id import PartId
 from ..arm.jtag_dp import JtagDpTap
 from .series7 import Series7
@@ -68,9 +68,13 @@ class ZynqMp(Series7):
     routed through the PS half of the IR.
 
     The ARM DAP slot sits immediately TDO-side of this TAP, with a
-    4-bit IR. Depending on the chip state, it is either the actual
-    ARM JTAG-DP or a placeholder TAP that never answers with an
-    IDCODE. Either way, it is claimed as gated by this TAP.
+    4-bit IR. Depending on JTAG_CTRL, it is either the actual ARM
+    JTAG-DP or a placeholder TAP that never answers with an IDCODE.
+    Either way, it is claimed as gated by this TAP.
+
+    On start, JTAG_CTRL is set to connect both the PL TAP and the DAP
+    unless the `attach_dap=false` option is given, in which case it
+    is left untouched.
     """
 
     irlen = 12
@@ -79,7 +83,10 @@ class ZynqMp(Series7):
 
     USER_IR = [_pl(op) for op in Series7.USER_IR]
 
+    JTAG_CTRL_DR = Dr(32)
+
     IDCODE = Instruction(0x249, "DEVICE_ID")
+    IR_JTAG_CTRL = Instruction(0x83f, "JTAG_CTRL_DR")
     IR_USERCODE = Instruction(_pl(0x08), "USER_CODE")
     IR_ISC_NOP = Instruction(_pl(0x14), None)
     IR_JPROGRAM = Instruction(_pl(0x0b), "ISC_DEFAULT")
@@ -88,29 +95,75 @@ class ZynqMp(Series7):
     IR_CFG_OUT = Instruction(_pl(0x04), "CONFIG")
 
     DAP_IRLEN = 4
+    # Without the PL bit, the PL half of the IR captures neither INIT
+    # nor DONE.
+    JTAG_CTRL_PL = 0x1
+    JTAG_CTRL_DAP = 0x2
 
     def __init__(self, idcode, **kw):
         name = "ZynqMP-" + _PARTS.get(
             int(PartId.from_idcode(idcode).drop_revision()),
             f"0x{idcode:08x}")
         super().__init__(idcode=idcode, name=name, **kw)
+        self.attach_dap = True
 
-    async def post_tlr(self):
+    def option_set(self, key, value):
+        if key == "attach_dap":
+            if value not in ("true", "false"):
+                raise ValueError(
+                    f"{self.name}: attach_dap expects true or false,"
+                    f" got {value!r}")
+            self.attach_dap = value == "true"
+
+    async def start(self):
+        if self.attach_dap:
+            await self.dap_attach()
+        await super().start()
+
+    def dap_slot(self):
+        """TAP currently in the DAP slot, or None."""
         chain = self.parent_of_class(Chain)
-        my_ctx = chain.context(self)
-        expected_ir_pre = my_ctx.ir_pre - self.DAP_IRLEN
+        expected_ir_pre = chain.context(self).ir_pre - self.DAP_IRLEN
         for tap in chain.children:
             if tap is self:
                 continue
             ctx = chain.context(tap)
             if not ctx.enabled or ctx.ir_pre != expected_ir_pre:
                 continue
-            if ctx.controller is not None:
-                continue
             if tap.irlen != self.DAP_IRLEN:
                 continue
             if tap.idcode is not None and not isinstance(tap, JtagDpTap):
                 continue
-            self.logger.note("Claiming %s as DAP slot", tap.name)
-            chain.tap_set_controller(tap, self)
+            return tap
+        return None
+
+    async def dap_attach(self):
+        """Connect the PL TAP and the ARM DAP through JTAG_CTRL.
+        JTAG_CTRL survives TAP resets, but changes only take effect
+        on the next one, so the chain is refreshed if it changed."""
+        value = self.JTAG_CTRL_PL | self.JTAG_CTRL_DAP
+        previous = await self.IR_JTAG_CTRL(value, read_tdo=True)
+        await self.run(100)
+        if int(previous) & value == value:
             return
+        placeholder = self.dap_slot()
+        if isinstance(placeholder, JtagDpTap):
+            placeholder = None
+        chain = self.parent_of_class(Chain)
+        await chain.tlr_and_refresh()
+        if not isinstance(self.dap_slot(), JtagDpTap):
+            self.logger.warning(
+                "ARM DAP did not join the chain after JTAG_CTRL write")
+            return
+        if placeholder is not None:
+            await chain.tap_remove(placeholder)
+
+    async def post_tlr(self):
+        tap = self.dap_slot()
+        if tap is None:
+            return
+        chain = self.parent_of_class(Chain)
+        if chain.context(tap).controller is not None:
+            return
+        self.logger.note("Claiming %s as DAP slot", tap.name)
+        chain.tap_set_controller(tap, self)
