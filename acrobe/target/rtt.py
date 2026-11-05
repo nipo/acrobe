@@ -587,8 +587,8 @@ class Rtt(SerialPort):
         rdoff_fut = self.ram.bus.mem_write(
             self.__up_desc_rdoff_addr, struct.pack("<I", wroff))
 
-        data = b"".join([await f for f in data_futs])
-        await rdoff_fut
+        *chunks, _ = await asyncio.gather(*data_futs, rdoff_fut)
+        data = b"".join(chunks)
 
         self.__rx_queue.extend(data)
         self.__up_buf_rdoff = wroff
