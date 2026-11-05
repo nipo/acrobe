@@ -799,6 +799,30 @@ class TestTlrRefresh:
         assert chain.context(b).ir_pre == 4
 
     @pytest.mark.asyncio
+    async def test_refresh_grow_before_existing(self):
+        """A new TAP shows up TDO-side of an existing one: the
+        existing TAP ends up right after it, not shifted twice."""
+        post_layout = [(0x11111111, 4), (0x22222223, 5)]
+        reset_dr = self._build_reset_dr(post_layout)
+        captured_ir = self._build_capture_ir([il for _, il in post_layout])
+        bypass_dr = BitString(0, len(post_layout))
+        scripts = [
+            self._shift_discover_payload(reset_dr),
+            self._shift_discover_payload(captured_ir),
+            self._shift_discover_payload(bypass_dr),
+        ]
+        iface = self._scripted_iface(scripts)
+        chain = _make_chain(iface)
+        b = chain.tap_add(0x22222223, irlen=5)
+        await chain.tlr_and_refresh()
+        a = next(t for t in chain.children if t is not b)
+        assert int(a.idcode) == 0x11111111
+        assert (chain.context(a).ir_pre, chain.context(a).dr_pre) == (0, 0)
+        assert (chain.context(b).ir_pre, chain.context(b).dr_pre) == (4, 1)
+        assert chain.context(b).ir_post == 0
+        assert chain.total_irlen == 9
+
+    @pytest.mark.asyncio
     async def test_refresh_ambiguity_raises(self):
         """One TAP with two equally-plausible new slots: fail hard
         rather than silently pick the first."""

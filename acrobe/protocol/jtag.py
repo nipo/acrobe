@@ -1256,21 +1256,17 @@ class Chain(Batcher, Node):
                     if self.contexts[t].enabled]:
             self.tap_detach(tap)
 
-        # Reattach claimed TAPs (preserves identity) at new slot
-        # geometry. Process in chain order so geometry updates apply
-        # cleanly.
-        for slot_idx in sorted(claimed):
-            tap = claimed[slot_idx]
-            ir_pre, dr_pre = slot_geo[slot_idx]
-            ctx_controller = self.contexts[tap].controller
-            self.tap_reattach(tap, ir_pre, dr_pre,
-                              controller=ctx_controller)
-
-        # Create fresh TAPs for unclaimed slots.
+        # Reattach claimed TAPs (preserves identity) and create fresh
+        # TAPs for unclaimed slots, in chain order: each placement
+        # then lands past every placed TAP, and insertion geometry
+        # never shifts an already-placed one.
         for slot_idx, (idcode, irlen) in enumerate(slots):
-            if slot_idx in claimed:
-                continue
             ir_pre, dr_pre = slot_geo[slot_idx]
+            tap = claimed.get(slot_idx)
+            if tap is not None:
+                self.tap_reattach(tap, ir_pre, dr_pre,
+                                  controller=self.contexts[tap].controller)
+                continue
             tap = self.tap_insert(idcode, irlen, ir_pre, dr_pre)
             self.logger.note(
                 "Refresh: new TAP %s at slot %d (irlen=%d)",
