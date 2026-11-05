@@ -836,6 +836,10 @@ class Chain(Batcher, Node):
 
         cutoffs = [i for i in range(captured_ir_length)
                    if int(captured_ir[i:i + 2]) == 1]
+        if not cutoffs or cutoffs[0] != 0:
+            raise ValueError(
+                f"Captured IR {captured_ir!r} does not start with the"
+                f" mandatory 01 pattern: TDO-side TAP is not compliant")
         cutoffs.append(captured_ir_length)
 
         segments = [b - a for a, b in zip(cutoffs, cutoffs[1:])]

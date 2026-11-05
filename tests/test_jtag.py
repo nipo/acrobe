@@ -906,6 +906,8 @@ class ChainSimulator(JtagInterface):
     """Simulates a JTAG chain for testing Chain.discover().
 
     Models a chain of devices with known IDCODEs and IR lengths.
+    Devices are `(idcode, irlen)` or `(idcode, irlen, ir_capture)`
+    tuples; an idcode of None models a TAP resetting to BYPASS.
     Handles Reset, Capture-DR/IR, and Shift operations with proper
     shift register behavior.
     """
@@ -931,7 +933,10 @@ class ChainSimulator(JtagInterface):
                     self._reg_len = len(self.devices)
                 else:
                     val, pos = 0, 0
-                    for idcode, _ in self.devices:
+                    for idcode, *_ in self.devices:
+                        if idcode is None:
+                            pos += 1
+                            continue
                         val |= idcode << pos
                         pos += 32
                     self._reg_val = val
@@ -939,8 +944,8 @@ class ChainSimulator(JtagInterface):
             elif isinstance(op, CaptureIr):
                 self._in_ir = True
                 val, pos = 0, 0
-                for _, irlen in self.devices:
-                    val |= 1 << pos
+                for _, irlen, *capture in self.devices:
+                    val |= (capture[0] if capture else 1) << pos
                     pos += irlen
                 self._reg_val = val
                 self._reg_len = pos
@@ -1083,3 +1088,11 @@ class TestChainDiscover:
         chain = _make_chain(StuckHigh())
         with pytest.raises(OpenChain, match="stuck high"):
             await chain.discover()
+
+    @pytest.mark.asyncio
+    async def test_non_compliant_ir_capture_rejected(self):
+        sim = ChainSimulator([(None, 4, 0x0), (0x24001093, 6)])
+        chain = _make_chain(sim)
+        with pytest.raises(ValueError, match="01 pattern"):
+            await chain.discover()
+
