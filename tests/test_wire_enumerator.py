@@ -135,6 +135,17 @@ async def test_wire_rejects_unknown_server(remote_server_app, tmp_path):
             await local.child_summon("wire", "no-such-server")
 
 
+@pytest.mark.asyncio
+async def test_wire_root_stops_without_enumerator_warning(remote_server_app,
+                                                         tmp_path, caplog):
+    async with TestServer(remote_server_app) as server:
+        local = await _make_local_root(str(server.make_url("/")), tmp_path)
+        await local.child_summon("wire")
+        await local.stop_tree()
+    assert not any("failed to close" in r.getMessage()
+                   for r in caplog.records)
+
+
 def test_configuration_returns_empty_section_when_file_absent(tmp_path):
     cfg = Configuration(path=tmp_path / "missing.conf")
     assert cfg.section("wire") == {}

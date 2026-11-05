@@ -56,6 +56,9 @@ class WireEnumerator:
         if not hw_root.has_child("wire"):
             hw_root.child_add(WireNamespace(self.__configuration))
 
+    async def close(self):
+        pass
+
 
 class WireNamespace(Node):
     """Top of the `wire/` subtree. Children are configured servers."""
