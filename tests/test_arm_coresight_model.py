@@ -204,6 +204,32 @@ class TestMetadataRead:
         md = await ComponentIds.read(bus, 0)
         assert md.partid.part_no == 0xFFF
 
+    @pytest.mark.asyncio
+    async def test_faulting_component_retrieves_every_failure(self):
+        """A faulting component fails every ID read; the first error
+        propagates and the others must not be reported as
+        never-retrieved future exceptions."""
+        import asyncio
+        import gc
+
+        class FaultingBus:
+            def read32(self, addr):
+                future = asyncio.get_running_loop().create_future()
+                future.set_exception(RuntimeError(f"fault at {addr:#x}"))
+                return future
+
+        loop = asyncio.get_running_loop()
+        reported = []
+        previous = loop.get_exception_handler()
+        loop.set_exception_handler(lambda loop, ctx: reported.append(ctx))
+        try:
+            with pytest.raises(RuntimeError, match="fault"):
+                await ComponentIds.read(FaultingBus(), 0x1000)
+            gc.collect()
+        finally:
+            loop.set_exception_handler(previous)
+        assert reported == []
+
 
 # -- Discovery and registry precedence ------------------------------
 

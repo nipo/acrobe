@@ -111,22 +111,23 @@ class ComponentIds:
             MemoryMappedComponent.DEVTYPE,
         )
 
-        value_fut = {a: bus.read32(base + a) for a in sorted(addrs)}
-        p0 = await value_fut[MemoryMappedComponent.PIDR0]
-        p1 = await value_fut[MemoryMappedComponent.PIDR1]
-        p2 = await value_fut[MemoryMappedComponent.PIDR2]
-        p3 = await value_fut[MemoryMappedComponent.PIDR3]
-        p4 = await value_fut[MemoryMappedComponent.PIDR4]
-        _p5 = await value_fut[MemoryMappedComponent.PIDR5]
-        _p6 = await value_fut[MemoryMappedComponent.PIDR6]
-        _p7 = await value_fut[MemoryMappedComponent.PIDR7]
-        c0 = await value_fut[MemoryMappedComponent.CIDR0]
-        c1 = await value_fut[MemoryMappedComponent.CIDR1]
-        c2 = await value_fut[MemoryMappedComponent.CIDR2]
-        c3 = await value_fut[MemoryMappedComponent.CIDR3]
-        devarch_raw = await value_fut[MemoryMappedComponent.DEVARCH]
-        devid_raw = await value_fut[MemoryMappedComponent.DEVID]
-        devtype_raw = await value_fut[MemoryMappedComponent.DEVTYPE]
+        # gather() retrieves the exceptions of the reads failing
+        # after the first one: a faulting component fails them all.
+        order = sorted(addrs)
+        values = dict(zip(order, await asyncio.gather(
+            *(bus.read32(base + a) for a in order))))
+        p0 = values[MemoryMappedComponent.PIDR0]
+        p1 = values[MemoryMappedComponent.PIDR1]
+        p2 = values[MemoryMappedComponent.PIDR2]
+        p3 = values[MemoryMappedComponent.PIDR3]
+        p4 = values[MemoryMappedComponent.PIDR4]
+        c0 = values[MemoryMappedComponent.CIDR0]
+        c1 = values[MemoryMappedComponent.CIDR1]
+        c2 = values[MemoryMappedComponent.CIDR2]
+        c3 = values[MemoryMappedComponent.CIDR3]
+        devarch_raw = values[MemoryMappedComponent.DEVARCH]
+        devid_raw = values[MemoryMappedComponent.DEVID]
+        devtype_raw = values[MemoryMappedComponent.DEVTYPE]
 
         # Validate CIDR preamble: 0xB1_05_xx_0D spread across the
         # low byte of each word. PRMBL_1 (CIDR1[3:0]) is always 0.
