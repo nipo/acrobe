@@ -113,9 +113,7 @@ async def _spi(tap):
 
     idcode_masked = tap.idcode & 0x0FFFFFFF
     fw_path = Path(__file__).parent / "fw" / f"{idcode_masked:#010x}_jtag_spi.bit.gz"
-    print(fw_path)
     if not fw_path.exists():
-        print("nope")
         raise _NoMatch("spi firmware", f"0x{idcode_masked:08x}")
     leaf = FileNode(fw_path.name, str(fw_path))
     await leaf.start()
