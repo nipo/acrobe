@@ -1096,3 +1096,29 @@ class TestChainDiscover:
         with pytest.raises(ValueError, match="01 pattern"):
             await chain.discover()
 
+
+class TestZynqMpDiscover:
+    """Zynq UltraScale+: anonymous 4-bit DAP slot TDO-side of the
+    12-bit PS+PL TAP, whose IR capture splits into two 01-prefixed
+    6-bit halves."""
+
+    @staticmethod
+    def _devices():
+        return [(None, 4), (0x24738093, 12, 0x041)]
+
+    @pytest.mark.asyncio
+    async def test_dap_placeholder(self):
+        from acrobe.component.xilinx.zynqmp import ZynqMp
+        sim = ChainSimulator(self._devices())
+        chain = _make_chain(sim)
+        await chain.discover()
+        for tap in list(chain.children):
+            await tap.post_tlr()
+
+        dap, zu = chain.children
+        assert dap.idcode is None
+        assert dap.irlen == 4
+        assert isinstance(zu, ZynqMp)
+        assert zu.name == "ZynqMP-ZU9"
+        assert zu.irlen == 12
+        assert chain.context(dap).controller is zu
