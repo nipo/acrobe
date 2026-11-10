@@ -310,8 +310,8 @@ class Tap(Batcher, Node, InstructionRegistry):
 
     The Tap holds no chain geometry and no reference to the underlying
     JTAG interface — its only collaborator is its direct parent. The
-    parent owns geometry, current_ir caching, and translation to
-    bit-level (or AJI, or whatever else) ops.
+    parent owns geometry and translation to bit-level (or AJI, or
+    whatever else) ops.
     """
 
     irlen = None
@@ -553,9 +553,7 @@ class OpenChain(Exception):
 class ChainContext:
     """Per-tap state held by Chain.
 
-    Stores the geometry of a TAP within the chain (IR/DR padding) and
-    a cached `current_ir` so redundant IR shifts can be elided across
-    flushes.
+    Stores the geometry of a TAP within the chain (IR/DR padding).
 
     `enabled` distinguishes a TAP that is currently part of the JTAG
     scan chain from one that has been detached. A detached TAP stays
@@ -574,7 +572,7 @@ class ChainContext:
     """
 
     __slots__ = ("tap", "ir_pre", "ir_post", "dr_pre", "dr_post",
-                 "current_ir", "enabled", "controller", "gated")
+                 "enabled", "controller", "gated")
 
     def __init__(self, tap, ir_pre=0, dr_pre=0, ir_post=0, dr_post=0,
                  enabled=True, controller=None):
@@ -583,7 +581,6 @@ class ChainContext:
         self.ir_post = ir_post
         self.dr_pre = dr_pre
         self.dr_post = dr_post
-        self.current_ir = None
         self.enabled = enabled
         self.controller = controller
         self.gated = []
@@ -612,10 +609,12 @@ class Chain(Batcher, Node):
     inner op into bit-level ops (`CaptureIr`, `CaptureDr`, `Shift`,
     `Run`) posted to its own parent — a `JtagInterface`.
 
-    Tracks `current_ir` per tap across flushes so redundant IR shifts
-    can be elided. When any IR shift happens, the OTHER taps' IRs are
-    loaded with all-1s (BYPASS) by construction; we update their
-    cached `current_ir` accordingly.
+    Every op carrying an instruction shifts IR, the other taps getting
+    BYPASS: the chain does not track instructions. The JTAG interface
+    below may be shared with other parties, which may change them
+    between transactions, and a batch may span several transactions.
+    Interfaces keep an instruction and the DR scan following it in
+    one transaction.
     """
 
     def __init__(self, name="chain"):
@@ -907,10 +906,7 @@ class Chain(Batcher, Node):
         Geometry of any tap already at `ir_pre` (or beyond) is shifted
         by `irlen` IR bits / 1 DR bit; taps before the insertion point
         keep their `(ir_pre, dr_pre)` but gain `irlen` / 1 bit of
-        post-padding. Existing taps' cached `current_ir` values are
-        preserved — insertion is a software-side topology update; the
-        hardware IR registers of the already-present taps are not
-        touched, so the cache still reflects reality.
+        post-padding.
 
         If `controller` is given, the new TAP is recorded as gated by
         it (used by TLR refresh to know which Taps to expect back when
@@ -984,7 +980,6 @@ class Chain(Batcher, Node):
             return  # idempotent
         self.__apply_removal_geometry(ctx, tap.irlen)
         ctx.enabled = False
-        ctx.current_ir = None
 
     async def tap_remove(self, tap):
         """Permanently remove a TAP from the chain.
@@ -992,10 +987,6 @@ class Chain(Batcher, Node):
         Geometry of the remaining taps is updated and the removed
         Tap's subtree is stopped and detached via ``child_remove``.
         Controller / gated links are cleared.
-
-        Cached `current_ir` on the remaining taps is preserved — the
-        hardware IR contents of the taps still in the chain are
-        unchanged.
         """
         ctx = self.contexts.pop(tap)
         if ctx.enabled:
@@ -1330,20 +1321,18 @@ class Chain(Batcher, Node):
                                      BitString(bypass_val, tap.irlen),
                                      ctx.ir_post)
                 shift_future = self.parent.post(Shift(tdi, read_tdo=True))
-                self.__invalidate_ir_cache_for_shift(tap, bypass_val)
                 resolutions.append(
                     (top_future, shift_future, (ctx.ir_pre, tap.irlen)))
                 last_anchor = shift_future
 
             elif isinstance(op, _TapShift):
                 ir_done = None
-                if op.ir_value is not None and op.ir_value != ctx.current_ir:
+                if op.ir_value is not None:
                     ir_tdi = self.__pad_with(self.__pad_ones, ctx.ir_pre,
                                             BitString(op.ir_value, tap.irlen),
                                             ctx.ir_post)
                     self.parent.post(CaptureIr())
                     ir_done = self.parent.post(Shift(ir_tdi, read_tdo=False))
-                    self.__invalidate_ir_cache_for_shift(tap, op.ir_value)
 
                 # pre_dr_run: idle TCKs in RTI before DR selection.
                 # Issued unconditionally so the cycles still happen
@@ -1438,17 +1427,6 @@ class Chain(Batcher, Node):
                     top_future.set_result(value)
                 else:
                     top_future.set_result(value[offset:offset + length])
-
-    def __invalidate_ir_cache_for_shift(self, tap, new_ir):
-        """An IR shift just happened: this tap loaded `new_ir`, all
-        others were padded with all-1s and now hold BYPASS."""
-        target_ctx = self.contexts.get(tap)
-        if target_ctx is not None:
-            target_ctx.current_ir = new_ir
-        for other_tap, other_ctx in self.contexts.items():
-            if other_tap is tap:
-                continue
-            other_ctx.current_ir = (1 << other_tap.irlen) - 1
 
     async def child_spawn(self, name):
         """Delegate to single TAP when chain has exactly one device."""

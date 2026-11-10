@@ -183,8 +183,9 @@ class TestTapShift:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_ir_tracking(self):
-        """IR shift is only emitted when IR changes (across batches)."""
+    async def test_ir_every_instruction(self):
+        """IR is shifted for every instruction, the same one again
+        included: other parties may change it between batches."""
         class MyTap(Tap):
             REG_A = Dr(length=8)
             REG_B = Dr(length=8)
@@ -198,15 +199,15 @@ class TestTapShift:
         capture_ir_count_1 = sum(1 for op in iface.ops if isinstance(op, CaptureIr))
         assert capture_ir_count_1 == 1
 
-        # Same instruction again - no new CaptureIr
+        # Same instruction again - shifted again
         await tap.INST_A(0)
         capture_ir_count_2 = sum(1 for op in iface.ops if isinstance(op, CaptureIr))
-        assert capture_ir_count_2 == 1
+        assert capture_ir_count_2 == 2
 
         # Different instruction - new CaptureIr
         await tap.INST_B(0)
         capture_ir_count_3 = sum(1 for op in iface.ops if isinstance(op, CaptureIr))
-        assert capture_ir_count_3 == 2
+        assert capture_ir_count_3 == 3
 
     @pytest.mark.asyncio
     async def test_ir_data_format(self):
@@ -329,24 +330,6 @@ class TestIrStatus:
         assert len(shifts) == 1
         assert shifts[0].read_tdo is True
         assert int(shifts[0].tdi) == 0x3f  # 6 bits all ones
-
-    @pytest.mark.asyncio
-    async def test_ir_status_updates_current_ir(self):
-        """After ir_status(), the tap's cached IR is BYPASS (all 1s)."""
-        class MyTap(Tap):
-            DATA_REG = Dr(length=8)
-            DATA = Instruction(0x05, "DATA_REG")
-
-        iface = MockInterface()
-        chain = _make_chain(iface)
-        tap = chain.tap_add(0, irlen=6, base=MyTap)
-
-        await tap.DATA(0)
-        assert chain.context(tap).current_ir == 0x05
-
-        iface.ops.clear()
-        await tap.ir_status()
-        assert chain.context(tap).current_ir == 0x3f  # all ones, BYPASS
 
     @pytest.mark.asyncio
     async def test_ir_status_with_chain_padding(self):
@@ -521,19 +504,6 @@ class TestChain:
         assert (cc.ir_pre, cc.ir_post) == (9, 0)
         assert (cc.dr_pre, cc.dr_post) == (2, 0)
 
-    def test_tap_insert_preserves_ir_cache(self):
-        """tap_insert is a software topology update — existing taps'
-        hardware IR registers don't change, so cached current_ir
-        stays valid."""
-        chain = Chain()
-        a = chain.tap_add(0x11111111, irlen=4)
-        b = chain.tap_add(0x22222222, irlen=4)
-        chain.context(a).current_ir = 0xa
-        chain.context(b).current_ir = 0x5
-        chain.tap_insert(0x33333333, 6, ir_pre=4, dr_pre=1)
-        assert chain.context(a).current_ir == 0xa
-        assert chain.context(b).current_ir == 0x5
-
     @pytest.mark.asyncio
     async def test_tap_remove(self):
         """Removing a middle tap pulls later taps inward and drops them
@@ -553,19 +523,6 @@ class TestChain:
         assert (ca.dr_pre, ca.dr_post) == (0, 1)
         assert (cc.ir_pre, cc.ir_post) == (4, 0)
         assert (cc.dr_pre, cc.dr_post) == (1, 0)
-
-    @pytest.mark.asyncio
-    async def test_tap_remove_preserves_ir_cache(self):
-        """Removal is a software-side update; the hardware IR of any
-        remaining tap is unchanged, so its cache stays valid."""
-        iface = MockInterface()
-        chain = _make_chain(iface)
-        a = chain.tap_add(0x11111111, irlen=4)
-        b = chain.tap_add(0x22222222, irlen=4)
-        chain.context(a).current_ir = 0xa
-        await chain.tap_remove(b)
-        assert chain.context(a).current_ir == 0xa
-
 
 class TestDetachReattach:
     def test_detach_shrinks_geometry(self):
