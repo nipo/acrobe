@@ -737,16 +737,20 @@ class Chain(Batcher, Node):
 
     # --- Discovery (bit-level, posts directly to parent) ---
 
-    async def shift_discover(self, max_length=512, shift_in=None):
-        """Probe a register's length by shifting a marker through.
+    DISCOVER_MARKER = 0xc05a5a03
 
-        Shifts a 32-bit marker followed by zeros. The marker's
-        position in TDO reveals the register length.
-        """
-        marker = 0xc05a5a03
-        tdi = BitString(marker, 32) + BitString(0, max_length + 4)
-        shift = Shift(tdi, read_tdo=True)
-        captured = await self.parent.post(shift)
+    def post_discover(self, max_length=512, fill=0):
+        """Posts a scan probing a register's length: a 32-bit marker,
+        then `max_length` + 4 bits of `fill`, 0 or 1. Returns the
+        future TDO, for :meth:`discovered`. The register holds `fill`
+        bits afterwards."""
+        tdi = (BitString(self.DISCOVER_MARKER, 32)
+               + BitString(-1 if fill else 0, max_length + 4))
+        return self.parent.post(Shift(tdi, read_tdo=True))
+
+    def discovered(self, captured, max_length=512):
+        """The register a :meth:`post_discover` scan captured: the TDO
+        bits before the marker."""
         tdo = captured[:max_length + 32]
 
         if not int(tdo):
@@ -755,20 +759,10 @@ class Chain(Batcher, Node):
         if tdo == BitString(-1, len(tdo)):
             raise OpenChain("TDO stuck high")
 
-        length = int(math.log2(int(tdo))) + 1
-        register = tdo[:length - 32]
-        rx_marker = int(tdo[length - 32:length])
-
-        if rx_marker != marker:
-            raise OpenChain("TDO changed but marker not received back")
-
-        if shift_in is not None:
-            back = BitString(shift_in, len(register))
-            shift_back = Shift(back, read_tdo=False)
-            await self.parent.post(shift_back)
-            await self.parent.post(Run(1))
-
-        return register
+        for length in range(max_length + 1):
+            if int(tdo[length:length + 32]) == self.DISCOVER_MARKER:
+                return tdo[:length]
+        raise OpenChain("TDO changed but marker not received back")
 
     async def discover(self):
         """Blind discovery of the JTAG chain.
@@ -803,18 +797,27 @@ class Chain(Batcher, Node):
         :meth:`tlr_and_refresh`.
         """
         self.logger.trace("Probing chain in reset state...")
+        # One batch: the scans rely on the reset state, then on the
+        # BYPASS loaded by the IR scan, which other parties of the JTAG
+        # interface may change between transactions. Ones after the IR
+        # marker load BYPASS in every TAP.
         self.parent.post(CaptureDr())
-        reset_dr = await self.shift_discover()
-        self.logger.trace("DR after reset: %d bits", len(reset_dr))
-
+        reset_scan = self.post_discover()
         self.parent.post(CaptureIr())
-        captured_ir = await self.shift_discover(shift_in=-1)
+        ir_scan = self.post_discover(fill=1)
+        self.parent.post(CaptureDr())
+        bypass_scan = self.post_discover()
+        self.parent.post(Run(1))
+
+        reset_dr = self.discovered(await reset_scan)
+        self.logger.trace("DR after reset: %d bits", len(reset_dr))
+        captured_ir = self.discovered(await ir_scan)
         captured_ir_length = len(captured_ir)
         self.logger.trace("IR captured: %d bits", captured_ir_length)
-
-        self.parent.post(CaptureDr())
-        bypass_dr = await self.shift_discover(
-            max_length=captured_ir_length // 2)
+        bypass_dr = self.discovered(await bypass_scan)
+        if len(bypass_dr) > captured_ir_length // 2:
+            raise OpenChain(f"{len(bypass_dr)} BYPASS bits for"
+                            f" {captured_ir_length} IR bits")
         device_count = len(bypass_dr)
         self.logger.trace("BYPASS DR: %d devices", device_count)
 

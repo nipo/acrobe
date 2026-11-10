@@ -662,7 +662,7 @@ class TestTlrRefresh:
 
     @classmethod
     def _shift_discover_payload(cls, register: BitString):
-        """Build the TDO that ``Chain.shift_discover`` expects to
+        """Build the TDO that ``Chain.discovered`` expects to
         see when probing a register of bit-width ``len(register)``.
 
         The probe sends ``marker(32) + zeros(max_length+4)`` (548
